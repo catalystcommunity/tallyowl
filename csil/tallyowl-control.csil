@@ -1,0 +1,499 @@
+;;; TallyOwl control and query contract.
+;;;
+;;; The dashboard uses this specification. An operator tool uses it. The
+;;; Grafana datasource plugin uses it (D42). TallyOwl exposes no other query
+;;; surface and emulates no other product's query API.
+;;;
+;;; The query algebra is a typed tree, not a text language. TallyOwl never
+;;; parses a query string from a browser. See docs/QUERY.md.
+
+include "types/common.csil"
+
+options {
+    package: "tallyowl-control",
+    version: "v1alpha1",
+    emit_packages: ["rust", "go", "typescript"],
+    package_name: "github.com/CatalystCommunity/tallyowl/clients/tallyowl-control",
+    package_version: "0.0.0",
+    decimal_mapping: "csil"
+}
+
+;; ---------------------------------------------------------------------------
+;; Expressions
+;;
+;; QUERY.md section 5 gives the permitted nodes. There is no user-defined
+;; function, no regular expression, and no arbitrary code.
+;; ---------------------------------------------------------------------------
+
+FieldRef = {
+    name: text .size (1..128),
+    ;; A name can hold more than one type. A reference selects one. A reference
+    ;; that matches several types without a selection is an error. See D20.
+    ? value_type: text .size (1..32),
+    ? origin: PropertyOrigin
+}
+
+CompareOp = "eq" / "ne" / "lt" / "le" / "gt" / "ge"
+LogicalOp = "and" / "or" / "not"
+ArithOp   = "add" / "sub" / "mul" / "div"
+
+Expression = LiteralExpr
+           / FieldExpr
+           / CompareExpr
+           / SetExpr
+           / TextExpr
+           / NullExpr
+           / LogicalExpr
+           / ArithExpr
+           / TimeExpr
+           / ConvertExpr
+
+LiteralExpr = { literal: TypedValue }
+FieldExpr   = { field: FieldRef }
+
+CompareExpr = {
+    compare: CompareOp,
+    left: Expression,
+    right: Expression
+}
+
+SetExpr = {
+    set_test: "in" / "not-in",
+    left: Expression,
+    values: [* TypedValue]
+}
+
+TextExpr = {
+    text_test: "starts-with" / "ends-with" / "contains",
+    left: Expression,
+    pattern: text .size (1..256)
+}
+
+NullExpr = {
+    null_test: "is-null" / "is-not-null",
+    operand: Expression
+}
+
+LogicalExpr = {
+    logical: LogicalOp,
+    operands: [* Expression]
+}
+
+ArithExpr = {
+    arith: ArithOp,
+    left: Expression,
+    right: Expression
+}
+
+TimeExpr = {
+    time_fn: "truncate" / "extract" / "shift",
+    operand: Expression,
+    ? interval: Interval,
+    ? part: text .size (1..32),
+    ? shift_ms: DurationMs
+}
+
+ConvertExpr = {
+    convert_to: text .size (1..32),
+    operand: Expression
+}
+
+;; ---------------------------------------------------------------------------
+;; Query tree
+;; ---------------------------------------------------------------------------
+
+TimeBasis = "occurred_at" / "received_at" / "committed_at"
+
+Interval = {
+    ? fixed_ms: DurationMs,
+    ? calendar: "hour" / "day" / "week" / "month"
+}
+
+TimeRange = {
+    range_start: Timestamp,
+    range_end: Timestamp,
+    basis: TimeBasis,
+    ? timezone: text .size (1..64)
+}
+
+Dataset = "events"
+        / "error_occurrences"
+        / "error_groups"
+        / "spans"
+        / "metric_points"
+        / "identity_edges"
+        / "campaign_touches"
+        / "conversions"
+        / "campaign_costs"
+
+MeasureKind = "count"
+            / "sum"
+            / "min"
+            / "max"
+            / "avg"
+            / "count_distinct"
+            / "count_distinct_approx"
+            / "quantile"
+            / "quantile_approx"
+            / "histogram_merge"
+            / "top_k"
+            / "top_k_approx"
+            / "rate"
+            / "increase"
+
+Measure = {
+    kind: MeasureKind,
+    ? field: FieldRef,
+    ? quantile: float,
+    ? k: uint,
+    alias: text .size (1..64)
+}
+
+Dimension = {
+    field: FieldRef,
+    alias: text .size (1..64)
+}
+
+SortKey = {
+    alias: text .size (1..64),
+    direction: "asc" / "desc"
+}
+
+QueryNode = ScanNode
+          / FilterNode
+          / ProjectNode
+          / AggregateNode
+          / SortNode
+          / LimitNode
+          / JoinNode
+          / UnionNode
+
+;;; A scan always has a time range. A scan without one is an error.
+ScanNode = {
+    scan: Dataset,
+    project_id: ProjectId,
+    range: TimeRange
+}
+
+FilterNode = {
+    filter: Expression,
+    input: QueryNode
+}
+
+ProjectNode = {
+    project_fields: [* Dimension],
+    input: QueryNode
+}
+
+AggregateNode = {
+    dimensions: [* Dimension],
+    measures: [* Measure],
+    ? interval: Interval,
+    input: QueryNode
+}
+
+SortNode = {
+    sort: [* SortKey],
+    input: QueryNode
+}
+
+LimitNode = {
+    limit: uint,
+    ? offset: uint,
+    ? cursor: bytes,
+    input: QueryNode
+}
+
+;;; A join is bounded and exact. It correlates on an exact-indexed ID. There is
+;;; no join on an arbitrary expression and no cross join.
+JoinNode = {
+    join_key: FieldRef,
+    max_rows_each_side: uint,
+    left: QueryNode,
+    right: QueryNode
+}
+
+UnionNode = {
+    union: [* QueryNode]
+}
+
+;; ---------------------------------------------------------------------------
+;; Domain operators
+;; ---------------------------------------------------------------------------
+
+CorrelationBasis = "actor" / "session" / "group"
+
+FunnelStep = {
+    name: text .size (1..128),
+    match: Expression,
+    ? exclusion: bool
+}
+
+FunnelQuery = {
+    project_id: ProjectId,
+    range: TimeRange,
+    steps: [* FunnelStep],
+    window_ms: DurationMs,
+    basis: CorrelationBasis,
+    ordered: bool,
+    ? breakdown: Dimension
+}
+
+RetentionQuery = {
+    project_id: ProjectId,
+    range: TimeRange,
+    initial: Expression,
+    returning: Expression,
+    period: "day" / "week" / "month",
+    periods: uint,
+    first_time_only: bool
+}
+
+PathQuery = {
+    project_id: ProjectId,
+    range: TimeRange,
+    anchor: Expression,
+    direction: "previous" / "next",
+    depth: uint,
+    min_frequency: uint,
+    collapse_loops: bool
+}
+
+TraceQuery = {
+    project_id: ProjectId,
+    trace_id: TraceId
+}
+
+TimelineQuery = {
+    project_id: ProjectId,
+    range: TimeRange,
+    ? actor_id: text .size (1..256),
+    ? session_id: SessionId,
+    kinds: [* TelemetryKind],
+    limit: uint,
+    ? cursor: bytes
+}
+
+;;; The operator shape is stable. Phase 8 selects the default model values, and
+;;; an operator configures them for each project. See D40.
+AttributionQuery = {
+    project_id: ProjectId,
+    range: TimeRange,
+    conversion_goal: text .size (1..128),
+    model: "first-touch" / "last-touch" / "last-non-direct" / "linear" / "position" / "decay",
+    lookback_ms: DurationMs,
+    ? touch_filter: Expression,
+    ? breakdown: Dimension
+}
+
+;; ---------------------------------------------------------------------------
+;; Query request and result
+;; ---------------------------------------------------------------------------
+
+Consistency = "committed" / "bounded-stale"
+
+QueryBudget = {
+    ? deadline_ms: DurationMs,
+    ? max_scanned_bytes: uint,
+    ? max_scanned_segments: uint,
+    ? max_rows: uint
+}
+
+QueryRequest = {
+    algebra_version: uint,
+    consistency: Consistency,
+    ? max_staleness_ms: DurationMs,
+    ? budget: QueryBudget,
+    ;; A caller must ask for a partial result. It is never the default.
+    allow_partial: bool,
+    ? comparison_range: TimeRange,
+    query: QueryNode
+      / FunnelQuery
+      / RetentionQuery
+      / PathQuery
+      / TraceQuery
+      / TimelineQuery
+      / AttributionQuery
+}
+
+Exactness = {
+    alias: text .size (1..64),
+    exact: bool,
+    ? method: text .size (1..64),
+    ? error_bound: float
+}
+
+MissingRange = {
+    tablet_id: text .size (1..64),
+    range_start: Timestamp,
+    range_end: Timestamp
+}
+
+ResultMetadata = {
+    algebra_version: uint,
+    commit_watermark: uint,
+    freshness_ms: DurationMs,
+    complete: bool,
+    ? missing: [* MissingRange],
+    exactness: [* Exactness],
+    scanned_bytes: uint,
+    scanned_segments: uint,
+    ? cold_bytes: uint,
+    tombstone_generation: uint,
+    ? applied_retention_class: RetentionClass,
+    ? warnings: [* text],
+    ? next_cursor: bytes
+}
+
+RetentionClass = "provisional" / "raw" / "detailed" / "rollup" / "audit"
+
+ResultRow = {
+    values: [* TypedValue]
+}
+
+QueryResponse = {
+    columns: [* text],
+    rows: [* ResultRow],
+    metadata: ResultMetadata
+}
+
+;; ---------------------------------------------------------------------------
+;; Alerts
+;;
+;; Evaluation is a scheduled query through this same algebra, so an alert value
+;; always matches what the dashboard shows. Grafana handles baseline and
+;; anomaly work. See D41 and docs/ALERTS.md.
+;; ---------------------------------------------------------------------------
+
+ThresholdCondition = {
+    alias: text .size (1..64),
+    compare: CompareOp,
+    value: float,
+    ? sustained_ms: DurationMs
+}
+
+AbsenceCondition = {
+    ;; Fires when the evaluation returns no rows for this long. A threshold on
+    ;; a count never fires when ingest stops, because a dead pipeline returns
+    ;; no rows rather than a low number.
+    for_ms: DurationMs
+}
+
+AlertRule = {
+    rule_id: text .size (1..64),
+    name: text .size (1..128),
+    project_id: ProjectId,
+    query: QueryRequest,
+    interval_ms: DurationMs,
+    ? threshold: ThresholdCondition,
+    ? absence: AbsenceCondition,
+    notify: [* NotificationTarget],
+    enabled: bool
+}
+
+NotificationTarget = {
+    kind: "webhook" / "csil-callback",
+    ? url: text .size (1..1024),
+    ? secret_ref: text .size (1..256)
+}
+
+AlertState = "ok" / "firing" / "no-data" / "unknown" / "silenced"
+
+AlertInstance = {
+    rule_id: text .size (1..64),
+    state: AlertState,
+    since: Timestamp,
+    ? observed_value: float,
+    ? reason: text .size (1..512)
+}
+
+;; ---------------------------------------------------------------------------
+;; Administration
+;; ---------------------------------------------------------------------------
+
+Project = {
+    project_id: ProjectId,
+    workspace_id: WorkspaceId,
+    name: text .size (1..128),          ;; display only; never on the ingest path
+    ? description: text .size (1..1024)
+}
+
+Workspace = {
+    workspace_id: WorkspaceId,
+    name: text .size (1..128)
+}
+
+ApiKeySummary = {
+    key_id: text .size (1..64),
+    project_id: ProjectId,
+    created_at: Timestamp,
+    ? expires_at: Timestamp,
+    ? last_used_at: Timestamp,
+    revoked: bool
+}
+
+DeletionTarget = {
+    project_id: ProjectId,
+    ? actor_id: text .size (1..256),
+    ? event_ids: [* EventId],
+    ? range: TimeRange
+}
+
+DeletionRequest = {
+    target: DeletionTarget,
+    reason: text .size (1..512)
+}
+
+DeletionResponse = {
+    request_id: text .size (1..64),
+    tombstone_generation: uint,
+    accepted_at: Timestamp
+}
+
+ListRequest = { ? cursor: bytes, ? limit: uint }
+WorkspaceList = { workspaces: [* Workspace], ? next_cursor: bytes }
+ProjectList = { projects: [* Project], ? next_cursor: bytes }
+ApiKeyList = { keys: [* ApiKeySummary], ? next_cursor: bytes }
+AlertRuleList = { rules: [* AlertRule], ? next_cursor: bytes }
+AlertInstanceList = { instances: [* AlertInstance], ? next_cursor: bytes }
+Empty = {}
+
+@wire-id(3)
+service TallyOwlControl {
+    ;;; Run one analytic query.
+    @wire-id(0)
+    run-query: QueryRequest -> QueryResponse / ServiceError,
+
+    ;;; List the workspaces that the session can read.
+    @wire-id(1)
+    list-workspaces: ListRequest -> WorkspaceList / ServiceError,
+
+    ;;; List the projects that the session can read.
+    @wire-id(2)
+    list-projects: ListRequest -> ProjectList / ServiceError,
+
+    ;;; List the active keys for a project.
+    @wire-id(3)
+    list-api-keys: ListRequest -> ApiKeyList / ServiceError,
+
+    ;;; Create or replace an alert rule.
+    @wire-id(4)
+    put-alert-rule: AlertRule -> AlertRule / ServiceError,
+
+    ;;; List alert rules.
+    @wire-id(5)
+    list-alert-rules: ListRequest -> AlertRuleList / ServiceError,
+
+    ;;; List current alert instances and their state.
+    @wire-id(6)
+    list-alert-instances: ListRequest -> AlertInstanceList / ServiceError,
+
+    ;;; Start an erasure. The tombstone applies immediately and stays active
+    ;;; for late arrivals until its horizon ends. See D28.
+    @wire-id(7)
+    request-deletion: DeletionRequest -> DeletionResponse / ServiceError,
+
+    ;;; Fetch the compiled collection policy for a project.
+    @wire-id(8)
+    get-policy: ListRequest -> Empty / ServiceError
+}

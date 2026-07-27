@@ -1,0 +1,171 @@
+;;; TallyOwl shared types.
+;;;
+;;; This file holds every type that more than one TallyOwl specification uses.
+;;; It declares no service and no operation. An entry specification includes it.
+;;;
+;;; Rules that this file obeys:
+;;;   - an ID travels as a value; a name never travels on the ingest path (D32);
+;;;   - one typed property namespace carries every descriptive value (D38);
+;;;   - money uses `decimal`, never `float` (QUERY.md section 4).
+
+;; ---------------------------------------------------------------------------
+;; Identifiers
+;;
+;; A UUID travels as its canonical text form. A trace ID and a span ID keep the
+;; fixed-width hexadecimal form that other tracing systems use, so a value
+;; survives propagation through a service that TallyOwl does not own.
+;; ---------------------------------------------------------------------------
+
+EventId       = text .size (36..36)     ;; UUIDv7, canonical text
+BatchId       = text .size (36..36)     ;; UUID, stable across every retry
+WorkspaceId   = text .size (36..36)
+ProjectId     = text .size (36..36)
+SourceId      = text .size (36..36)
+SessionId     = text .size (1..64)      ;; opaque, project scope (D11)
+TraceId       = text .size (32..32)     ;; 16 bytes, lowercase hexadecimal
+SpanId        = text .size (16..16)     ;; 8 bytes, lowercase hexadecimal
+
+;; Milliseconds since the Unix epoch. TallyOwl keeps three separate time facts
+;; and never collapses them. See DATA_MODEL.md section 2.
+Timestamp     = int
+DurationMs    = int
+
+;; ---------------------------------------------------------------------------
+;; Typed values and properties
+;;
+;; A property value keeps its type. TallyOwl never converts a value to text to
+;; make it fit. A query selects one type when a name holds more than one (D20).
+;; ---------------------------------------------------------------------------
+
+TypedValue = nil
+           / bool
+           / int
+           / uint
+           / float
+           / decimal
+           / text
+           / bytes
+
+;;; Where a property came from. An operator can trust a `collector` origin,
+;;; because the collector stamps it from its own configuration and refuses a
+;;; client value for a protected name. See D38.
+PropertyOrigin = "client" / "driver" / "collector"
+
+Property = {
+    key: text .size (1..64),
+    value: TypedValue,
+    origin: PropertyOrigin
+}
+
+PropertyList = [* Property]
+
+;;; A numeric observation with a unit, kept apart from a property so that a
+;;; measure never has to guess whether a value is a dimension or a number.
+Measurement = {
+    key: text .size (1..64),
+    value: float / decimal / int,
+    ? unit: text .size (1..32)
+}
+
+MeasurementList = [* Measurement]
+
+;; ---------------------------------------------------------------------------
+;; Consent
+;;
+;; Consent applies to personal data. Campaign facts that are not tied to an
+;; identified person do not need consent. See D30.
+;; ---------------------------------------------------------------------------
+
+ConsentState = "granted" / "denied" / "absent"
+
+Consent = {
+    marketing: ConsentState,
+    analytics: ConsentState,
+    ? policy_version: text .size (1..64)
+}
+
+;; ---------------------------------------------------------------------------
+;; The common envelope
+;;
+;; Every accepted item carries this envelope and one typed payload.
+;;
+;; A client never sets `workspace_id`, `project_id`, or `source_id`. The
+;; collector stamps them from the credential (D32). They appear here because
+;; the envelope is also the stored and forwarded shape, not only the client
+;; shape.
+;; ---------------------------------------------------------------------------
+
+TelemetryKind = "event"
+              / "page-view"
+              / "session-start"
+              / "session-end"
+              / "session-heartbeat"
+              / "interaction"
+              / "feature-exposure"
+              / "identify"
+              / "alias"
+              / "group"
+              / "conversion"
+              / "error"
+              / "span"
+              / "metric-point"
+              / "campaign-touch"
+              / "campaign-cost"
+
+Envelope = {
+    event_id: EventId,
+    kind: TelemetryKind,
+    schema_version: uint,
+    occurred_at: Timestamp,
+    ? observed_at: Timestamp,
+
+    ;; The collector or the head stamps these. A client value is discarded.
+    ? received_at: Timestamp,
+    ? workspace_id: WorkspaceId,
+    ? project_id: ProjectId,
+    ? source_id: SourceId,
+
+    ? sequence: uint,
+    ? release: text .size (1..128),
+    ? service_name: text .size (1..128),
+    ? request_id: text .size (1..128),
+    ? session_id: SessionId,
+    ? actor_id: text .size (1..256),
+    ? anonymous_id: text .size (1..256),
+    ? trace_id: TraceId,
+    ? span_id: SpanId,
+    ? consent: Consent,
+
+    sdk_name: text .size (1..64),
+    sdk_version: text .size (1..32),
+
+    properties: PropertyList,
+    ? measurements: MeasurementList
+}
+
+;; ---------------------------------------------------------------------------
+;; Errors
+;;
+;; A caller must be able to tell a permanent failure from a retryable one
+;; without reading a message. `retryable` carries that fact.
+;; ---------------------------------------------------------------------------
+
+ErrorCode = "invalid-argument"
+          / "unauthenticated"
+          / "permission-denied"
+          / "not-found"
+          / "already-exists"
+          / "resource-exhausted"
+          / "failed-precondition"
+          / "unavailable"
+          / "schema-unsupported"
+          / "budget-exceeded"
+          / "incomplete-result"
+          / "internal"
+
+ServiceError = {
+    code: ErrorCode,
+    message: text,
+    retryable: bool,
+    ? detail: PropertyList
+}

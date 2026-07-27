@@ -1,0 +1,192 @@
+;;; TallyOwl collector contract.
+;;;
+;;; Two hops use this specification:
+;;;   - an app driver to collector intake;
+;;;   - a collector forwarder to the head ingest gateway.
+;;;
+;;; Both hops use CSIL-RPC over TCP with TLS. Both pipeline correlated batches
+;;; on one persistent connection. An application never speaks to the head.
+;;;
+;;; The acknowledgement rule is the point of this contract. The collector
+;;; acknowledges a batch only after Corndogs durably accepts it at the
+;;; configured copy count. See DELIVERY.md and D4.
+
+include "types/common.csil"
+include "tallyowl-ingest.csil"
+
+options {
+    package: "tallyowl-collector",
+    version: "v1alpha1",
+    emit_packages: ["rust", "go", "typescript"],
+    package_name: "github.com/CatalystCommunity/tallyowl/clients/tallyowl-collector",
+    package_version: "0.0.0",
+    decimal_mapping: "csil"
+}
+
+;; ---------------------------------------------------------------------------
+;; Batches
+;;
+;; A batch keeps its ID across every retry and across a lost connection. Final
+;; storage deduplicates that ID, so a duplicate delivery gives one logical
+;; commit. See DELIVERY.md section 2.
+;;
+;; `common_properties` carries the values that repeat across every item in the
+;; batch. The driver hoists them and the collector expands them again. This is
+;; a transport encoding and it changes no query. See D38.
+;; ---------------------------------------------------------------------------
+
+Compression = "none" / "zstd"
+
+Batch = {
+    batch_id: BatchId,
+    items: [* TelemetryItem],
+    ? common_properties: PropertyList,
+    sealed_at: Timestamp,
+    ? compression: Compression
+}
+
+SubmitBatchRequest = {
+    batch: Batch,
+    ? policy_version: uint
+}
+
+;;; The receipt names the durability that the collector actually reached. It
+;;; never claims a stronger boundary than the configuration required.
+SubmitBatchResponse = {
+    batch_id: BatchId,
+    accepted: uint,
+    durable_copies: uint,
+    queued_at: Timestamp,
+    ? rejected: [* RejectedItem],
+    ? policy_version: uint
+}
+
+;; ---------------------------------------------------------------------------
+;; Collector to head
+;;
+;; The head returns a committed receipt only after the tablet satisfies its
+;; configured receipt policy. A collector completes its Corndogs task only
+;; after that receipt. See DELIVERY.md section 5.
+;; ---------------------------------------------------------------------------
+
+ReceiptPolicy = "local-one" / "local-quorum" / "remote-one" / "custom"
+
+CommitBatchRequest = {
+    batch: Batch,
+    source_id: SourceId,
+    ? attempt: uint
+}
+
+CommitBatchResponse = {
+    batch_id: BatchId,
+    accepted: uint,
+    committed_at: Timestamp,
+    satisfied_policy: ReceiptPolicy,
+    commit_watermark: uint,
+    protocol_version: uint,
+    projector_version: uint,
+    ? rejected: [* RejectedItem],
+    ? deduplicated: bool
+}
+
+;; ---------------------------------------------------------------------------
+;; Policy synchronization
+;;
+;; A collector caches the last valid policy and reports the version it applies.
+;; Invalid policy never replaces valid policy. See DESIGN.md section 7.
+;; ---------------------------------------------------------------------------
+
+RetentionClass = "provisional" / "raw" / "detailed" / "rollup" / "audit"
+
+RetentionRule = {
+    class: RetentionClass,
+    duration_ms: DurationMs,
+    ? kind: TelemetryKind          ;; a per-kind override; see D43
+}
+
+SamplingClause = {
+    mode: "keep-all" / "keep-percent" / "keep-first-n",
+    ? percent: float,
+    ? count: uint,
+    ? interval_ms: DurationMs
+}
+
+;;; A tail rule uses the query expression tree. TallyOwl defines no second
+;;; expression language. See D45. The expression travels as canonical CBOR
+;;; because the control specification owns the expression schema.
+TailRule = {
+    name: text .size (1..128),
+    expression: bytes,
+    sampling: SamplingClause
+}
+
+ProtectedKey = {
+    key: text .size (1..64),
+    origin: PropertyOrigin
+}
+
+CollectionPolicy = {
+    policy_version: uint,
+    enabled_kinds: [* TelemetryKind],
+    head_sample_rate: float,
+    ? tail_rules: [* TailRule],
+    ? tail_decision_window_ms: DurationMs,
+    ? late_span_grace_ms: DurationMs,
+    ? always_keep_expressions: [* bytes],
+    retention: [* RetentionRule],
+    protected_keys: [* ProtectedKey],
+    stamped_properties: PropertyList,
+    max_event_bytes: uint,
+    max_batch_bytes: uint,
+    max_properties: uint,
+    session_max_lifetime_ms: DurationMs,
+    ? redact_keys: [* text],
+    ? kill_switch: bool
+}
+
+FetchPolicyRequest = {
+    source_id: SourceId,
+    ? known_version: uint
+}
+
+FetchPolicyResponse = {
+    ? policy: CollectionPolicy,
+    unchanged: bool
+}
+
+;; ---------------------------------------------------------------------------
+;; Health
+;; ---------------------------------------------------------------------------
+
+CollectorHealth = {
+    role: "intake" / "forwarder" / "compatibility-receiver",
+    ready: bool,
+    queue_depth: uint,
+    oldest_task_age_ms: DurationMs,
+    quarantine_count: uint,
+    applied_policy_version: uint,
+    ;; The forwarder owns the Corndogs timeout sweep. Readiness fails when the
+    ;; sweep stops, because retry and dead-worker recovery stop with it. See D33.
+    ? last_sweep_at: Timestamp
+}
+
+HealthRequest = {}
+
+@wire-id(2)
+service TallyOwlCollector {
+    ;;; An app driver submits a batch. The response means durable acceptance.
+    @wire-id(0)
+    submit-batch: SubmitBatchRequest -> SubmitBatchResponse / ServiceError,
+
+    ;;; A forwarder submits a batch to the head for final storage.
+    @wire-id(1)
+    commit-batch: CommitBatchRequest -> CommitBatchResponse / ServiceError,
+
+    ;;; Fetch the compiled collection policy.
+    @wire-id(2)
+    fetch-policy: FetchPolicyRequest -> FetchPolicyResponse / ServiceError,
+
+    ;;; Report collector health for readiness and for operators.
+    @wire-id(3)
+    health: HealthRequest -> CollectorHealth / ServiceError
+}

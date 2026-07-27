@@ -1,0 +1,152 @@
+# Documentation language
+
+## 1. Standard
+
+Use ASD-STE100 Simplified Technical English for all technical documentation.
+Use Issue 9, dated 2025-01-15.
+
+The official standard has writing rules and a controlled dictionary. Use the
+official standard as the primary reference:
+
+<https://www.asd-ste100.org/>
+
+## 2. Project rules
+
+Apply these rules:
+
+- Use an approved dictionary word or a defined technical term.
+- Use one term for one meaning.
+- Do not use a synonym to add variation.
+- Use American English spelling.
+- Use the active voice. Use the passive voice only if the agent is not known.
+- Use simple present, simple past, or simple future tense.
+- Do not use a complex verb construction.
+- Use a verb to identify an action.
+- Write a short sentence.
+- Use a maximum of 25 words in a descriptive sentence.
+- Use a maximum of 20 words in a procedural sentence.
+- Write only one instruction in each procedural sentence.
+- Give information gradually.
+- Put only one subject in each sentence.
+- Put only one topic in each paragraph.
+- Use no more than six sentences in a paragraph.
+- Use a vertical list for complex information.
+- Do not omit necessary words.
+- Do not use a contraction.
+- Define an abbreviation at its first use.
+
+## 3. TallyOwl terms
+
+The following words are TallyOwl technical nouns:
+
+- actor ID
+- app driver
+- batch
+- browser package
+- cell
+- cold tier
+- collector
+- controller
+- durable copy
+- envelope
+- environment
+- exact index
+- fencing epoch
+- global directory
+- head
+- hot tier
+- ledger
+- locator run
+- microsegment
+- origin
+- policy generation
+- project
+- property
+- projector
+- quarantine
+- receipt
+- reference application
+- role token
+- rollup
+- segment
+- source
+- tablet
+- tombstone
+- virtual shard
+- warm tier
+- watermark
+- workspace
+
+The following words are TallyOwl technical verbs:
+
+- acknowledge
+- compact
+- enroll
+- erase
+- ingest
+- project
+- replicate
+- shard
+- stamp
+- sweep
+
+Terms that this project does not use:
+
+| Do not use | Use |
+| --- | --- |
+| adapter, backend adapter, host backend adapter, adapter library | app driver |
+| storage cell | cell |
+| tag, app tag, operator tag, attribute | property |
+| SDK, client library | app driver or browser package |
+
+Use "regional cell" where the region matters. Use "cell" everywhere else.
+
+The word "adapter" keeps its ordinary meaning for a compatibility translator,
+such as a PromQL adapter. It does not name a TallyOwl client component.
+
+The envelope field name `sdk_name` stays as written, because a wire field name
+is not prose.
+
+Use each technical term with one meaning. Add a term to this list before you use
+it with a new project-specific meaning.
+
+## 4. Abbreviations
+
+Define an abbreviation at its first use in each document. This table gives the
+approved expansion. Do not use a different expansion.
+
+| Abbreviation | Expansion |
+| --- | --- |
+| CA | certificate authority |
+| CBOR | Concise Binary Object Representation |
+| CDDL | Concise Data Definition Language |
+| CI/CD | continuous integration and continuous delivery |
+| CSIL | CBOR Service Interface Language |
+| DOM | Document Object Model |
+| HTTP | Hypertext Transfer Protocol |
+| KV | key-value |
+| mTLS | mutual Transport Layer Security |
+| OTLP | OpenTelemetry Protocol |
+| RP | relying party |
+| RPC | remote procedure call |
+| SBOM | software bill of materials |
+| TCP | Transmission Control Protocol |
+| TLS | Transport Layer Security |
+| UUID | universally unique identifier |
+| WAL | write-ahead log |
+
+Do not define an abbreviation that the reader does not need. Prefer the full
+term when a document uses the abbreviation only one time.
+
+## 5. Review
+
+Review each changed document before you complete the change. The review must
+include terminology, sentence length, voice, abbreviations, and paragraph
+structure.
+
+Apply these rules as you write. The project has no automated checker and no CI
+job that enforces them. The project owner reviews the documents periodically.
+
+The repository can add a checker later to make the work easier. A checker finds
+mechanical violations only. It does not certify correct ASD-STE100 usage, and
+it does not replace a technical review.

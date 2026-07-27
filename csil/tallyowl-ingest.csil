@@ -1,0 +1,285 @@
+;;; TallyOwl ingest contract.
+;;;
+;;; An application INCLUDES this specification in its own CSIL build. The
+;;; generated TallyOwl service joins the application's existing router, and
+;;; browser telemetry travels on the connection the application already has.
+;;;
+;;; A browser never opens a TallyOwl connection and never contacts a TallyOwl
+;;; domain. See AGENTS.md, "Protocol boundaries".
+;;;
+;;; Every package that csilgen can emit is listed. A generated client is free.
+;;; A maintained app driver is not, and the project maintains three. See the
+;;; client library rollout in docs/PLAN.md.
+
+include "types/common.csil"
+
+options {
+    package: "tallyowl-ingest",
+    version: "v1alpha1",
+    emit_packages: ["rust", "go", "typescript"],
+    package_name: "github.com/CatalystCommunity/tallyowl/clients/tallyowl-ingest",
+    package_version: "0.0.0",
+    decimal_mapping: "csil"
+}
+
+;; ---------------------------------------------------------------------------
+;; Payloads
+;; ---------------------------------------------------------------------------
+
+;;; A named product or behavior event.
+EventPayload = {
+    name: text .size (1..128),
+    ? route: text .size (1..512),
+    ? page_title: text .size (1..512)
+}
+
+;;; A page view or a screen view.
+PageViewPayload = {
+    route: text .size (1..512),
+    ? page_title: text .size (1..512),
+    ? referrer: text .size (1..1024),
+    ? campaign: CampaignParameters
+}
+
+CampaignParameters = {
+    ? source: text .size (1..128),
+    ? medium: text .size (1..128),
+    ? campaign: text .size (1..128),
+    ? term: text .size (1..128),
+    ? content: text .size (1..128),
+    ? click_id: text .size (1..256)
+}
+
+;;; The session lifecycle works on every surface, including a terminal user
+;;; interface. The client library issues the ID. See D11.
+SessionStartPayload = {
+    ? entry_route: text .size (1..512)
+}
+
+SessionEndPayload = {
+    reason: "explicit" / "timeout" / "maximum-lifetime"
+}
+
+InteractionPayload = {
+    target: text .size (1..256),        ;; a semantic name, never a DOM selector
+    action: text .size (1..64)
+}
+
+FeatureExposurePayload = {
+    feature: text .size (1..128),
+    variant: text .size (1..128)
+}
+
+IdentifyPayload = {
+    actor_id: text .size (1..256)
+}
+
+AliasPayload = {
+    from_id: text .size (1..256),
+    to_id: text .size (1..256)
+}
+
+GroupPayload = {
+    group_id: text .size (1..256),
+    ? group_kind: text .size (1..64)
+}
+
+;;; A conversion carries an exact decimal value. It never uses a float.
+ConversionPayload = {
+    goal: text .size (1..128),
+    ? value: decimal,
+    ? currency: text .size (3..3),
+    ? order_id: text .size (1..128)
+}
+
+;; ---------------------------------------------------------------------------
+;; Errors
+;;
+;; The producer never supplies a group. The projector computes the fingerprint
+;; from these inputs and can rebuild every group at a new version. See D39.
+;; ---------------------------------------------------------------------------
+
+StackFrame = {
+    ? module: text .size (1..256),
+    ? function: text .size (1..256),
+    ? file: text .size (1..512),
+    ? line: uint,
+    in_app: bool
+}
+
+ErrorPayload = {
+    error_type: text .size (1..256),
+    message: text .size (1..2048),
+    handled: bool,
+    severity: "fatal" / "error" / "warning" / "info",
+    ? mechanism: text .size (1..64),
+    ? runtime: text .size (1..128),
+    ? frames: [* StackFrame],
+    ? breadcrumbs: [* EventId]
+}
+
+;; ---------------------------------------------------------------------------
+;; Spans
+;;
+;; The collector applies head sampling and always-keep rules. The head applies
+;; tail sampling after commit, because trace ID routing already co-locates a
+;; trace on one tablet. See D35.
+;; ---------------------------------------------------------------------------
+
+SpanKind = "internal" / "server" / "client" / "producer" / "consumer"
+
+SpanLink = {
+    trace_id: TraceId,
+    span_id: SpanId
+}
+
+SpanPayload = {
+    operation: text .size (1..256),
+    kind: SpanKind,
+    start_at: Timestamp,
+    duration_ms: DurationMs,
+    status: "ok" / "error" / "unset",
+    ? resource: text .size (1..256),
+    ? parent_span_id: SpanId,
+    ? links: [* SpanLink],
+    ? error_event_id: EventId,
+    ? sampling_reason: text .size (1..64)
+}
+
+;; ---------------------------------------------------------------------------
+;; Metrics
+;; ---------------------------------------------------------------------------
+
+MetricKind = "counter" / "gauge" / "histogram"
+
+HistogramValue = {
+    count: uint,
+    sum: float,
+    bounds: [* float],
+    counts: [* uint]
+}
+
+MetricPointPayload = {
+    metric_name: text .size (1..256),
+    metric_kind: MetricKind,
+    ? unit: text .size (1..32),
+    ? description: text .size (1..512),
+    monotonic: bool,
+    temporality: "delta" / "cumulative",
+    start_at: Timestamp,
+    end_at: Timestamp,
+    labels: PropertyList,
+    ? number_value: float,
+    ? histogram_value: HistogramValue,
+    ? exemplar_trace_id: TraceId
+}
+
+;; ---------------------------------------------------------------------------
+;; Campaigns
+;; ---------------------------------------------------------------------------
+
+CampaignTouchPayload = {
+    campaign: CampaignParameters,
+    ? referrer_domain: text .size (1..256),
+    ? landing_route: text .size (1..512)
+}
+
+CampaignCostPayload = {
+    campaign: text .size (1..128),
+    ? platform: text .size (1..128),
+    cost: decimal,
+    currency: text .size (3..3),
+    period_start: Timestamp,
+    period_end: Timestamp
+}
+
+;; ---------------------------------------------------------------------------
+;; The telemetry item
+;;
+;; One envelope, one typed payload. The `kind` field on the envelope selects
+;; the payload arm.
+;; ---------------------------------------------------------------------------
+
+Payload = EventPayload
+        / PageViewPayload
+        / SessionStartPayload
+        / SessionEndPayload
+        / InteractionPayload
+        / FeatureExposurePayload
+        / IdentifyPayload
+        / AliasPayload
+        / GroupPayload
+        / ConversionPayload
+        / ErrorPayload
+        / SpanPayload
+        / MetricPointPayload
+        / CampaignTouchPayload
+        / CampaignCostPayload
+
+TelemetryItem = {
+    envelope: Envelope,
+    payload: Payload
+}
+
+;; ---------------------------------------------------------------------------
+;; Operations
+;;
+;; `capture` is best effort from the browser to its own application. It returns
+;; when the application accepts the frame. It makes no durability claim, and it
+;; never blocks on the remote head. See DELIVERY.md section 1.
+;;
+;; `capture-critical` exists for a host that wants the browser to wait for the
+;; same durable boundary that a backend batch waits for. A host chooses whether
+;; to expose it. See D5.
+;; ---------------------------------------------------------------------------
+
+CaptureRequest = {
+    items: [* TelemetryItem]
+}
+
+CaptureResponse = {
+    accepted: uint,
+    ? rejected: [* RejectedItem]
+}
+
+RejectedItem = {
+    event_id: EventId,
+    code: ErrorCode,
+    message: text
+}
+
+CaptureCriticalRequest = {
+    items: [* TelemetryItem]
+}
+
+CaptureCriticalResponse = {
+    accepted: uint,
+    durable: bool,
+    ? batch_id: BatchId,
+    ? rejected: [* RejectedItem]
+}
+
+;;; A policy snapshot version that the client holds. The application can pass a
+;;; newer snapshot to the browser package over its own connection.
+PolicyVersionRequest = {}
+
+PolicyVersionResponse = {
+    policy_version: uint,
+    sampling_rate: float,
+    enabled_kinds: [* TelemetryKind]
+}
+
+@wire-id(1)
+service TallyOwlIngest {
+    ;;; Accept telemetry on the application's existing connection. Best effort.
+    @wire-id(0)
+    capture: CaptureRequest -> CaptureResponse / ServiceError,
+
+    ;;; Accept telemetry and wait for the collector durability boundary.
+    @wire-id(1)
+    capture-critical: CaptureCriticalRequest -> CaptureCriticalResponse / ServiceError,
+
+    ;;; Report the collection policy that the client must apply.
+    @wire-id(2)
+    policy-version: PolicyVersionRequest -> PolicyVersionResponse / ServiceError
+}

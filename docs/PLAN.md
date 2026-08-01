@@ -282,15 +282,22 @@ Deliverables:
 - per-end-user key material and cryptographic erasure for the cold tier;
 - storage and capacity metrics through native and Prometheus and OpenMetrics paths.
 
-Failure work:
+Failure work, from [FAILURE_MODES.md](FAILURE_MODES.md):
 
 - torn and reordered writes;
 - crash before and after every fsync and catalog boundary;
 - orphan, partial, and corrupt segments;
 - commit success and receipt loss retry;
 - tombstone visibility during concurrent reads;
-- disk full during append, segment publish, compaction, and export;
-- format upgrade and downgrade refusal.
+- disk full at each point in FAILURE_MODES.md section 10;
+- format upgrade and downgrade refusal;
+- the three integrity levels in D57, and a damaged segment producing
+  `incomplete-result` that names it;
+- generation pinning and the compaction garbage-collection grace period;
+- an erasure that lands mid-compaction, proving no resurrection;
+- a crash between an erasure commit and its acknowledgement;
+- a catalog rebuild with catalog snapshots and without, each asserting exactly
+  what FAILURE_MODES.md section 7 says survives.
 
 Exit criteria:
 
@@ -414,6 +421,15 @@ Exit criteria:
 This phase begins when an installation needs more than one storage node. The
 segment format does not change here. A home installation never enters this
 phase.
+
+Failure work, from [FAILURE_MODES.md](FAILURE_MODES.md) section 6:
+
+- a node that is alive but slow, asserting detection, the reported cause, and
+  `unknown` when no cause can be established;
+- quorum lost permanently, recovered by restore;
+- quorum lost permanently, recovered by unsafe recovery, asserting the audit
+  record, the degraded mark, and the mark reaching query and explain output;
+- a voter with an exhausted disk, and quorum continuing without it.
 
 Deliverables:
 

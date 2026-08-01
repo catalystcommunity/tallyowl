@@ -198,6 +198,16 @@ segment has a self-contained manifest, and control and catalog snapshots use a
 versioned canonical CSIL encoding. A repair command can rebuild the segment
 catalog by scanning manifests.
 
+**That rebuild covers the segment catalog only, which is one of the contents
+above.** Receipts, tombstones, configuration, credentials, node fencing state,
+sessions, and saved dashboards are in no segment manifest. Lost receipts
+duplicate on retry, and lost tombstones resurrect erased data.
+
+Optional catalog snapshots close the gap, and they are off by default. See D59.
+The erasure ledger is durable independently of the catalog for exactly this
+reason, so a rebuild cannot undo an erasure. See
+[FAILURE_MODES.md](FAILURE_MODES.md) sections 7 and 9.
+
 Illustrative ordered key prefixes:
 
 ```text
@@ -253,6 +263,14 @@ data/
 Paths are not query semantics. Manifest contents are authoritative. All files
 carry a format version, and startup refuses unknown incompatible versions rather
 than guessing.
+
+### 3.4 Integrity checking
+
+Checksums are written at every level. `integrity.mode` decides what reads them:
+`none`, `verify-on-read` which is the default, or `scrub` which adds a
+rate-limited background pass and repair from a second copy. At one copy, scrub
+detects and cannot repair. See D57 and
+[FAILURE_MODES.md](FAILURE_MODES.md) section 5.
 
 ## 5. Write and recovery sequence
 
@@ -616,6 +634,32 @@ travels with the data.
 An exact index contains opaque end-user IDs. Thus, an erasure request finds
 matching local and cold segment generations without a full scan. Tombstones
 hide the end user immediately in every tier.
+
+**Compaction runs concurrently with queries, erasure, cold uploads, and locator
+publication.** Each of those is a correctness question, not a performance one,
+and [FAILURE_MODES.md](FAILURE_MODES.md) section 8 holds the rules. The two that
+a reader of this section must know:
+
+- a query pins the manifest generation it resolved, and an unpinned generation
+  is deleted only after a garbage-collection grace period;
+- compaction re-applies every tombstone committed while it was running, and
+  verifies the tombstone generation has not moved before it publishes. A
+  tombstone is also a standing predicate, so a miss hides the data on read
+  rather than exposing it.
+
+**Grouping by correlation value.** Compaction groups cold rows by the highest
+cost correlation value, normally the end-user ID, before it writes a segment.
+Ingest cannot do this, because it must not wait to sort. Compaction rewrites the
+segment anyway, so the grouping is close to free.
+
+This is a query cost decision, not a compression decision. The tablet locator
+holds one segment reference for each (value, segment) pair, so grouping collapses
+the pair count for the retained majority of data. Measured at 100 million end
+users: an unbounded end-user lookup returns 228 candidate segments with grouping
+and 3,000 without. See [BENCHMARKS.md](BENCHMARKS.md) section 12b.
+
+Grouping is per segment and never crosses a project. It does not change event
+time ordering, which the query path re-establishes on merge.
 
 **Hot and warm tiers.** Compaction rewrites partially affected local segments
 and deletes fully covered ones when snapshot and backup retention permit. This

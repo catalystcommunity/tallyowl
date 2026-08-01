@@ -74,6 +74,10 @@ make the unresolved part a separate decision.
 | D54 | Plain language for anything a person reads | Accepted |
 | D55 | One entry point for build, test, and generate | Accepted |
 | D56 | Test data generation and branch coverage | Accepted |
+| D57 | Integrity checking is an operator choice | Accepted |
+| D58 | Quorum loss: restore by default, unsafe recovery behind a flag | Accepted |
+| D59 | Catalog snapshots, off by default | Accepted |
+| D60 | A slow node alerts and says why | Accepted |
 
 ## Next decision order
 
@@ -109,11 +113,14 @@ that does not exist yet.
 8. Design the D28 segment encryption keys before cold tiering carries erasable
    data.
 9. Measure D20 deletion and cold-object lookup, which need a deletion path.
+10. Measure the segment opens that follow a locator probe, locator merge cost
+    during compaction, and locator fan-out across tablets. Section 12b measures
+    the locator itself; these three are what follow it.
 
 ### Open, scheduled
 
-10. Select the D40 attribution default values in Phase 9.
-11. Reopen D31 at the release candidate and select the distribution
+11. Select the D40 attribution default values in Phase 9.
+12. Reopen D31 at the release candidate and select the distribution
     coordinates.
 
 These numeric defaults are first values for measurement. The reference
@@ -751,6 +758,43 @@ give a row list.
 See [SEGMENT_FORMAT.md](SEGMENT_FORMAT.md) section 7 and
 [BENCHMARKS.md](BENCHMARKS.md) section 12a.
 
+### Measured at scale, 2026-08-01 — the locator, and what it costs
+
+Every earlier measurement ran inside one segment. `prototypes/locator-bench`
+builds real tablet locator runs at 100 million end users, 100,000 servers, and
+30 days of retention.
+
+**The answer is yes, with one change.** The locator itself is cheap: 2.4 GiB,
+867,000 probes each second, 1.2 microseconds for each probe. The distinct-value
+count is not what costs. What costs is the count of (value, segment) pairs,
+which is a placement property.
+
+At the layout as designed today, an unbounded end-user lookup returns **3,000
+candidate segments** out of 4,470 retained. The locator does its job and the
+query still opens most of the installation.
+
+The change: **compaction groups cold rows by correlation value.** Two hot days
+scattered plus 28 cold days grouped gives 228 candidate segments, a 13-fold
+reduction, and it changes no routing. Sharding ingest by end-user ID reaches a
+similar number and is rejected, because it scatters a trace's spans across
+shards. A system cannot shard by both end user and trace.
+
+Two supporting rules, both measured:
+
+- a fingerprint is 64 bits. A 32-bit fingerprint collides 1.2 million times at
+  100 million values;
+- a time range prunes linearly, from 60 candidate segments at 30 days to 2 at
+  one day. An unbounded high-cardinality lookup reads the whole retention
+  window, so the query surface reports the candidate count before it runs.
+
+This also invalidated a shortcut. Bytes for each pair is **not** a constant: it
+moves 53 percent with density, so a size estimate must state the density it
+assumes. See [BENCHMARKS.md](BENCHMARKS.md) section 12b and
+[HIGH_CARDINALITY.md](HIGH_CARDINALITY.md) section 4.
+
+Still unmeasured: the segment opens that follow a probe, locator merge cost
+during compaction, and fan-out across tablets.
+
 ### The default access class is a capacity decision
 
 An exact index costs between 2 and 12 bytes for each row, against 27 bytes of
@@ -776,7 +820,7 @@ A demotion and a later promotion are both reversible. A class change starts a
 background index build over retained raw data, so an operator can recover the
 capability within the retention period.
 
-See [BENCHMARKS.md](BENCHMARKS.md) sections 8, 12, and 12a.
+See [BENCHMARKS.md](BENCHMARKS.md) sections 8, 12, 12a, and 12b.
 
 ## D21. Exact versus approximate analytics — Accepted
 
@@ -1772,3 +1816,121 @@ for each capability as its phase permits.
 **Turn every regression into a permanent scenario.** A defect then cannot
 return quietly, and the set becomes thorough without anyone predicting where
 the defects appear.
+
+## D57. Integrity checking is an operator choice — Accepted
+
+Checksums existed at every level and nothing read them until a query touched
+the data. A cold segment could be damaged for its whole retention period
+undetected.
+
+`integrity.mode` selects one of three levels:
+
+| Level | What it catches | Cost |
+| --- | --- | --- |
+| `none` | Nothing | None |
+| `verify-on-read` | Damage in data a query touches, when it touches it | A checksum over bytes already in memory |
+| `scrub` | Damage anywhere | Continuous background read IO |
+
+**`verify-on-read` is the default.** A wrong answer is the failure this project
+most wants to avoid, and BENCHMARKS.md section 7 measured xxHash3 at 9,112 MB
+each second, far above the device read rate. The default costs almost nothing.
+
+**`none` is a legitimate choice, and TallyOwl permits it.** An installation
+that wants the last of the read throughput, and accepts a wrong answer over a
+damaged page, may select it. The dashboard shows that integrity checking is
+off, because an operator who inherits an installation must not have to discover
+that.
+
+**`scrub` adds detection everywhere and repair where a second copy exists.** At
+one copy, which is the home profile, it is detection only. That is still worth
+having: knowing on the day beats knowing during an incident. The alert says so
+plainly rather than implying a repair that cannot happen.
+
+A query over a damaged segment returns `incomplete-result` and names what it
+could not read. It never silently returns a smaller answer.
+
+See [FAILURE_MODES.md](FAILURE_MODES.md) section 5.
+
+## D58. Quorum loss: restore by default, unsafe recovery behind a flag — Accepted
+
+A tablet that loses two of three voters permanently has no safe automatic
+answer. The surviving replica may hold a log behind the last committed entry,
+and nothing can determine which writes are missing.
+
+**Restore from a snapshot is the default and the documented path.** It never
+loses an acknowledged write that the snapshot covers. It loses everything after
+the snapshot that Corndogs no longer holds, and it takes as long as a restore
+takes.
+
+**Unsafe recovery exists behind an explicit flag.** It forces a single-voter
+membership from the surviving log and returns the tablet in minutes. It can
+lose an acknowledged write, and it cannot say which.
+
+The rejected option was to ship only one of these. Restore alone leaves an
+operator with no answer when the outage cost exceeds the data cost. Unsafe
+recovery alone makes a data-losing command the ordinary path.
+
+A fast path that hides its cost becomes the habitual path, so this one cannot
+hide its cost:
+
+- explicit confirmation naming the tablet;
+- an audit record in the `audit` retention class;
+- the affected time range marked degraded, reported by every overlapping query
+  and its explain output;
+- the mark never expires on its own. Clearing it records who accepted the loss.
+
+See [FAILURE_MODES.md](FAILURE_MODES.md) sections 6.2, 11 procedure 3, and 11
+procedure 4.
+
+## D59. Catalog snapshots, off by default — Accepted
+
+STORAGE.md section 3.3 says a repair command rebuilds the segment catalog by
+scanning manifests. That is true and it covers one of the twelve things the
+catalog holds. Receipts, tombstones, auth, node fencing state, sessions, and
+saved dashboards are not in any segment manifest.
+
+Two of those matter beyond inconvenience: **lost tombstones resurrect erased
+data**, and **lost receipts duplicate on retry**.
+
+`catalog.snapshots.enabled` turns on periodic catalog snapshots, and it is
+**off by default**. The default recovery for a lost catalog is a restore from
+the ordinary backup. `catalog.snapshots.keep` retains a fixed number, and the
+default is 2 whenever snapshots are on. Two survives a snapshot that is itself
+damaged, which one cannot.
+
+This is deliberately small. Continuous change shipping and a recovery point
+measured in seconds are a later feature, and nothing here prevents adding them.
+
+The tombstone consequence is not left to this decision. D28's erasure ledger is
+durable independently of the catalog and survives a rebuild, because an erasure
+that a rebuild can undo is not an erasure. See
+[FAILURE_MODES.md](FAILURE_MODES.md) sections 7 and 9.
+
+## D60. A slow node alerts and says why — Accepted
+
+A dead node is easy. A node that answers slowly holds up writes while looking
+healthy, and a check that asks only "are you there" says yes.
+
+`placement.slowNode.action` selects `alert` or `demote`. **`alert` is the
+default.** Automatic demotion during a network-wide slowdown cascades: every
+node looks slow against a moving median, and membership churns while the real
+fault is elsewhere. `demote` is available for an operator who accepts that.
+
+**The alert must name a cause.** A slow node that reports only "slow" sends an
+operator to look at the wrong thing. The node reports the most specific cause
+it can establish, from device errors, device saturation, latency without error
+or saturation, write volume, compaction pressure, memory pressure, and network
+latency.
+
+**`unknown` is a valid answer and must be reported as one.** A node that
+guesses a cause it cannot establish sends an operator down a wrong path, which
+is worse than sending them nowhere. The alert then carries the raw evidence:
+append latency, fsync latency, queue depth, and accepted bytes, each against
+the group median.
+
+This is an instance of the CONVENTIONS.md section 1 rule. "Slow for an unknown
+reason, and here is the evidence" is a better message than a confident wrong
+one.
+
+See [FAILURE_MODES.md](FAILURE_MODES.md) section 6.1.
+

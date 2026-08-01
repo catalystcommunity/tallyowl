@@ -84,6 +84,30 @@ A profile change is an online change. It moves data. It does not rewrite it.
 `corndogs.maxPayloadBytes` must exceed the batch seal size in D19, which is
 512 KiB.
 
+### Integrity and recovery
+
+| Value | Meaning | Default |
+| --- | --- | --- |
+| `integrity.mode` | `none`, `verify-on-read`, or `scrub` | `verify-on-read` |
+| `integrity.scrub.period` | How long one full pass takes | 7 days |
+| `integrity.scrub.rateLimit` | Read bandwidth the scrub may use | 16 MiB each second |
+| `catalog.snapshots.enabled` | Periodic catalog snapshots | `false` |
+| `catalog.snapshots.period` | Time between snapshots | 1 hour |
+| `catalog.snapshots.keep` | Snapshots retained | 2 |
+| `placement.slowNode.action` | `alert` or `demote` | `alert` |
+| `placement.slowNode.factor` | Multiple of the group median that counts as slow | 4 |
+| `placement.slowNode.duration` | How long it must hold before the state changes | 5 minutes |
+| `compaction.gcGrace` | Wait before deleting an unpinned generation | 1 hour |
+| `storage.reserveBytes` | Space held back so recovery can still write | 1 GiB |
+
+`integrity.mode: none` turns off every integrity check. The dashboard shows
+that state, because an operator who inherits an installation must not have to
+discover it. See D57.
+
+`compaction.gcGrace` must exceed the maximum query runtime the budget permits.
+The chart refuses a value that does not. See
+[FAILURE_MODES.md](FAILURE_MODES.md) section 8.1.
+
 The chart refuses `storage.receiptPolicy: local-one` when
 `storage.tabletVoters` is greater than one. `local-one` is legal only for a
 single-voter tablet. See D27.
@@ -213,3 +237,4 @@ release claimed tasks, and leave queued data durable.
 8. A second cell joining an existing installation.
 9. A cell that continues data operations while the global directory is down.
 10. A rolling upgrade with live traffic and adjacent protocol versions.
+11. A refused `compaction.gcGrace` shorter than the maximum query runtime.

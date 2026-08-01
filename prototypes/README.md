@@ -27,6 +27,7 @@ Each prototype answers a question that a decision in
 | `consensus-bench` | D15 replication, on a real openraft cluster | Measured |
 | `wal-bench` | Group commit, from STORAGE.md section 15 item 2 | Measured |
 | `segment-bench` | D10 bytes for each event, from a whole segment | Measured |
+| `locator-bench` | D20 tablet locator at 100 million users | Measured |
 
 `consensus-bench` runs a real openraft cluster over an in-memory log and
 transport. Election, partition, membership change, and snapshot transfer all
@@ -36,6 +37,10 @@ a corrupt log still need a real storage and network implementation.
 `segment-bench` writes a whole segment to real storage, reads it back, verifies
 its checksums, and probes its index. It uses generated values, so it gives a
 floor for its column set rather than a promise.
+
+`locator-bench` builds real locator runs at full user cardinality. It measures
+the structure and the probe. It does not measure the segment opens that follow
+a probe, which is where the remaining cost sits.
 
 ## Rules
 
@@ -83,6 +88,7 @@ cargo build --release
 ./target/release/wal-bench [frame-bytes]
 ./target/release/consensus-bench
 ./target/release/segment-bench [rows] [seed]
+./target/release/locator-bench [seed]
 ```
 
 `catalog-bench`, `tier-bench`, and `segment-bench` write to

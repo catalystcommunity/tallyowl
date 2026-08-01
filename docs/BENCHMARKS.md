@@ -890,6 +890,169 @@ At the D19 seal of 256 events for each batch, one app driver connection reaches
 roughly 26,000 to 38,000 events each second. That is the number to design the
 home profile against until the reference application replaces it.
 
+## 12b. D20 at scale: the tablet locator with 100 million users
+
+Every benchmark above section 12b measures inside **one** segment. That proves
+a lookup is cheap once the right segment is open. It says nothing about finding
+a value across a retention window, which is the tablet locator's job.
+[HIGH_CARDINALITY.md](HIGH_CARDINALITY.md) section 4 defines the locator, and
+until now nothing had built one.
+
+`prototypes/locator-bench` builds real locator runs at full user cardinality.
+100 million users is not a memory problem: the locator is a few GiB.
+
+### The workload
+
+| Item | Value |
+| --- | --- |
+| Registered users | 100 million |
+| Daily active users | 10 million |
+| Servers | 100,000 |
+| Events each day | 1 billion, which is 11,600 each second |
+| Retention | 30 days |
+| Segment target | 256 MiB, which is 6.8 million events at 39.75 bytes |
+| Segments each day | 149 |
+| Segments retained | 4,470 |
+| Stored bytes retained | 1.08 TiB |
+
+### The load-bearing quantity is not the user count
+
+The locator holds one segment reference for each **(user, segment) pair**. The
+pair count, not the user count, sets its size. The pair count depends on how a
+user's events scatter across segments, which is a placement decision.
+
+| Layout | Segments for each user | Pairs retained | Of all segments |
+| --- | --- | --- | --- |
+| Scattered, as designed today | 100 | 30 billion | 67.1% |
+| Sharded by end user, 64 shards | 2.3 | 698 million | 1.6% |
+| Sharded by end user, 1024 shards | 1.0 | 300 million | 0.7% |
+
+100 million users costs nothing on its own. A user who appears in 100 of the
+day's 149 segments costs 100 entries, and that is where the size goes.
+
+Sorting rows by end user **inside** a segment changes none of this. It reorders
+rows. It does not change which segment holds them. Only routing does.
+
+### Bytes for each pair is not flat, and density is why
+
+| Pairs | Users | Groups | Run bytes | Bytes for each pair |
+| --- | --- | --- | --- | --- |
+| 10 million | 5 million | 4.3 million | 50.1 MiB | 5.257 |
+| 50 million | 20 million | 18.4 million | 219.5 MiB | 4.605 |
+| 200 million | 50 million | 49.1 million | 696.9 MiB | 3.655 |
+| 500 million | 100 million | 99.3 million | 1.52 GiB | 3.274 |
+| 1 billion | 100 million | 100.0 million | 2.28 GiB | 2.451 |
+
+**Bytes for each pair moved 53 percent across this series.** Taking any one
+figure and multiplying it by a target pair count would repeat the section 12
+mistake in a new place.
+
+What drives it is density, meaning segments for each user. A fingerprint costs
+the same whether one segment reference follows it or three hundred:
+
+| Segments for each user | Bytes for each pair | Bytes for each user |
+| --- | --- | --- |
+| 1 | 7.074 | 7.1 |
+| 3 | 4.428 | 13.3 |
+| 10 | 2.530 | 25.3 |
+| 30 | 1.679 | 50.2 |
+| 100 | 1.136 | 112.4 |
+| 300 | 1.031 | 299.1 |
+
+Every size below reads bytes for each pair off this curve at its own density.
+
+### Probe cost
+
+| Measurement | Result |
+| --- | --- |
+| Probes each second | 867,000 |
+| Median probe | 1.2 microseconds |
+| Mean candidate segments | 10.0 |
+| Worst candidate segments | 27 |
+
+A locator probe is not the cost. What follows it is.
+
+### A time range prunes linearly
+
+Runs are partitioned by day, so a query reads only the runs it overlaps.
+Measured over 30 daily runs holding 20 million pairs each:
+
+| Query range | Runs read | Bytes touched | Candidate segments | Probe |
+| --- | --- | --- | --- | --- |
+| 1 day | 1 | 81.2 MiB | 2.0 | 0.6 microseconds |
+| 7 days | 7 | 568.1 MiB | 13.9 | 5.3 microseconds |
+| 30 days | 30 | 2.38 GiB | 59.6 | 26.7 microseconds |
+
+**An unbounded lookup on a high-cardinality value reads the whole retention
+window.** That is the shape of the cost, and a query surface must show it.
+
+### The answer at target scale
+
+| Layout | Density | Bytes for each pair | Pairs | Locator size | Candidate segments |
+| --- | --- | --- | --- | --- | --- |
+| Scattered, as designed today | 3,000 | 1.031 | 30 billion | 28.81 GiB | 3,000 |
+| Sharded by end user, 64 | 69.8 | 1.298 | 698 million | 864.7 MiB | 70 |
+| Sharded by end user, 1024 | 30.0 | 1.679 | 300 million | 480.4 MiB | 30 |
+
+The locator size is survivable in every row. **The candidate count is not.**
+An unbounded lookup against the layout as designed today opens 3,000 segments.
+
+### Without a locator at all
+
+| Measurement | Result |
+| --- | --- |
+| Segments to probe for one lookup | 4,470 |
+| Block filter memory, all segments | 42.21 GiB |
+
+The locator replaces 4,470 filter probes with one. It is not an optimization at
+this scale. Without it, the working set for a single point lookup is 42 GiB.
+
+### What compaction fixes, without changing ingest routing
+
+Ingest must not wait to sort, so hot data stays scattered. Compaction already
+rewrites cold segments and already merges locator runs. Grouping rows by end
+user while it does so lowers density for the retained majority:
+
+| Tier | Density | Bytes for each pair | Locator size | Candidate segments |
+| --- | --- | --- | --- | --- |
+| Hot, 2 days, scattered | 200 | 1.070 | 1.99 GiB | 200 |
+| Cold, 28 days, user-grouped | 28 | 1.732 | 462.6 MiB | 28 |
+| **Total** | | | **2.44 GiB** | **228** |
+
+Against 28.81 GiB and 3,000 candidate segments for the scattered layout: a
+**13-fold** reduction in candidate segments and a 12-fold reduction in locator
+size.
+
+This changes no routing, so it does not trade away trace locality the way
+sharding by end user would. Sharding by end user helps an end-user lookup and
+hurts trace assembly, because a trace's spans then scatter across shards. A
+system cannot shard by both.
+
+### Fingerprint width
+
+| Width | Expected collisions at 100 million values |
+| --- | --- |
+| 32-bit | 1.2 million |
+| 48-bit | 18 |
+| 64-bit | 0 |
+
+A collision costs one wasted segment open. It never costs correctness, because
+the segment index verifies the full typed value. A 32-bit fingerprint is still
+disqualified at this scale: it would send every lookup to more than a million
+extra segments.
+
+### What this does not measure
+
+The locator runs are real and built at full cardinality. These are not:
+
+- the segment opens that follow a probe. The candidate counts above are the
+  input to that cost, not the cost itself;
+- locator merge cost during compaction;
+- the locator on disk, or its cold-start read;
+- fan-out across tablets, which multiplies the candidate count by the tablet
+  count for a project;
+- write amplification from user-grouped compaction.
+
 ## 13. WAL group commit: the answer to the fsync ceiling
 
 Section 3 measured the ceiling. STORAGE.md section 3.1 answers it with bounded
@@ -964,6 +1127,9 @@ normal outcome, and it is why section 11b exists.
 | Consensus election, partition, membership, and snapshot transfer | D15 | A storage and network implementation |
 | Capacity envelope, measured end to end | D10, D23 | The reference application |
 | Segment cost at real value distributions | D10 | The reference application |
+| Segment opens that follow a locator probe | D20 | A read path |
+| Locator merge cost during compaction | D20, D49 | A compaction path |
+| Locator fan-out across tablets | D20, D26 | A tablet implementation |
 | Provisional retention cost at the tail decision window | D35 | The reference application |
 | Deletion and cold-object lookup | D20 | A deletion path |
 | Cold-tier upload limits and bucket-outage behaviour | D24 | An object-store deployment |
@@ -991,7 +1157,11 @@ cargo build --release
 ./target/release/wal-bench 4096
 ./target/release/consensus-bench
 ./target/release/segment-bench 1000000 42
+./target/release/locator-bench 42
 ```
+
+`locator-bench` builds locator runs at 100 million users and needs about
+20 GiB of memory at its largest case. It takes roughly three minutes.
 
 The catalog and segment benchmarks write to `~/.cache/tallyowl-bench` by
 default. `TALLYOWL_BENCH_DIR` selects another directory, and the catalog

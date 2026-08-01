@@ -8,6 +8,7 @@ members = [
     "consensus-bench",
     "wal-bench",
     "segment-bench",
+    "locator-bench",
 ]
 
 [workspace.package]

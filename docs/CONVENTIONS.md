@@ -99,6 +99,22 @@ Known cases where readiness must fail:
 A health response says which check failed, in the language of section 1. "Cannot
 reach the durable store" beats "corndogs_conn=nil".
 
+### Degraded, and saying why
+
+A component can be alive, ready, and unwell. A node that answers every request
+slowly is the common case, and a check that asks only "are you there" says yes.
+
+A degraded state names the most specific cause the component can **establish**,
+never the most likely one it can guess.
+
+**`unknown` is a valid cause and must be reported as one.** A component that
+guesses a cause it cannot establish sends a person to look at the wrong thing,
+which is worse than sending them nowhere. A report of `unknown` carries the
+evidence instead: the measurements that led to the state, each against whatever
+baseline the component compared it to.
+
+D60 applies this rule to a slow storage node. It is general.
+
 ## 4. Logs
 
 ### What every log line carries
@@ -206,6 +222,9 @@ OpenMetrics endpoint and through the native path. See D12.
 
 A change that adds an error code, a health check, or a configuration value
 updates this document in the same commit.
+
+A change that adds a degraded state also adds its causes, and states how the
+component establishes each one.
 
 Read a new error message aloud before merging it. That check costs seconds and
 catches most violations of section 1.

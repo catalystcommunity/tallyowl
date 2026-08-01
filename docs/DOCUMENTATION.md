@@ -132,6 +132,7 @@ approved expansion. Do not use a different expansion.
 | CSIL | CBOR Service Interface Language |
 | DOM | Document Object Model |
 | HTTP | Hypertext Transfer Protocol |
+| IO | input and output |
 | KV | key-value |
 | mTLS | mutual Transport Layer Security |
 | OTLP | OpenTelemetry Protocol |

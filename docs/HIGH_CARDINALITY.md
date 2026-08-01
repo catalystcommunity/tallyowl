@@ -113,6 +113,59 @@ runs incrementally. Recent heads and high-level cold routing data stay local.
 Fingerprints only prune and route. The segment index verifies the full typed
 value, so collisions cannot create incorrect results.
 
+A fingerprint is 64 bits. A 32-bit fingerprint collides 1.2 million times at
+100 million distinct values, which sends every lookup to a million extra
+segments. Correctness survives it. Cost does not. See
+[BENCHMARKS.md](BENCHMARKS.md) section 12b.
+
+### What a locator costs, and what drives it
+
+**The locator holds one segment reference for each (value, segment) pair. The
+pair count, not the distinct-value count, sets its size.** 100 million end users
+cost nothing on their own. A user whose events reach 100 segments in a day costs
+100 entries.
+
+Two rules follow, and a measurement at 100 million users supports both:
+
+1. **Sorting rows by a value inside a segment does not help.** It reorders rows.
+   It does not change which segment holds them. Only routing and compaction
+   change the pair count.
+2. **A locator size estimate must state the density it assumes**, meaning
+   segments for each value. Bytes for each pair falls from 7.07 at density 1 to
+   1.03 at density 300, because a fingerprint costs the same whether one segment
+   reference follows it or three hundred.
+
+### Compaction groups cold rows by correlation value
+
+Ingest cannot wait to sort, so hot segments hold scattered values. Compaction
+already rewrites cold segments and already merges locator runs. It groups rows
+by the highest-cost correlation value while it does so.
+
+Measured at 100 million users over 30 days of retention: two hot days scattered
+plus 28 cold days grouped gives 228 candidate segments for an unbounded lookup,
+against 3,000 for a fully scattered layout. That is a 13-fold reduction, and it
+changes no routing.
+
+**Do not shard ingest by end-user ID to get the same result.** Sharding by end
+user helps an end-user lookup and hurts trace assembly, because a trace's spans
+then scatter across shards. A system cannot shard by both. Compaction gets most
+of the benefit and gives up neither.
+
+### A time range is the strongest prune
+
+Runs are partitioned by time, so a query reads only the runs it overlaps. The
+prune is linear: a one-day range reads one run and returns 2 candidate segments
+where a 30-day range reads 30 runs and returns 60.
+
+An unbounded lookup on a high-cardinality value therefore reads the whole
+retention window. That is legal, and it is sometimes what a support
+investigation needs. It is never accidental:
+
+- a query surface shows the candidate segment count before it runs the query;
+- the explain output names the time range as the reason for the count. See
+  [QUERY.md](QUERY.md);
+- a query budget bounds it, rather than a silent cap on results.
+
 An exact query:
 
 1. resolves project, field ID and type, and optional time range;

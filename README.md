@@ -42,6 +42,7 @@ Design documents:
 - [Cell architecture and growth](docs/CELLS.md)
 - [Node identity and automated enrollment](docs/NODE_IDENTITY.md)
 - [Threat model](docs/THREAT_MODEL.md)
+- [Failure modes and recovery](docs/FAILURE_MODES.md)
 - [Service conventions](docs/CONVENTIONS.md)
 - [Native storage design](docs/STORAGE.md)
 - [Query algebra](docs/QUERY.md)

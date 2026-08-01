@@ -442,6 +442,22 @@ query, to adjust it, or to drop it, without reading the tree.
 An estimate that the planner cannot make returns unknown. It never returns a
 guess.
 
+### The candidate segment count is always shown
+
+A lookup on a high-cardinality value probes the tablet locator, which returns
+candidate segments. That count is the cost of the query, and it grows with the
+time range: measured at 100 million end users, a one-day range returns 2
+candidate segments and a 30-day range returns 60. An unbounded range reads the
+whole retention window.
+
+The plan tree therefore carries the candidate segment count for every locator
+probe, and the summary states it in plain language with the time range as the
+reason. A person who widens a time range sees the cost before they pay it.
+
+TallyOwl never silently narrows a range to keep a query cheap. It shows the
+count, applies the budget, and refuses with a typed error when the budget
+cannot cover it. See [BENCHMARKS.md](BENCHMARKS.md) section 12b.
+
 ## 20. Saved queries
 
 A saved query records the algebra version of its author and executes on the

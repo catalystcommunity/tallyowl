@@ -33,6 +33,9 @@ local development loop in [Phase 1](docs/PLAN.md): a developer runs the `home`
 profile as binaries on a workstation, with the same configuration, health, and
 delivery path a deployment uses.
 
+[IMPLEMENTATION_PROMPT.md](IMPLEMENTATION_PROMPT.md) takes the project from this
+design to a working alpha. Give it to a new session to start the build.
+
 Design documents:
 
 - [System design](docs/DESIGN.md)

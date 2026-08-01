@@ -64,6 +64,23 @@ batch frames durable, while each caller receives only its own receipt. This
 keeps the durability contract intact without forcing one physical sync per
 event or collector.
 
+Group commit is not an optimization. A measurement put the device ceiling at
+186 fsync operations each second. Group commit with a 2 millisecond linger then
+reached 16,923 durable frames each second from 134 of them. The same path
+without a linger reached 503. See [BENCHMARKS.md](BENCHMARKS.md) section 13.
+
+The committer therefore obeys three rules:
+
+- it releases the lock while it writes and calls fsync, so other writers
+  accumulate into the next group;
+- it waits a configurable linger before it seals a group, defaulting to
+  2 milliseconds;
+- it bounds a group by bytes and by count, so a large group cannot exhaust
+  memory or stall a caller past its deadline.
+
+A longer linger is worse, not better. At 10 milliseconds the same benchmark
+lost half its throughput and doubled its latency.
+
 TallyOwl does not retain the log forever. A segmenter seals committed log
 ranges into segments. The manifest records those segments. Required replicas
 confirm them. The segmenter then checkpoints and removes old log ranges.
@@ -124,7 +141,9 @@ The first writer defaults are:
 - Use a 256 MiB segment target in a cluster.
 - Use a 64 KiB compressed page target.
 - Use Zstandard level 1 for hot and warm data.
-- Permit Zstandard level 3 during cold compaction.
+- Use Zstandard level 3 only for a float column. A measurement showed that
+  level 3 is larger than level 1 on every other encoded column. See D17.
+- Use a 2 millisecond group-commit linger on the append log. See D47.
 
 These values are configurable. A reader accepts all permitted sizes and codecs.
 
@@ -286,7 +305,7 @@ project or for each small routing bucket.
 Routing properties:
 
 - a span uses its trace ID;
-- a behavior event uses its session ID or actor ID;
+- a behavior event uses its session ID or end-user ID;
 - a metric point uses its series ID;
 - other data uses a stable event key;
 - all other correlation fields use exact indexes;
@@ -507,7 +526,7 @@ TallyOwl must support two complementary access patterns:
 
 1. scans and aggregations over time ranges and dimensions;
 2. exact lookup and correlation on very high-cardinality values. These values
-   include event, request, trace, span, session, actor, order, and custom
+   include event, request, trace, span, session, end user, order, and custom
    correlation IDs.
 
 Every segment starts with indexes inherent in its organization:
@@ -566,7 +585,7 @@ Do not assume that the component is the source database. See
 Telemetry correction is append plus supersession; deletion is tombstone plus
 compaction.
 
-1. Commit a tombstone describing event IDs, actor, project, or bounded predicate.
+1. Commit a tombstone describing event IDs, end user, project, or bounded predicate.
 2. Advance the visible tombstone generation.
 3. Queries at newer generations filter those rows immediately.
 4. A worker identifies intersecting segments from manifests, statistics, and indexes.
@@ -582,7 +601,7 @@ combine small tombstones to keep query filtering bounded.
 ### A tombstone is a standing predicate
 
 A tombstone is not only a filter over data that already exists. Telemetry for
-an erased actor can still be in a collector queue when the erasure lands. That
+an erased end user can still be in a collector queue when the erasure lands. That
 telemetry arrives later.
 
 Therefore a tombstone stays active until its horizon ends. The ingest path
@@ -594,30 +613,34 @@ travels with the data.
 
 ### Erasure by tier
 
-An exact index contains opaque actor IDs. Thus, an erasure request finds
+An exact index contains opaque end-user IDs. Thus, an erasure request finds
 matching local and cold segment generations without a full scan. Tombstones
-hide the actor immediately in every tier.
+hide the end user immediately in every tier.
 
 **Hot and warm tiers.** Compaction rewrites partially affected local segments
 and deletes fully covered ones when snapshot and backup retention permit. This
 work stays local and bounded. The first physical target is 24 hours.
 
-**Cold tier.** Do not rewrite every intersecting cold object. One actor can
+**Cold tier.** Do not rewrite every intersecting cold object. One end user can
 touch thousands of cold objects across a retention period. Download, rewrite,
 and upload of that set cannot meet a 24-hour target, and the cost grows with
 retention.
 
-The cold tier uses cryptographic erasure:
+The cold tier encrypts under one project key:
 
-- a segment encrypts each actor's rows with a key derived for that actor;
-- the catalog holds the key material, not the object;
-- erasure destroys the key and records the destruction in the erasure ledger;
-- the cold bytes then cannot be read, by TallyOwl or by any object-store
-  reader;
-- normal retention reclaims the object space later.
+- destroying the project key erases the whole project and cannot be undone;
+- an object-store reader without the key reads nothing useful;
+- there are no per-end-user keys, so a single end-user erasure does not destroy
+  a key.
 
-This needs the segment encryption key design that D22 defers. Do not enable
-cold tiering for a project that permits erasure until that design exists.
+An end-user erasure is immediate and logical in every tier. The tombstone hides
+the rows at once and stays active for late arrivals. Hot and warm segments
+rewrite within the 24-hour target. Cold bytes physically disappear when
+retention expires them.
+
+TallyOwl does not promise immediate physical destruction of one end user's cold
+data. An operator who needs that sets a shorter cold retention, or does not
+enable the cold tier. See D28.
 
 The same deletion generation invalidates or rebuilds derived profiles, rollups,
 cohorts, caches, and export manifests.
@@ -625,7 +648,7 @@ cohorts, caches, and export manifests.
 The default immutable-backup horizon is 30 days. It is configurable.
 
 An erasure ledger is part of each restore. The ledger prevents restored data
-from making erased actor data visible again.
+from making erased end user data visible again.
 
 Mutable control records live directly in the transactional catalog or replicated
 metadata log and do not use telemetry tombstones.
@@ -754,11 +777,11 @@ Before declaring the format stable:
 3. native page encodings, compression, segment-size, and row-group benchmarks
    across events, spans, and metrics;
 4. exact high-cardinality lookup and facet benchmarks, including mostly-unique
-   request IDs and actor, session, and trace timelines;
+   request IDs and end user, session, and trace timelines;
 5. local-to-cold tiering, range-read queries, cache eviction, and interrupted
    upload and eviction recovery;
 6. direct DuckDB query of exported Parquet;
-7. point, actor, and time-range deletion across local and cold segments;
+7. point, end user, and time-range deletion across local and cold segments;
 8. query pruning and rollup benchmarks at home-lab and large synthetic scale;
 9. three-node quorum kill, restart, and partition tests;
 10. read replica and online tablet movement;

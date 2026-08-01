@@ -75,7 +75,7 @@ A project has stable virtual shards. Many virtual shards can use one tablet.
 The primary affinity key depends on the telemetry type:
 
 - A span uses its trace ID.
-- A behavior event uses its session ID or actor ID.
+- A behavior event uses its session ID or end-user ID.
 - A metric point uses its series ID.
 - Other data uses a stable event key.
 

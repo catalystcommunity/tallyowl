@@ -71,7 +71,7 @@ FeatureExposurePayload = {
 }
 
 IdentifyPayload = {
-    actor_id: text .size (1..256)
+    end_user_id: text .size (1..256)
 }
 
 AliasPayload = {

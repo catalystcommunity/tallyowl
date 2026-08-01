@@ -57,7 +57,7 @@ This document uses these abbreviations:
 - Errors, exception groups, releases, and regressions
 - Distributed traces and spans
 - Counters, gauges, histograms, and exemplars
-- Users and actors, anonymous identities, aliases, groups, and cohorts
+- Users and end users, anonymous identities, aliases, groups, and cohorts
 - Funnels, paths, retention, and feature and adoption analysis
 - Campaign touchpoints, attribution, conversions, and revenue
 - Saved queries, dashboards, alerts, and derived monitors
@@ -188,7 +188,7 @@ the same sense that a database driver owns those concerns.
 It owns:
 
 - mapping trusted server session identity onto browser-supplied telemetry;
-- rejecting client attempts to assert workspace, project, or privileged actor
+- rejecting client attempts to assert workspace, project, or privileged end user
   identity;
 - one persistent, reconnecting CSIL over TCP connection to the collector;
 - bounded micro-batching, stable batch IDs, pipelined in-flight requests, and
@@ -251,12 +251,16 @@ Collector runtime roles are independently deployable:
 
 - **intake:** owns persistent app connections, validates batches, submits them
   to Corndogs, and returns durable acknowledgements;
-- **forwarder:** claims Corndogs tasks, optionally coalesces compatible payloads,
-  sends stable batches to the head, and completes tasks after final storage
-  receipts;
+- **forwarder:** claims Corndogs tasks, optionally coalesces compatible
+  payloads, sends stable batches to the head, and completes tasks after final
+  storage receipts;
 - **compatibility receiver:** performs Prometheus and OpenMetrics scrapes and
   receives OpenTelemetry metrics and traces before submitting native batches
   through the same Corndogs boundary.
+
+A batch payload travels inside the Corndogs task. Corndogs stores a payload in
+its own bucket as raw bytes, so a large payload does not slow the timeout
+sweep. A collector therefore holds no durable state of its own. See D4.
 
 TallyOwl stays in single-binary territory, so the OpenTelemetry Protocol (OTLP)
 receiver compiles into the collector. It does not open a listening socket by
@@ -575,7 +579,7 @@ The dashboard initially needs:
 - error groups, occurrences, releases, regressions, and trace context;
 - trace waterfall and service and operation latency;
 - metrics charts with counter rates, gauges, histogram quantiles, and exemplars;
-- funnels, paths, retention, cohorts, and actor timelines;
+- funnels, paths, retention, cohorts, and end-user timelines;
 - campaigns, attribution models, conversions, revenue, and cost imports;
 - dashboards, saved queries, alerts, and notification history.
 
@@ -625,8 +629,8 @@ if the process cannot reach its durable store; it must not accept and discard.
 - If enabled, the collector derives coarse geography and discards the source
   address.
 - TallyOwl prohibits direct personal data by default.
-- TallyOwl permits a stable actor ID in project or workspace scope.
-- An exact index supports actor timelines and erasure.
+- TallyOwl permits a stable end-user ID in project or workspace scope.
+- An exact index supports end-user timelines and erasure.
 - Cross-project links need an explicit identity policy.
 - Consent state travels with applicable browser events.
 - Drop a disallowed event before durable enqueue when possible.

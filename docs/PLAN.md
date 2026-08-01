@@ -8,6 +8,12 @@ Use gates for this plan. Do not start a later phase before approval of the
 current contracts and failure tests. Build thin vertical slices before you
 build all telemetry types.
 
+Phase 1 is the local development loop, and it comes before every other build
+task. The loop is the home profile rather than a development arrangement, so
+configuration, health, logging, and the delivery path all take their final
+shape on the first day. Every later phase then adds to a working system instead
+of retrofitting one. See Phase 1 for why each of those four is load bearing.
+
 The phase order puts the distributed storage work after errors, traces, and
 metrics. The first consuming applications need correlated telemetry before they
 need a replicated cluster. The storage format does not change between the two,
@@ -23,7 +29,7 @@ Deliverables:
 - define the reference application scenarios and the ledger contract;
 - capacity sketch for event, metric, and span rates, retention, and outage
   window, which the reference application later measures;
-- threat model and privacy defaults;
+- threat model and privacy defaults, in [THREAT_MODEL.md](THREAT_MODEL.md);
 - release and version policy (license is Apache-2.0);
 - architecture decision records for storage, runtime, and durability.
 
@@ -36,23 +42,152 @@ Exit criteria:
 - one documented durable backend event path;
 - agreed native storage format, embedded topology, and clustered durability
   model;
-- agreed delivery contract and operational recovery objectives.
+- agreed delivery contract;
+- stated durability for each receipt policy, infrastructure requirements for
+  each profile, and convergence behaviour for a multi-region installation. D53
+  replaces recovery objectives with those three.
 
-## Phase 1 — repository and contract foundation
+## Phase 1 — the local development loop
+
+**Nothing else starts until a developer can run, configure, and debug the
+system on a workstation.** Every later phase adds to this loop. A phase that
+builds a service before the loop exists pays to retrofit it.
+
+### The principle: the development loop is the home profile
+
+There is no development mode. A developer runs the `home` profile from
+[DEPLOYMENT.md](DEPLOYMENT.md) section 3: one head, one collector, and one
+Corndogs. That is the smallest supported production deployment, so the
+workstation topology and the smallest real installation are the same topology.
+
+Consequences, and they are the point:
+
+- no `if development` branch anywhere in a service;
+- no mock, no stub transport, and no in-process shortcut between the collector
+  and the head;
+- a setting that a developer changes locally is the same setting an operator
+  changes in a chart, under the same name;
+- a bug that appears in the home profile appears on a workstation.
+
+Containers are not required. The services are binaries, so the loop runs
+binaries. The container path exists for parity checking and for people who
+prefer it. It is never the fast path.
+
+### Configuration, designed once and for the product
+
+Configuration is the part of this phase that prevents the most later work.
+[CONVENTIONS.md](CONVENTIONS.md) section 5 gives the precedence. This phase
+builds the loader that every binary uses.
+
+**One name for one setting, in every place it appears.** A setting has one key
+path, and that path is identical in the configuration file, the environment
+variable, the command-line flag, and the Helm value:
+
+| Place | Form |
+| --- | --- |
+| Helm value | `storage.receiptPolicy` |
+| Configuration file | `storage: { receiptPolicy: ... }` |
+| Environment variable | `TALLYOWL_STORAGE__RECEIPT_POLICY` |
+| Command-line flag | `--storage.receipt-policy` |
+
+A section separator becomes a double underscore in an environment variable, so
+a key that holds an underscore stays unambiguous.
+
+The configuration file is YAML, and its tree is the same tree as the chart
+values. A rendered chart and a local file are then the same document, and a
+developer reading DEPLOYMENT.md section 4 needs no translation.
+
+Rules this phase implements:
+
+- **Validate everything at startup and refuse to start on a bad value.** A
+  service that starts with bad configuration fails later, in production, where
+  nobody connects the failure to the setting.
+- **A secret is a reference, never a value.** The file holds `file:`, `env:`,
+  or a secret-store reference. The loader resolves it at startup, logs that it
+  resolved and from where, and never logs the value.
+- **No `.env` file in the binary workflow.** A `.env` file is a container
+  convention, and it hides precedence. The binary workflow uses a
+  configuration file plus real environment variables.
+- The container and compose workflow may use one. It reads `.local.env`, which
+  is ignored by Git. `.local.example.env` is committed, holds no secret, and
+  documents every key.
+- Every value has a default that is safe for a home installation, so an empty
+  configuration file starts a working system.
+
+**`tallyowl config check` exists on the first day.** It resolves the full
+configuration from every source, reports which source won for each value,
+masks every secret, and exits non-zero on an invalid value. This one command
+removes more debugging time than any other in this phase.
+
+### The walking skeleton
+
+Deliberately small, and real at every boundary that matters:
+
+- a `tallyowl-collector` binary that serves `TallyOwlIngest` over CSIL-RPC and
+  writes each accepted batch to Corndogs;
+- a `tallyowl-head` binary that drains that Corndogs queue, writes to a
+  directory, and answers one query operation;
+- a Rust driver that sends one event;
+- both binaries expose live and ready per CONVENTIONS.md section 3, log per
+  section 4, and expose metrics per section 6.
+
+Storage is a stub in this phase. The **path** is not: accept, durable queue,
+drain, commit, receipt. That is the DELIVERY.md path, and building it now means
+Phase 3 replaces a stub instead of introducing a boundary.
+
+### The task runner
+
+`tools.sh` is a thin front door. It calls the Python tooling, which uses
+Reactorcide's runnerlib event lifecycle so a local run and a CI run execute the
+same code. Assume `uv` provides Python. Pin csilgen to a released version.
+
+Commands this phase delivers:
+
+| Command | Does |
+| --- | --- |
+| `./tools.sh setup` | Fetches toolchains, generates from `csil/`, writes a local configuration file from the example |
+| `./tools.sh gen` | Generates from `csil/` |
+| `./tools.sh build` | Builds every service |
+| `./tools.sh test` | Runs every test |
+| `./tools.sh dev up` | Starts Corndogs, the head, and the collector, and follows their logs |
+| `./tools.sh dev up --without head` | Starts the rest, so a debugger owns the head |
+| `./tools.sh dev down` | Stops them and leaves the data directory |
+| `./tools.sh dev reset` | Stops them and removes the data directory |
+| `./tools.sh config check` | Runs `config check` against the local configuration |
+
+`--without` is the debug loop. A developer runs two services from the task
+runner and the third in a debugger, with no container indirection and no
+attach dance.
+
+Supervision lives in the task runner, never in a service. A service that knows
+how to start its siblings has a development code path, which this phase exists
+to prevent.
+
+### Parity, enforced by a test
+
+A rendered chart and a local configuration drift the moment somebody adds a
+setting to one of them. A test therefore renders the `home` profile and asserts
+that the chart values and the loader agree on every key, every type, and every
+required value. CI fails on a mismatch.
+
+This test is the reason the loop keeps matching production instead of slowly
+becoming a development-only arrangement.
 
 Deliverables:
 
-- workspace and package layout and unified task runner;
-- Reactorcide job definitions and runnerlib Python pipeline entry points, with
-  no Bash build, test, and deploy wrappers;
-- generation from the written `csil/` specifications, which already validate
-  and generate for Rust, Go, and TypeScript;
-- package-mode clients;
-- generated-code drift check in CI;
-- golden CBOR vectors and cross-language round-trip tests;
-- configuration loader, structured safe logging, error taxonomy, and health
-  conventions;
-- development Helm values and local integration environment.
+- workspace and package layout;
+- the configuration loader, with precedence, validation, secret references,
+  and `config check`;
+- structured safe logging, the error taxonomy, and the health conventions from
+  CONVENTIONS.md, as shared code rather than as a convention that each service
+  reimplements;
+- the two walking-skeleton binaries and the Rust driver;
+- `tools.sh` and the runnerlib pipeline entry points, with no Bash build, test,
+  or deploy wrapper;
+- the `home` chart skeleton and its values, enough for the parity test;
+- an optional compose file, `.local.example.env`, and a `.local.env` that Git
+  ignores;
+- `CONTRIBUTING.md`, written against the commands above.
 
 Suggested layout:
 
@@ -64,6 +199,8 @@ csil/
   tallyowl-control.csil
 crates/
   tallyowl-types/
+  tallyowl-config/
+  tallyowl-obs/
   tallyowl-collector/
   tallyowl-head/
   tallyowl-store/
@@ -76,9 +213,44 @@ generated/
 charts/
   tallyowl/
   collector/
+tools/
 testbed/
+prototypes/
 docs/
 ```
+
+Exit criteria:
+
+- a clean clone reaches a working event round trip with `./tools.sh setup` and
+  `./tools.sh dev up`, and nothing else;
+- an event sent by the driver reaches the head through Corndogs and a query
+  returns it;
+- any one of the three processes runs under a debugger while the other two run
+  normally;
+- `config check` reports the winning source for every value and masks every
+  secret;
+- a bad configuration value stops startup and names the setting, the value, and
+  a valid example;
+- readiness fails when Corndogs is unreachable, and the failure text names the
+  durable store in the language of CONVENTIONS.md section 1;
+- the chart and loader parity test passes, and fails when a setting is added to
+  only one of them;
+- no secret and no personal data appears in any log at any level;
+- Git ignores every local configuration, data directory, and environment file.
+
+## Phase 2 — contract foundation
+
+Phase 1 generates from `csil/` and uses the result. This phase makes the
+contract trustworthy across languages.
+
+Deliverables:
+
+- generation from the written `csil/` specifications, which already validate
+  and generate for Rust, Go, and TypeScript;
+- package-mode clients;
+- generated-code drift check in CI;
+- golden CBOR vectors and cross-language round-trip tests;
+- the Go and TypeScript drivers reaching the Phase 1 collector.
 
 Exit criteria:
 
@@ -88,7 +260,7 @@ Exit criteria:
   carrier into a fake collector;
 - the reference application skeleton builds and its ledger writer runs.
 
-## Phase 2 — embedded storage foundation
+## Phase 3 — embedded storage foundation
 
 Deliverables:
 
@@ -103,11 +275,11 @@ Deliverables:
 - raw and typed event segments;
 - tombstones and affected-segment compaction;
 - manifest snapshot query with time, project, and kind pruning;
-- exact request, trace, span, session, actor, and custom-property lookup;
+- exact request, trace, span, session, end user, and custom-property lookup;
 - optional hot and warm to cold object-storage tiering with bounded local cache;
 - optional Parquet exporter and direct DuckDB verification;
 - snapshot, restore, and catalog rebuild command;
-- per-actor key material and cryptographic erasure for the cold tier;
+- per-end-user key material and cryptographic erasure for the cold tier;
 - storage and capacity metrics through native and Prometheus and OpenMetrics paths.
 
 Failure work:
@@ -125,7 +297,7 @@ Exit criteria:
 - one binary runs the head, query service, and durable store from one directory;
 - one binary requires no external database;
 - accepted data survives abrupt process and host restart;
-- a point or actor deletion disappears immediately, rewrites only intersecting
+- a point or end user deletion disappears immediately, rewrites only intersecting
   bounded local segments, and erases cold data by key destruction;
 - a read of cold data after key destruction fails and cannot recover the value;
 - a tombstone hides a matching event that arrives after the erasure request;
@@ -134,7 +306,7 @@ Exit criteria:
 - an interrupted cold-tier upload never evicts the only valid segment copy;
 - a clean Parquet export is queryable in DuckDB.
 
-## Phase 3 — durable event vertical slice
+## Phase 4 — durable event vertical slice
 
 Deliverables:
 
@@ -185,7 +357,7 @@ Exit criteria:
 Test the vertical slice first through Longhouse with the Go app driver. Also
 test it through Ichoi with the Rust app driver.
 
-## Phase 4 — errors and traces
+## Phase 5 — errors and traces
 
 Deliverables:
 
@@ -212,7 +384,7 @@ Exit criteria:
 - the reference application produces browser, backend, and rich-client errors
   that match the ledger.
 
-## Phase 5 — metrics and compatibility receivers
+## Phase 6 — metrics and compatibility receivers
 
 Deliverables:
 
@@ -237,7 +409,7 @@ Exit criteria:
 - high-cardinality series keep correct values under configured resource limits;
 - exhausted limits cause explicit backpressure.
 
-## Phase 6 — replicated storage proof
+## Phase 7 — replicated storage proof
 
 This phase begins when an installation needs more than one storage node. The
 segment format does not change here. A home installation never enters this
@@ -283,12 +455,12 @@ Scale simulations are a milestone, not a gate. A 400-node cell simulation and a
 directory work. Do not block the phase on hardware that the project does not
 have.
 
-## Phase 7 — product behavior
+## Phase 8 — product behavior
 
 Deliverables:
 
 - sessions, identify, alias, group association, and traits;
-- actor and session timelines;
+- end user and session timelines;
 - per-user erasure across detailed data, derived state, local segments, cold
   objects, and caches;
 - funnel, retention, path, and cohort query operations;
@@ -301,10 +473,10 @@ Exit criteria:
 - anonymous-to-known conversion works without cross-project leakage;
 - funnel and retention fixtures have explainable exact results;
 - query cost guards reject pathological analysis safely;
-- the reference application actor uses the web, rich, and mobile clients, and
+- the reference application end user uses the web, rich, and mobile clients, and
   the resulting funnel, retention, and timeline results match the ledger.
 
-## Phase 8 — campaigns and business outcomes
+## Phase 9 — campaigns and business outcomes
 
 Deliverables:
 
@@ -323,7 +495,7 @@ Exit criteria:
 - every attribution model matches the ledger for traffic that arrives from the
   reference marketing site landing pages.
 
-## Phase 9 — alerts and workflows
+## Phase 10 — alerts and workflows
 
 Deliverables:
 
@@ -340,7 +512,7 @@ Exit criteria:
 - retries survive worker restart;
 - deletion tombstones prevent replay resurrection.
 
-## Phase 10 — production hardening
+## Phase 11 — production hardening
 
 Deliverables:
 
@@ -377,6 +549,7 @@ Maintain from the first applicable phase:
 - query resource budgets;
 - Helm render and upgrade tests;
 - real storage integration tests, not mocks for storage semantics;
+- branch coverage of every decision that is not operating-system logistics;
 - the reference application suite, at the coverage the current phase permits.
 
 ## Client library rollout

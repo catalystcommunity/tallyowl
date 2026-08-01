@@ -93,8 +93,45 @@ A column ID is stable. Assign it one time. Never use it for a different field.
 
 ## 6. Row groups and pages
 
-A row group holds a bounded count of rows. Each column contributes one page for
-each row group.
+A row group holds a bounded count of rows. Each column contributes one **or
+more** pages for each row group.
+
+One page for each column for each row group does not work. A row group targets
+8 to 16 MiB of uncompressed column data. Split across eight columns, a 16-byte
+column then holds 1 to 2 MiB, which no compression brings inside the 64 KiB
+page target when the values are unique. A measurement of the format as first
+written produced a largest page of 520 KiB, eight times the target. See
+[BENCHMARKS.md](BENCHMARKS.md) section 12a.
+
+**A writer therefore closes a page on bytes, not on rows.** It accumulates
+values for one column until the encoded size reaches the page target, then
+writes the page and starts another. A row group holds as many pages for a
+column as that column needs.
+
+The cost is small and it falls on one column shape. Splitting a 65,536-row page
+into 4,096-row pages costs 1.35 bytes for each event on a high-cardinality
+repeated column, because the compressor sees less history. It costs nothing at
+all on a unique column or a strongly repeated one, where the bytes are already
+either incompressible or fully removed.
+
+The row-group count sets the cost of a cold read. One column is every Nth page
+in an N-column segment, so a strided read does not coalesce and each page needs
+its own object-store request. A measurement showed 256 requests for one column
+of a 256 MiB segment, against one request when the column is contiguous. See
+[BENCHMARKS.md](BENCHMARKS.md) section 9.
+
+A row group targets 8 to 16 MiB of uncompressed column data, so a 256 MiB
+segment holds roughly 16 to 32 row groups. See D49.
+
+A cold reader merges adjacent page ranges when the gap costs less than a round
+trip. One round trip costs about 15 milliseconds. 16 MiB of unwanted bytes
+costs about 160 milliseconds at 100 MB each second. A reader therefore merges
+across a gap of roughly 1.5 MiB or less. The measured latency and bandwidth of
+the configured object store give the exact threshold.
+
+Coalescing matters more than the size. A larger row group costs more decode
+memory and gives coarser statistics pruning. Do not raise it to remove round
+trips that coalescing already removes.
 
 A page holds:
 
@@ -127,7 +164,9 @@ elaborate. See D17.
 The compression codec is `none` or Zstandard. The writer uses Zstandard level 1
 for hot and warm data and may use level 3 during cold compaction.
 
-The page target is 64 KiB compressed. A reader accepts every permitted size.
+The page target is 64 KiB compressed, and it binds. A writer that cannot reach
+the target with the rows it holds writes a smaller page. A writer never writes a
+larger one to keep a page count tidy.
 
 ## 7. Index region
 
@@ -138,7 +177,8 @@ exact-indexed column chooses a layout from measured statistics. See
 | Layout | Applies to |
 | --- | --- |
 | `term-postings` | A repeated value. A prefix-compressed term dictionary plus compressed row-ID postings. |
-| `unique-lookup` | A mostly-unique value. Sorted fixed-width fingerprints plus row IDs. |
+| `block-filter` | A unique value that only needs presence. A filter for each row group. |
+| `unique-lookup` | A mostly-unique value that needs a row ID without a page read. Sorted fixed-width fingerprints plus row IDs. |
 | `ordered-values` | A range query. Sorted value and row blocks with skip data. |
 | `facet-column` | Grouping. Typed values or ordinals for local partial aggregation. |
 
@@ -147,6 +187,41 @@ value before it returns a row. A collision therefore cannot produce an
 incorrect result.
 
 Each index block carries its own length, encoding, and xxHash3-64 checksum.
+
+### Choosing between `block-filter` and `unique-lookup`
+
+**`block-filter` is the default for a unique value.** `unique-lookup` needs a
+reason.
+
+A `unique-lookup` entry costs 12 bytes for each row, whatever the value. On the
+`event_id` column that measured as 25 percent of the whole segment, which was
+the largest single line item in the format. A `block-filter` at 12 bits for each
+key costs 2.00 bytes for each row, saves 10.00 bytes for each row, and cuts the
+whole segment by 21 percent. See [BENCHMARKS.md](BENCHMARKS.md) section 12a.
+
+The difference in what they answer:
+
+| Question | `block-filter` | `unique-lookup` |
+| --- | --- | --- |
+| Does this segment hold the value? | No, or maybe | Yes or no, exactly |
+| Which row holds it? | Read the column page and find out | From the index |
+
+A filter answers "no" exactly. It answers "maybe" at a measured rate of 0.53
+percent for each row group, and the reader then decodes one column page and gets
+an exact answer there. Correctness holds in both layouts, because in both the
+reader verifies the full typed value.
+
+Use `unique-lookup` only when a query must locate rows without decoding a column
+page, and a measurement shows that the page read costs more than 10 bytes for
+each row of index. Deduplication and point lookup do not meet that test: both
+already decode the row they find.
+
+Use `term-postings`, not either of these, when the value repeats. A query for a
+whole trace wants the row list, and a filter cannot give one.
+
+A `block-filter` block holds one filter for each row group, in row-group order.
+A filter is sized to a power of two 64-bit words at 12 bits for each key. 16
+bits buys nothing over 12, because both round to the same size.
 
 ## 8. Footer
 
@@ -270,3 +345,7 @@ decompression ratio limit applies.
 7. A decompression bomb rejected by the ratio limit.
 8. A read of an encrypted segment after key destruction.
 9. A catalog rebuilt by scanning manifests only.
+10. A block filter that says maybe, where the column page then says no. The
+    query must return no row, not a wrong row.
+11. A column of unique 16-byte values, where every page stays inside the page
+    target. This is the case that the format as first written failed.

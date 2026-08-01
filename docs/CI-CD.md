@@ -12,7 +12,35 @@
   a repository file, artifact, command line, or log.
 - CI does not stage, commit, or push source changes.
 
-## 2. Proposed layout
+## 2. One entry point
+
+A person types `tools.sh`. Reactorcide calls the same Python modules. Local and
+CI therefore run identical code.
+
+```text
+tools.sh <verb>            thin dispatcher, no logic
+   └─ uv run python -m tallyowl_tools.<verb>
+         └─ runnerlib event lifecycle
+               └─ cargo | go | npm | csilgen  (argument arrays, shell=False)
+```
+
+`tools.sh` holds no logic. It exists because a person should not have to
+remember a Python module path, and because every other repository here has one.
+
+Verbs cover build, test, generate, lint, and the reference application.
+
+Two rules that this entry point exists to enforce:
+
+- csilgen runs from the `csil/` directory, because an `include` resolves
+  against the working directory. That rule lives in code that both paths call,
+  not in prose that a person has to remember. See [../csil/README.md](../csil/README.md).
+- the tooling pins csilgen to a released version rather than a local build,
+  once csilgen publishes releases through its own Reactorcide pipeline.
+
+`uv` provisions the Python version. A developer needs `uv` and nothing else to
+run the verbs that need no cluster.
+
+## 3. Proposed layout
 
 ```text
 .reactorcide/
@@ -53,7 +81,7 @@ standardizes working directory, timeouts, safe environment allowlists, captured
 diagnostics, and secret-safe command display while leaving orchestration to
 runnerlib.
 
-## 3. Workflow graph
+## 4. Workflow graph
 
 ```text
 ingest
@@ -90,7 +118,7 @@ paths, then emits the relevant nodes. Pull requests run validation and bounded
 integration work without publish and deploy secrets. Main-branch and tag workflows
 may add package or release nodes under project policy.
 
-## 4. Validation jobs
+## 5. Validation jobs
 
 ### Format and lint
 
@@ -145,7 +173,7 @@ processes. See [TESTBED.md](TESTBED.md).
 
 The same job must run on one developer machine with one command.
 
-## 5. Packaging and release
+## 6. Packaging and release
 
 Package jobs produce immutable artifacts identified by the source commit:
 
@@ -164,7 +192,7 @@ for each registry.
 If the project needs deployment, add an explicit protected node. Packaging must
 not cause deployment.
 
-## 6. Local execution
+## 7. Local execution
 
 Every non-publishing job must work through Reactorcide's canonical local runner.
 The repository documentation will give `run-local` examples after job files
@@ -180,7 +208,7 @@ There is no parallel collection of ad hoc shell wrappers. Developers invoke the
 same Python pipeline modules directly for a narrow task or run their Reactorcide
 job locally.
 
-## 7. Trust and secrets
+## 8. Trust and secrets
 
 - For outside contributions, trusted CI source and untrusted application source
   remain separate using Reactorcide's dual-source model.
@@ -193,9 +221,9 @@ job locally.
 - Inspect artifact contents before promotion. This prevents test output from
   putting secrets in a release.
 
-## 8. Initial Reactorcide milestones
+## 9. Initial Reactorcide milestones
 
-1. Add `ingest`, `validate`, and CSIL drift jobs in Phase 1.
+1. Add `ingest`, `validate`, and CSIL drift jobs in Phase 2.
 2. Add real service integration jobs with the durable event slice.
 3. Add the `testbed` job with the first reference-application scenario.
 4. Add package jobs when the first container, chart, and client artifact is usable.

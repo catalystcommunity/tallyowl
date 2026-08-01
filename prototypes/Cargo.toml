@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "page-bench",
+    "catalog-bench",
+    "index-bench",
+    "tier-bench",
+    "consensus-bench",
+    "wal-bench",
+    "segment-bench",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

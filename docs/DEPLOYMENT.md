@@ -21,6 +21,9 @@ only works for one cluster is not useful to the people who need cells.
 | `tallyowl` | Head roles, query, storage, dashboard, controller, and workers |
 | `tallyowl-collector` | Intake, forwarder, and compatibility receiver |
 
+A collector holds no durable state. Corndogs owns the queue and the payload, so
+a collector stays a stateless Deployment.
+
 Each chart can reference an existing Corndogs service or install a tightly
 scoped local one.
 
@@ -76,6 +79,10 @@ A profile change is an online change. It moves data. It does not rewrite it.
 | `storage.coldTier.enabled` | Object storage for cold segments |
 | `corndogs.durableCopies` | Copies required before a collector acknowledgement |
 | `corndogs.backend` | `file` or `postgres` |
+| `corndogs.maxPayloadBytes` | Corndogs payload limit; 16 MiB by default |
+
+`corndogs.maxPayloadBytes` must exceed the batch seal size in D19, which is
+512 KiB.
 
 The chart refuses `storage.receiptPolicy: local-one` when
 `storage.tabletVoters` is greater than one. `local-one` is legal only for a
@@ -149,6 +156,25 @@ tablet. See D27.
 
 The chart does not decide write ownership. The controller does.
 
+## 5a. Infrastructure requirements
+
+TallyOwl states what it needs from infrastructure. It does not restate another
+product's durability numbers as its own objective. See D53.
+
+| Requirement | Why |
+| --- | --- |
+| A volume that honours `fsync` | Every durability claim rests on it. A volume that acknowledges a flush without one makes every receipt a lie. |
+| A storage class with the redundancy the operator needs | TallyOwl acknowledges at the configured receipt policy. Surviving the loss of the volume itself is the infrastructure's job. |
+| An object store with its own durability guarantee | The cold tier holds retained telemetry. Its durability is the bucket's. |
+| A backup target that the operator tests | A restore that nobody has run is not a backup. |
+
+A process crash needs no recovery procedure. Writes are atomic, and a restart
+loses nothing that TallyOwl acknowledged.
+
+A region loss is a convergence problem rather than a recovery one. A surviving
+region continues, and CELLS.md gives the fenced failover and the watermarks
+that show convergence.
+
 ## 6. Placement and disruption
 
 - spread tablet voters across failure domains with anti-affinity rules;
@@ -175,11 +201,15 @@ release claimed tasks, and leave queued data durable.
 ## 8. Required tests
 
 1. Chart rendering for every profile, with no cluster.
-2. A refused `local-one` on a multi-voter tablet.
-3. A refused `durable_copies` value that the backend cannot satisfy.
-4. A refused duplicate `cell.id`.
-5. A refused installation with a mismatched CA fingerprint.
-6. An install, an upgrade, and a rollback in a disposable cluster.
-7. A second cell joining an existing installation.
-8. A cell that continues data operations while the global directory is down.
-9. A rolling upgrade with live traffic and adjacent protocol versions.
+2. Chart values and the configuration loader agree on every key, every type,
+   and every required value for the `home` profile. This test fails when a
+   setting reaches only one of them. It is what keeps the local development
+   loop matching a deployment. See PLAN.md Phase 1.
+3. A refused `local-one` on a multi-voter tablet.
+4. A refused `durable_copies` value that the backend cannot satisfy.
+5. A refused duplicate `cell.id`.
+6. A refused installation with a mismatched CA fingerprint.
+7. An install, an upgrade, and a rollback in a disposable cluster.
+8. A second cell joining an existing installation.
+9. A cell that continues data operations while the global directory is down.
+10. A rolling upgrade with live traffic and adjacent protocol versions.

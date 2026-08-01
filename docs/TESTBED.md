@@ -1,5 +1,26 @@
 # Reference application and integration test bed
 
+## 0. Two levels of test
+
+This document describes the system level. The unit and integration level uses a
+different pattern, and the two are not alternatives.
+
+**Unit and integration.** Tests generate the data they need, in the pattern that
+other repositories here already use. A `DataUtils` helper exposes a
+`Create<Thing>(setup)` call for each stored kind. It fills every field that the
+test did not name with generated values, so a test declares only what it cares
+about.
+
+- Run inside a transaction and roll it back, so a test leaves nothing behind.
+- Prefer in-memory storage, so the suite stays fast.
+- Do not mock the storage interface. TallyOwl owns that interface, so a mock
+  would only assert that the mock behaves like the mock.
+- Cover branches, not the happy path. Exercise every decision in the code
+  except operating-system logistics such as socket creation.
+
+**System.** The reference application below proves that a product produces
+correct analytics, which no unit test can show.
+
 ## 1. Purpose
 
 Unit tests prove that one component obeys its contract. They do not prove that
@@ -100,8 +121,8 @@ analysis the test bed checks.
 
 The simulator knows these facts exactly:
 
-- how many actors started each funnel and how many completed it;
-- which actors returned in each retention period;
+- how many end users started each funnel and how many completed it;
+- which end users returned in each retention period;
 - which touchpoint each attribution model must credit;
 - the exact conversion value and currency total for each campaign;
 - how many occurrences belong to each error group;
@@ -121,7 +142,7 @@ returns an approximate result is a failure, even when the number is close.
 
 ## 6. Simulation model
 
-A scenario is a declarative file. It defines actors, cohorts, campaigns,
+A scenario is a declarative file. It defines end users, cohorts, campaigns,
 releases, and a time span. The simulator expands the scenario into an ordered
 event stream.
 
@@ -132,13 +153,13 @@ The simulator has these properties:
   Retention, cohort, and attribution windows need this.
 - **Real clock mode.** A smaller scenario runs against the real clock. This
   mode exercises timeouts, batching deadlines, and session heartbeats.
-- **Multi-actor.** Actors have devices, sessions, and identity transitions.
-- **Cross-device.** One actor uses the web application, the rich client, and
-  the mobile client. This exercises `identify`, `alias`, and actor timelines.
+- **Multi-end user.** End users have devices, sessions, and identity transitions.
+- **Cross-device.** One end user uses the web application, the rich client, and
+  the mobile client. This exercises `identify`, `alias`, and end-user timelines.
 - **Late and duplicate data.** The simulator deliberately sends late events and
   duplicate event IDs. The ledger records the correct logical result.
 
-Actor identity moves through the states that break naive implementations:
+End user identity moves through the states that break naive implementations:
 
 ```text
 anonymous (marketing site)
@@ -188,7 +209,7 @@ Each surface must exercise its telemetry kinds and its assertions:
 | Traces and spans | Backend, all clients | Waterfall shape, exact parent and child |
 | Metrics | Backend | Counter rate, gauge, histogram quantile |
 | Compatibility metrics | Scrape target, push exporter | Normalized value equality |
-| Identity and aliasing | Cross-device actor | Timeline continuity, no leakage |
+| Identity and aliasing | Cross-device end user | Timeline continuity, no leakage |
 | Campaigns | Marketing site landing pages | Touchpoint classification |
 | Attribution | Simulator conversion stream | Each model against the ledger |
 | Revenue and cost | Backend, cost import | Exact decimal totals and return |
@@ -242,7 +263,19 @@ The test bed runs as its own Reactorcide job. See [CI-CD.md](CI-CD.md).
 
 The test bed must also run on one developer machine with one command.
 
-## 12. Build order
+## 12. Scenarios grow
+
+Do not write every scenario before the test bed runs. Start with enough to
+prove the ledger mechanism, then add one for each capability as its phase makes
+it possible.
+
+**Every regression adds a scenario.** A defect that reached a person becomes a
+scenario with a ledger assertion, so it can never return quietly. The set therefore becomes
+thorough without anyone predicting where the defects appear.
+
+A scenario names its seed, so a failure reproduces exactly.
+
+## 13. Build order
 
 The test bed grows with the system. Do not build it all at the start.
 

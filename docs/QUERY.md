@@ -122,7 +122,7 @@ A scan always has a time range. A scan without a time range is an error.
 ### 6.2 join
 
 A join stays bounded and exact. It correlates on a built-in correlation ID,
-such as a trace ID, a request ID, a session ID, or an actor ID.
+such as a trace ID, a request ID, a session ID, or an end-user ID.
 
 Rules:
 
@@ -264,7 +264,7 @@ typed input, a bounded cost, and a defined result.
 Input: an ordered list of step definitions, a window duration, and a
 correlation basis.
 
-- the correlation basis is an actor, a session, or a group;
+- the correlation basis is an end user, a session, or a group;
 - a step is an event definition with an optional filter;
 - ordered mode requires the steps in order; unordered mode does not;
 - an exclusion step voids a sequence when it occurs inside the window;
@@ -307,7 +307,7 @@ Trace assembly uses the exact index. It does not scan.
 
 ### 12.5 timeline
 
-Input: an actor ID or a session ID, a time range, and a set of telemetry kinds.
+Input: an end-user ID or a session ID, a time range, and a set of telemetry kinds.
 
 Result: the merged envelopes in event-time order, with bounded pagination.
 
@@ -318,7 +318,7 @@ touchpoint filter.
 
 Result: credited value for each touchpoint dimension.
 
-The operator shape is stable. The model weights are Phase 8 work. The result
+The operator shape is stable. The model weights are Phase 9 work. The result
 always names the model and its version, because a model change recomputes from
 immutable facts.
 
@@ -406,16 +406,58 @@ second contract.
 
 An adapter uses a compatible MIT or Apache-2.0 parser. See D18.
 
-## 18. Open items
+## 18. Approximate measures
 
-These need a decision before the query service is complete:
+Each approximate measure names one algorithm, and every result reports the
+method and the bound that applied. See D50.
 
-1. the named sketch for each approximate measure, with its error bound;
-2. the default caps for `count_distinct`, `quantile`, and `top_k`;
-3. the default query budgets for the home profile and for a cluster;
-4. the maximum fan-out for each profile;
-5. whether a saved query pins an algebra version;
-6. the cost model that the planner reports before it runs a query.
+| Measure | Algorithm | Bound |
+| --- | --- | --- |
+| `count_distinct_approx` | HyperLogLog++ | Stated for the configured precision |
+| `quantile_approx` | DDSketch | Guaranteed relative error |
+| `top_k_approx` | Space-Saving | Bounded by counter count |
 
-Items 2, 3, and 4 depend on the D10 capacity envelope. The reference
-application measures them. See [TESTBED.md](TESTBED.md).
+Accuracy comes before footprint. Size each sketch for accuracy, and let a
+project that prefers a smaller footprint reduce it.
+
+An exact measure never falls back to a sketch.
+
+## 19. Explain
+
+An explain operation returns a plan tree and a plain-language summary, and it
+always returns both. See D52.
+
+The tree carries the detail an engineer needs for each node:
+
+- the operator;
+- the estimated rows and bytes;
+- the segments it would touch;
+- whether it reaches the cold tier;
+- the indexes it would use;
+- the exactness of each measure.
+
+The summary translates that tree. A person uses it to decide whether to run the
+query, to adjust it, or to drop it, without reading the tree.
+
+An estimate that the planner cannot make returns unknown. It never returns a
+guess.
+
+## 20. Saved queries
+
+A saved query records the algebra version of its author and executes on the
+current algebra. Section 16 forbids a change to the meaning of an existing
+operator, so the current version gives the same answer.
+
+Golden query tests replay saved trees across versions and require identical
+results. See D51.
+
+## 21. Open items
+
+These need the capacity envelope in D10 before anyone can choose them:
+
+1. the default caps for `count_distinct`, `quantile`, and `top_k`;
+2. the default query budgets for the home profile and for a cluster;
+3. the maximum fan-out for each profile;
+4. the default sketch precision for each approximate measure.
+
+The reference application measures them. See [TESTBED.md](TESTBED.md).

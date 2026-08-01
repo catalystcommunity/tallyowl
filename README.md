@@ -18,7 +18,7 @@ accepts it, then independently retries and forwards it to final TallyOwl
 storage.
 
 The native store supports exact high-cardinality correlation and aggregate
-analytics. Correlation fields include request, trace, span, session, actor, and
+analytics. Correlation fields include request, trace, span, session, end user, and
 custom IDs.
 
 Recent hot and warm segments stay on local storage. Optional object storage can
@@ -28,7 +28,12 @@ TallyOwl hosts the dashboard and uses LinkKeys login. Corndogs provides durable
 queues and workflows. CSIL defines the ingest and query contracts. Do not edit
 generated code.
 
-This repository is currently in design-first mode:
+This repository is currently in design-first mode. The first build task is the
+local development loop in [Phase 1](docs/PLAN.md): a developer runs the `home`
+profile as binaries on a workstation, with the same configuration, health, and
+delivery path a deployment uses.
+
+Design documents:
 
 - [System design](docs/DESIGN.md)
 - [Delivery and failure semantics](docs/DELIVERY.md)
@@ -36,6 +41,8 @@ This repository is currently in design-first mode:
 - [High-cardinality storage and correlation](docs/HIGH_CARDINALITY.md)
 - [Cell architecture and growth](docs/CELLS.md)
 - [Node identity and automated enrollment](docs/NODE_IDENTITY.md)
+- [Threat model](docs/THREAT_MODEL.md)
+- [Service conventions](docs/CONVENTIONS.md)
 - [Native storage design](docs/STORAGE.md)
 - [Query algebra](docs/QUERY.md)
 - [Segment and manifest format](docs/SEGMENT_FORMAT.md)
@@ -44,6 +51,7 @@ This repository is currently in design-first mode:
 - [Deployment and Helm charts](docs/DEPLOYMENT.md)
 - [Implementation plan](docs/PLAN.md)
 - [Reference application and integration test bed](docs/TESTBED.md)
+- [Benchmark results](docs/BENCHMARKS.md)
 - [CI/CD design](docs/CI-CD.md)
 - [Protocol specifications](csil/README.md)
 - [Documentation language](docs/DOCUMENTATION.md)

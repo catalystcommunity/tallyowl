@@ -54,6 +54,9 @@
   acknowledge on socket receipt or an in-process queue.
 - Collector intake and forwarder roles must remain independently deployable,
   even though the home profile runs them together.
+- A batch payload travels inside the Corndogs task. Corndogs stores a payload
+  in its own bucket, so a large payload does not slow the timeout sweep. A
+  collector holds no durable state of its own.
 - Collector receipts report the configured total durable-copy requirement.
   The default is one durable Corndogs copy; redundancy is an operator choice,
   not part of the word "durable."
@@ -113,7 +116,7 @@
   scale. Do not put tablet placement in the global directory.
 - Enforce payload, attribute, batch, and resource limits at trust boundaries.
   Support high-cardinality values. These values include request, trace,
-  session, actor, and other exact-correlation IDs.
+  session, end user, and other exact-correlation IDs.
 - Do not silently drop, coalesce, or reject a value because it has high
   cardinality.
 - Treat CSIL CBOR as a wire and WAL representation. After successful segment
@@ -132,11 +135,23 @@
   asks for that exact operation. The user owns staging, commits, and pushes.
 - Use Reactorcide for CI/CD. Put job definitions under `.reactorcide/jobs/` and
   use runnerlib for pipeline and workflow behavior.
-- Avoid Bash and shell-script orchestration. Prefer Python pipeline modules that
-  use runnerlib APIs and invoke tools with argument arrays rather than shell
-  strings. Do not add `.sh` build, test, and deploy wrappers.
+- `tools.sh` at the repository root is the entry point that a person types. It
+  is a thin dispatcher and holds no logic. It calls the Python tooling and
+  nothing else.
+- Orchestration lives in Python modules that use runnerlib APIs and invoke
+  tools with argument arrays rather than shell strings. Do not put build, test,
+  or deploy logic in shell.
+- `uv` provisions Python. Assume it is present.
+- Reactorcide jobs call the same Python modules that `tools.sh` calls, so local
+  and CI cannot drift.
 - Add failure-path and compatibility tests with every protocol or storage
   change.
+- Generate test data with a `DataUtils` helper that fills unnamed fields. Run
+  in a transaction and roll it back. Do not mock the storage interface.
+- Cover branches, not the happy path. Every regression becomes a permanent
+  scenario with a ledger assertion.
+- Write every message that reaches a person in plain language. See
+  docs/CONVENTIONS.md.
 - Keep the reference application current. A capability without
   reference-application coverage is not complete. See `docs/TESTBED.md`.
 - Review security, privacy, backpressure, partial failure, upgrade, and

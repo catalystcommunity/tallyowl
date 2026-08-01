@@ -1,0 +1,12 @@
+[package]
+name = "index-bench"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+tantivy = "0.25"
+tempfile = "3"

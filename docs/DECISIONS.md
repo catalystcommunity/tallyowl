@@ -8,6 +8,7 @@ list:
 | Accepted | The project made this decision. Implement it. |
 | Accepted pending benchmark | The direction is set. A measurement can change the values, not the shape. |
 | Recommended | A proposal. The project owner must approve or refuse it. |
+| Withdrawn | The project made this decision and then reversed it. The record stays. |
 | Open | The project has not made this decision. |
 
 Give each decision one status. If the project accepts only part of a decision,
@@ -26,17 +27,17 @@ make the unresolved part a separate decision.
 | D7 | LinkKeys relying-party mode | Accepted |
 | D8 | Tenant model | Accepted |
 | D9 | Privacy defaults | Accepted |
-| D10 | Capacity envelope | Accepted pending benchmark |
+| D10 | Capacity envelope | Accepted, storage half measured |
 | D11 | Session replay and the session model | Accepted |
 | D12 | Metrics compatibility and self-observability | Accepted |
 | D13 | External notification channels | Accepted |
 | D14 | Repository license | Accepted |
 | D15 | Replication implementation | Accepted pending benchmark |
 | D16 | Tablet sizing and project sub-sharding | Accepted |
-| D17 | Native page compression and sizing | Accepted pending benchmark |
+| D17 | Native page compression and sizing | Accepted, measured |
 | D18 | Query consistency and coordinator behavior | Accepted pending benchmark |
 | D19 | App batching and backpressure defaults | Accepted |
-| D20 | Property schema and high-cardinality indexing | Accepted pending benchmark |
+| D20 | Property schema and high-cardinality indexing | Accepted, measured |
 | D21 | Exact versus approximate analytics | Accepted |
 | D22 | Node trust and role enrollment | Accepted |
 | D23 | Home-profile resource budgets | Accepted pending benchmark |
@@ -63,23 +64,57 @@ make the unresolved part a separate decision.
 | D44 | Segment checksums and content addressing | Accepted |
 | D45 | Tail sampling rule language | Accepted |
 | D46 | Repository scope | Accepted |
+| D47 | Group-commit linger | Accepted |
+| D48 | Collector deployment unit | Withdrawn |
+| D49 | Row-group size and reader coalescing | Accepted |
+| D50 | Approximate measure algorithms | Accepted |
+| D51 | Saved query versioning | Accepted |
+| D52 | Query explain output | Accepted |
+| D53 | Durability and convergence, not recovery objectives | Accepted |
+| D54 | Plain language for anything a person reads | Accepted |
+| D55 | One entry point for build, test, and generate | Accepted |
+| D56 | Test data generation and branch coverage | Accepted |
 
 ## Next decision order
 
 Every decision now has a status. No decision waits for an approval.
 
-These prototype and measurement tasks remain:
+### Measured
 
-1. Test D3, D17, D20, D24, and D25 with storage benchmarks.
-2. Build the reference application, then measure D10 and D23 with it.
-3. Fix the D36 deduplication window from the D10 outage buffer target.
-4. Test D15, D16, D26, and D27 with cell and consensus prototypes.
-5. Test D18 with distributed correctness fixtures.
-6. Measure the D35 provisional retention cost at the selected decision window.
-7. Design the D28 segment encryption keys before cold tiering carries erasable
+D3, D15, D17, D20, D24, D25, D33, and D44 now carry measured sections. D10
+carries a measured storage half and an unmeasured end-to-end half. See
+[BENCHMARKS.md](BENCHMARKS.md).
+
+Nothing blocks the start of implementation. Every remaining item needs code
+that does not exist yet.
+
+### Open, waiting on the reference application
+
+1. Measure D10 and D23 end to end. The storage half of D10 is measured; ingest
+   rate, burst multiplier, query concurrency, and the outage buffer target are
+   not storage measurements.
+2. Fix the D36 deduplication window from the D10 outage buffer target.
+3. Measure the D35 provisional retention cost at the selected decision window.
+4. Confirm the segment cost at real value distributions. Section 12 measured
+   generated values, and it showed that column data is the part a component
+   measurement gets wrong.
+
+### Open, waiting on an implementation
+
+5. Test D15 against real storage and a real network. The prototype meets every
+   criterion on an in-memory substrate. Election under disk latency, a
+   non-isolation partition, and recovery from a corrupt log are unmeasured.
+6. Test D16, D26, and D27 with cell prototypes.
+7. Test D18 with distributed correctness fixtures.
+8. Design the D28 segment encryption keys before cold tiering carries erasable
    data.
-8. Select the D40 attribution default values in Phase 8.
-9. Reopen D31 at the release candidate and select the distribution coordinates.
+9. Measure D20 deletion and cold-object lookup, which need a deletion path.
+
+### Open, scheduled
+
+10. Select the D40 attribution default values in Phase 9.
+11. Reopen D31 at the release candidate and select the distribution
+    coordinates.
 
 These numeric defaults are first values for measurement. The reference
 application confirms or changes each one. They are not recommendations.
@@ -148,39 +183,57 @@ operator can configure a short CBOR retention period.
 The accepted writer defaults are in D17. Do not make the format stable until
 all required storage tests pass. See [STORAGE.md](STORAGE.md).
 
+### Measured, 2026-07-26
+
+redb 3.1.3 meets the catalog requirement.
+
+- A deduplication lookup on the ingest hot path costs 0.91 microseconds, at
+  1,098,930 lookups each second.
+- A manifest prefix scan reads 2,913,447 rows each second.
+- The device bounds a durable commit, not the engine. Commits each second
+  converge on the `fsync` ceiling of the storage.
+
+Nothing in this workload argues for a write-oriented alternative, because the
+write path is device bound rather than engine bound. Compare an alternative
+only if a later workload shows an engine-bound limit.
+
+See [BENCHMARKS.md](BENCHMARKS.md) section 4.
+
 ## D4. Collector durability topology — Accepted
 
-Corndogs is the single intermediate durable handoff. Once it accepts a telemetry
-task, that task remains until final TallyOwl storage returns a committed
-receipt. It need not remain after completion, and the collector does not keep a
-second copy in another journal.
+Corndogs is the durable task boundary. Once it accepts a telemetry task, that
+task remains until final TallyOwl storage returns a committed receipt. It need
+not remain after completion.
 
-The operator configures `durable_copies`, the total number of persisted
-Corndogs copies required before collector acknowledgement. It defaults to `1`:
-one durable local copy with no redundancy. "Durable" means that TallyOwl has
-the data at the configured boundary.
+### Amended and withdrawn, 2026-07-28
 
-The copy count and failure-domain placement determine outage survival.
+An amendment on 2026-07-27 moved the batch payload out of the Corndogs task and
+into a collector spool. A measurement had shown that a payload inside a task
+made the timeout sweep 800 times more expensive.
 
-Corndogs' clustered file setting counts follower acknowledgements, so the chart
-translates it as `ack_count = durable_copies - 1`. Single-node file storage must
-use a Corndogs fsync mode that does not acknowledge lossy interval-flushed
-writes. Use `group` or `always`; `interval` and `never` are not durable.
+Corndogs then fixed the cause. Commit `b8c10b0` stores a payload in its own
+bucket as raw bytes and adds a deadline index. The sweep is now a function of
+expired tasks rather than live ones.
 
-Current Corndogs support for this setting:
+The amendment is withdrawn. The collector keeps the payload in the task.
 
-- The shipped file backend is single-replica. It supports `durable_copies = 1`
-  only.
-- The clustered file backend that supplies `ack_count` is a Corndogs design
-  document. It is not implemented. `durable_copies > 1` is therefore not
-  available yet.
-- The postgres backend gives replica failover through PostgreSQL, not through
-  `ack_count`. `durable_copies` does not apply to it. Its durability is
-  "PostgreSQL committed".
+Measured after the Corndogs change:
 
-TallyOwl must refuse a `durable_copies` value that its configured Corndogs
-backend cannot satisfy. It must not accept the value and then acknowledge a
-weaker guarantee.
+- the sweep is flat at 2.3 milliseconds for 1,000 and for 5,000 live tasks.
+  The same runs took 3,272 and 16,792 milliseconds before;
+- the payload-in-task accept path beats a collector spool in every case,
+  including the one case where the spool used to win.
+
+This decision therefore reads as it originally did. The collector keeps no
+second journal, and Corndogs is the single intermediate durable handoff.
+
+`durable_copies` covers the payload again, because the payload is in Corndogs.
+The durability weakening that the withdrawn amendment introduced is gone.
+
+Corndogs limits a payload to 16 MiB by default, through
+`CORNDOGS_MAX_PAYLOAD_BYTES`. The D19 seal of 512 KiB sits well inside it.
+
+See [BENCHMARKS.md](BENCHMARKS.md) section 11d.
 
 ## D5. App-to-collector acknowledgement — Accepted
 
@@ -259,17 +312,17 @@ Accepted defaults:
 - no raw IP retention;
 - no request and response bodies, headers, cookies, query values, form values, or
   LinkKeys claim values;
-- no automatic cross-project actor identity;
-- permit opaque project and workspace actor IDs;
-- use an exact index for actor IDs and erasure keys;
-- TallyOwl stores the actor ID that the app supplies;
-- an app can transform an actor ID before it sends the ID;
+- no automatic cross-project end user identity;
+- permit opaque project and workspace end-user IDs;
+- use an exact index for end-user IDs and erasure keys;
+- TallyOwl stores the end-user ID that the app supplies;
+- an app can transform an end-user ID before it sends the ID;
 - campaign parameters only with configured consent behavior;
 - semantic interactions only, no session replay;
 - permit typed high-cardinality custom properties within resource limits;
 - visible per-field redaction and drop counters.
 
-The project accepts the direct-personal-data prohibition and the actor-ID
+The project accepts the direct-personal-data prohibition and the end user-ID
 exception. D30 holds the unresolved jurisdiction and consent behavior.
 
 ## D10. Capacity envelope — Accepted pending benchmark
@@ -296,7 +349,40 @@ already proves the results. Scale its scenarios to get the capacity numbers.
 Therefore one workload proves correctness and capacity together. See
 [TESTBED.md](TESTBED.md).
 
-The numbers arrive with the reference application, not before it.
+### Measured, 2026-08-01 — the storage half
+
+`prototypes/segment-bench` writes a whole segment in the SEGMENT_FORMAT.md
+layout to real storage, reads it back, verifies its checksums, and answers
+20,000 point lookups. This replaces the earlier envelope, which added component
+measurements together.
+
+**48.9 bytes for each stored event** at one million rows for each segment: 27.3
+of column data, 20.3 of exact index, and 1.3 of catalog receipt. 1 TiB holds
+about 22.5 billion events. 10,000 events each second fills 39.3 GiB each day.
+One app driver connection reaches roughly 26,000 to 38,000 events each second
+on this hardware.
+
+Three findings changed the design:
+
+1. **Adding component measurements understated the cost by 15 percent.** The
+   earlier 42.6 estimate assumed 21.0 bytes of column data. A real segment costs
+   27.3, because the same eight columns carry correlated, higher-cardinality
+   values and the compressor finds less to remove. Format overhead, which the
+   estimate ignored, is genuinely free at under 0.005 bytes for each event.
+2. **Cost for each event grows with segment size**, from 44.7 bytes at 250,000
+   rows to 50.3 at 4 million, because a larger segment holds more distinct
+   values. **A capacity number must state the segment size it assumes.**
+3. **The `event_id` exact index was 25 percent of the whole segment**, the
+   largest single line item in the format. SEGMENT_FORMAT.md now defaults a
+   unique value to a block filter, which brings the segment to 39.75 bytes for
+   each event, or 41.1 with the catalog receipt.
+
+A field demoted to `stored` still removes its index cost. The access class
+remains a capacity control as well as a query control.
+
+The reference application still replaces the end-to-end numbers: ingest rate,
+burst multiplier, query concurrency, and the outage buffer target are not
+storage measurements. See [BENCHMARKS.md](BENCHMARKS.md) sections 12 and 12a.
 
 Defaults optimize the home profile. Do not call a large profile production-ready
 until measurements prove its storage and query behavior.
@@ -416,6 +502,46 @@ overhead, large batch handling, snapshot transfer, membership changes, license
 compatibility, and failure behavior. Selection remains open until controller
 and tablet kill, partition, and restart plus tablet-movement tests pass.
 
+### Measured, 2026-08-01 — openraft meets the criteria
+
+A working three-voter cluster now runs on openraft 0.9.24, with in-memory
+storage and an in-process network. Every criterion in this decision has an
+answer except behaviour against durable storage and a real network.
+
+| Criterion | Result |
+| --- | --- |
+| Election | 6 ms to a leader from initialize; 985 ms to replace an isolated leader |
+| Partition | The minority never commits. The majority commits in 10.9 ms |
+| Rejoin | A returning node caught up in 528 ms |
+| Membership change | Add a learner in 4 ms, promote to voter in 4 ms |
+| Snapshot | A 256 KiB snapshot builds in under a millisecond |
+| Large batches | 12,543 entries each second at 64 KiB, which is 784 MiB each second |
+| Multi-group overhead | 200 groups, 600 instances, 21 MiB, every group elected a leader |
+| API stability | Stable 0.9 was workable. The 0.10 line is at alpha with breaking changes |
+| License | MIT or Apache-2.0 |
+
+**Consensus is not the throughput limit.** openraft commits 49,284 entries each
+second at 4 KiB with no durability. Group commit against the device reaches
+about 16,900 durable frames each second. The storage beneath the algorithm is
+the constraint.
+
+**The multi-group design holds.** Six hundred Raft instances cost 21 MiB and
+23 milliseconds to build, and every group elected a leader. This was the
+TallyOwl-specific risk, because a general Raft library targets a few large
+groups.
+
+Still unmeasured, and needed before the selection becomes final:
+
+- behaviour against durable storage, where every append pays an fsync;
+- behaviour over a real network with loss, reordering, and delay;
+- a partition that splits a group other than by isolating one node;
+- recovery from a corrupt or truncated log.
+
+Selection is no longer open on the grounds of doubt about the library. It stays
+open until those four run against the real storage and transport.
+
+See [BENCHMARKS.md](BENCHMARKS.md) section 10.
+
 ## D16. Tablet sizing and project sub-sharding — Accepted
 
 The home profile starts with one embedded tablet. It has no controller quorum.
@@ -427,7 +553,7 @@ The controller automatically splits, merges, and moves tablets.
 The primary route depends on the telemetry type:
 
 - A span uses its trace ID.
-- A behavior event uses its session ID or actor ID.
+- A behavior event uses its session ID or end-user ID.
 - A metric point uses its series ID.
 - Other data uses a stable event key.
 
@@ -450,13 +576,49 @@ The first benchmark uses these defaults:
 - Use a 256 MiB cluster segment target.
 - Use a 64 KiB compressed page target.
 - Use Zstandard level 1 for hot and warm data.
-- Permit Zstandard level 3 during cold compaction.
+- Use Zstandard level 3 only for a float column.
 
 These values are writer policies. They are not different storage formats.
 Operators can configure all values.
 
 Benchmarks can change a default before the format becomes stable. Correct
 recovery and bounded memory are more important than compression ratio.
+
+### Measured, 2026-07-26
+
+The page benchmark changed one of these defaults.
+
+Zstandard level 3 is 1.3 percent **larger** than level 1 across the winning
+encodings. It loses on six of eight columns, because an encoded column has
+already removed the redundancy that a higher level would find. The float column
+is the exception and gains 22.4 percent.
+
+An earlier draft permitted level 3 during cold compaction. The measurement does
+not support that, so this decision now limits level 3 to a float column.
+
+The 64 KiB page target holds. The ratio penalty against whole-column
+compression is under 2.5 percent for every column except a float column.
+
+Every encoding in the list won a column. See
+[BENCHMARKS.md](BENCHMARKS.md) section 5.
+
+### Measured again, 2026-08-01 — the page target must bind
+
+The 64 KiB page target holds, but the format as first written did not reach it.
+One page for each column for each row group produced a largest page of 520 KiB,
+eight times the target, because a row group targets 8 to 16 MiB of uncompressed
+data and a unique 16-byte column does not compress.
+
+**A writer closes a page on encoded bytes, not on a row count.** A column
+contributes as many pages to a row group as its own size needs.
+
+The cost is 1.35 bytes for each event, and it falls on one column shape: a
+high-cardinality repeated value, where a smaller page gives the compressor less
+history. A unique column and a strongly repeated column both cost nothing,
+because their bytes are already either incompressible or fully removed.
+
+See [SEGMENT_FORMAT.md](SEGMENT_FORMAT.md) section 6 and
+[BENCHMARKS.md](BENCHMARKS.md) section 12a.
 
 ## D18. Query consistency and coordinator behavior — Accepted pending benchmark
 
@@ -514,7 +676,7 @@ typed backpressure error. It does not report success for discarded data.
 Accepted behavior:
 
 - support high cardinality for all telemetry and dynamic properties;
-- built-in event, request, trace, span, session, actor, and order correlation IDs are
+- built-in event, request, trace, span, session, end user, and order correlation IDs are
   exact-indexed;
 - dynamic scalar fields enter typed sparse native columns and default to exact
   `lookup` indexing, with `facet` and `stored` access classes available;
@@ -542,13 +704,84 @@ All limits are configurable. A larger value can use the `stored` class if the
 project policy permits it.
 
 The prototype must measure mostly-unique values, cross-service request
-correlation, actor and session timelines, high-cardinality metric labels, index
-build and merge cost, deletion, and cold-object lookup.
+correlation, end-user and session timelines, and high-cardinality metric
+labels. It must also measure index build and merge cost, deletion, and
+cold-object lookup.
+
+### Measured, 2026-07-26
+
+The promise holds. A value that is unique on every row retrieves in 580
+nanoseconds at the median, from an index that costs 12 bytes for each row.
+
+The measurement also shows that the writer must select a layout from measured
+statistics. A wrong choice is catastrophic in both directions:
+
+- the unique-lookup layout on a repeated value reaches a p99 of 4.7
+  milliseconds, because every row shares one fingerprint;
+- the term-postings layout on a unique column costs 27 bytes for each row,
+  which exceeds the 16 bytes of data that it indexes.
+
+No fingerprint collision occurred over one million values. Full-value
+verification still runs on every probe, because a hash must never decide
+correctness, and it costs nothing measurable.
+
+Deletion and cold-object lookup remain unmeasured.
+
+### Measured again, 2026-08-01 — a unique value needs a filter, not a list
+
+The whole-segment measurement showed the `event_id` unique-lookup index costing
+25 percent of the segment. That is more than any column, and more than the
+column it indexes.
+
+**A unique value gets a block filter by default.** At 12 bits for each key it
+costs 2.00 bytes for each row against 12.00, saves 21 percent of the whole
+segment, and answers a probe at 21 million lookups each second. It answers "no"
+exactly and "maybe" at a measured 0.53 percent for each row group, and the
+reader then decodes one column page for an exact answer.
+
+Correctness is unchanged. Full-value verification already ran on every probe,
+because a fingerprint never decides. A filter simply moves that verification
+from the index to the column page.
+
+`unique-lookup` stays in the format for a query that must locate a row without
+decoding a page, and it now needs a measurement to justify itself.
+`term-postings` stays the answer for a repeated value, because a filter cannot
+give a row list.
+
+See [SEGMENT_FORMAT.md](SEGMENT_FORMAT.md) section 7 and
+[BENCHMARKS.md](BENCHMARKS.md) section 12a.
+
+### The default access class is a capacity decision
+
+An exact index costs between 2 and 12 bytes for each row, against 27 bytes of
+column data for a whole event. Indexes cost about as much as the data they
+serve, even after the filter change: 20.3 bytes of index against 27.3 of data
+in the measured segment.
+
+The project keeps `lookup` as the default for a dynamic scalar field. An
+unexpected correlation property stays instantly usable, which is the promise
+that this decision makes.
+
+The cost is real, and an operator needs to see it. A project that sends several
+unique-valued dynamic fields can multiply its stored bytes several times over.
+
+Therefore:
+
+- report index bytes for each field, not only total stored bytes;
+- surface the largest indexes for a project in the dashboard;
+- make demotion to `stored` a documented capacity control, not only a query
+  control.
+
+A demotion and a later promotion are both reversible. A class change starts a
+background index build over retained raw data, so an operator can recover the
+capability within the retention period.
+
+See [BENCHMARKS.md](BENCHMARKS.md) sections 8, 12, and 12a.
 
 ## D21. Exact versus approximate analytics — Accepted
 
 At large scale, some exact queries cost much more than a mergeable sketch. The
-expensive queries include exact distinct actors and sessions, high-cardinality
+expensive queries include exact distinct end users and sessions, high-cardinality
 breakdowns, and long-window funnels.
 
 Every query and result type says whether it is exact or approximate and names the
@@ -648,6 +881,28 @@ Prototype Apache OpenDAL as the Apache-2.0 object-access abstraction with
 selected backends compiled as features. Benchmarks will set the cache size,
 range-read layout, upload limit, and bucket-outage behavior.
 
+### Measured, 2026-07-26
+
+OpenDAL performs the ranged read that a cold query needs.
+
+Round trips dominate a cold read, not bytes. A one-column aggregate fetches 6.2
+percent of a 256 MiB segment and still needs 256 separate requests. The pages
+sit at a stride and do not coalesce. The same column costs one request when it
+is contiguous.
+
+The row-group count therefore sets the cold read cost directly, and
+SEGMENT_FORMAT.md gives no row-group size. That value needs an explicit choice
+against this cost.
+
+A bounded cache needs several times the hot working set. In the dashboard
+pattern a 4 MiB cache thrashed at a 1.3 percent hit rate against a 4 MiB hot
+set. A 16 MiB cache reached 48.8 percent. More cache gave nothing, because the
+ad hoc tail never repeats.
+
+Upload limits and bucket-outage behaviour remain unmeasured.
+
+See [BENCHMARKS.md](BENCHMARKS.md) section 9.
+
 ## D25. Reusable high-cardinality store module — Accepted
 
 The native database is the `tallyowl-store` Rust crate. It provides schemas,
@@ -672,6 +927,24 @@ for term dictionaries, postings, fast fields, merges, and deletion.
 
 Tantivy must meet the TallyOwl durability, tier, snapshot, and exactness
 requirements. TallyOwl does not automatically use it as the source database.
+
+### Measured, 2026-07-26
+
+Do not adopt Tantivy for the exact-ID index.
+
+Against the native layouts on the same data, Tantivy is slower and larger:
+
+- it builds 7 to 130 times slower;
+- its index is 2.6 times larger on a unique column;
+- a point lookup takes 7 times longer at the median;
+- a point lookup takes 36 times longer at p99.
+
+The cause is structural rather than a defect. Tantivy is a full-text engine
+whose API takes text, so a 16-byte ID becomes 32 characters of hexadecimal
+before it reaches the index. TallyOwl needs fixed-width binary exact lookup,
+which is a narrower problem with a much cheaper answer.
+
+See [BENCHMARKS.md](BENCHMARKS.md) section 8.
 
 The embedded catalog and object-access layer remain replaceable.
 
@@ -725,7 +998,7 @@ replica set. The controller then commits the new tablet configuration.
 
 An erasure tombstone gives immediate logical removal. The tombstone applies to
 every tier at once. It also applies to data that arrives after the erasure
-request. Telemetry for an erased actor can still be in a collector queue when
+request. Telemetry for an erased end user can still be in a collector queue when
 the request lands. That telemetry must not become visible when it arrives.
 An erasure predicate therefore stays active until its horizon ends.
 
@@ -734,27 +1007,37 @@ Physical reclamation differs by tier.
 **Hot and warm tiers.** Compaction rewrites affected local segments. The first
 target is 24 hours. This work stays local and bounded.
 
-**Cold tier.** Compaction must not rewrite every intersecting cold object. One
-actor can touch thousands of cold objects across a retention period. Download,
-rewrite, and upload of that set is too expensive for a 24-hour target.
+**Cold tier.** A segment encrypts under one project key. Destroying that key
+erases the whole project instantly and reads nothing back.
 
-The cold tier therefore uses cryptographic erasure:
+There are no per-end-user keys. An earlier draft proposed them, so that an
+erasure of one person would not rewrite cold objects. That costs a key for
+every person and a key lookup for every person on a cold scan. The project
+refused the trade.
 
-- a segment encrypts each actor's rows with a key derived for that actor;
-- the catalog holds the key material, not the object;
-- erasure destroys the key and records the destruction;
-- the cold bytes then cannot be read by TallyOwl or by an object-store reader;
-- normal retention reclaims the object space later.
+### What end-user erasure actually promises
 
-This decision needs the segment encryption key design that D22 defers. The two
-are one design. Do not implement cold tiering for a project that permits
-erasure until the key design exists.
+An erasure request for one end user is immediate and logical everywhere:
+
+- the tombstone hides matching rows in every tier at once;
+- the predicate stays active, so late arrivals never become visible;
+- hot and warm segments rewrite within the 24-hour target;
+- cold bytes physically disappear when normal retention expires them.
+
+**TallyOwl does not promise immediate physical destruction of one end user's
+cold data.** It promises immediate logical erasure and physical reclamation at
+retention.
+
+State that plainly wherever the product describes erasure. An operator whose
+obligation needs faster physical destruction sets a shorter cold retention, or
+does not enable the cold tier. TallyOwl does not guess at a jurisdiction. See
+D30.
 
 The default immutable-backup horizon is 30 days. It is configurable. An erasure
 ledger is part of each restore. The ledger prevents a restore from making
-erased actor data visible again.
+erased end user data visible again.
 
-TallyOwl stores the actor ID that the app supplies. TallyOwl does not
+TallyOwl stores the end-user ID that the app supplies. TallyOwl does not
 transform the ID. An app can transform the ID before it sends data.
 
 ## D29. Documentation language — Accepted
@@ -777,8 +1060,8 @@ the platform, the referrer, and the landing page. TallyOwl captures those facts
 by default. They show that a campaign works. They are not tied to an
 identified person.
 
-Consent applies at the point where campaign data joins an identified actor. An
-identified actor is personal data. The applicable policy then controls that
+Consent applies at the point where campaign data joins an identified end user. An
+identified end user is personal data. The applicable policy then controls that
 join, the retention, and any erasure.
 
 TallyOwl does not guess a jurisdiction and does not change behavior by
@@ -905,11 +1188,32 @@ The sweep cost differs by backend. The file backend scans every live task and
 decodes each one. The cost grows with queue depth, and queue depth grows during
 a head outage. The postgres backend uses one set-based update.
 
-Therefore the benchmark set must measure sweep latency at the outage-buffer
-depth that D10 selects. If the cost is too high, store the batch payload in a
-collector-local content-addressed spool and put only the reference in the task.
-That change reintroduces a second local journal, so make it only with measured
-justification.
+### Resolved upstream, 2026-07-28
+
+The sweep was never the expensive part. Decoding payloads during the sweep was.
+
+| Live tasks | 256-byte payload | 512 KiB payload |
+| --- | --- | --- |
+| 1,000 | 6.1 ms | 3,272 ms |
+| 5,000 | 22.0 ms | 16,792 ms |
+
+The file backend stored a task as JSON, and Go encodes a `[]byte` field as
+base64. Every sweep decoded every live task and its payload only to discard it.
+
+TallyOwl reported this to the Corndogs project, which fixed both the cause and
+a related one. A payload now lives in its own bucket as raw bytes. A
+deadline index makes the sweep seek to the first expired entry and stop at the
+first live one.
+
+Measured after the change, with 512 KiB payloads: 2.3 milliseconds at 1,000
+live tasks and 2.3 milliseconds at 5,000. The cost is flat, because it follows
+expired tasks rather than live ones.
+
+TallyOwl therefore needs no spool, no dedicated Corndogs, and no workaround.
+The forwarder calls `CleanUpTimedOut` on its interval, and D4 stands as
+written.
+
+See [BENCHMARKS.md](BENCHMARKS.md) sections 11a and 11d.
 
 ## D34. Browser unload flush — Accepted
 
@@ -1080,7 +1384,7 @@ An operator configures these values for each project:
 A change to a parameter recomputes the result. Raw touchpoints never change.
 Each result names its model and its model version.
 
-Phase 8 selects the shipped default values. There is no migration cost in
+Phase 9 selects the shipped default values. There is no migration cost in
 selecting them later.
 
 ### Lookback and retention
@@ -1161,7 +1465,19 @@ against an attacker.
 A content address identifies a segment across a backup, a restore, and a cold
 object store. It needs collision resistance.
 
-See [SEGMENT_FORMAT.md](SEGMENT_FORMAT.md).
+### Measured, 2026-07-26
+
+xxHash3-64 reaches 9,112 MB each second over 64 KiB pages. BLAKE3-256 reaches
+3,857 MB each second. xxHash3 is 2.4 times faster.
+
+Both rates are far above the device write rate, so a single-function design
+using BLAKE3 everywhere would not create a throughput problem on this hardware.
+
+This decision therefore stands on its stated reason and not on speed: a content
+address needs collision resistance and a page checksum does not.
+
+See [SEGMENT_FORMAT.md](SEGMENT_FORMAT.md) and [BENCHMARKS.md](BENCHMARKS.md)
+section 7.
 
 ## D45. Tail sampling rule language — Accepted
 
@@ -1191,3 +1507,268 @@ Grafana plugin, and a project website when one exists.
 
 This is a product repository, not a monorepo of unrelated projects. One version
 therefore describes one coherent product.
+
+## D47. Group-commit linger — Accepted
+
+The append log seals a group after a configurable linger. The default is
+2 milliseconds.
+
+A measurement made this a decision rather than an implementation detail. The
+device ceiling on the reference hardware is 186 fsync operations each second.
+The same append path reached:
+
+| Mode, 128 concurrent writers | Frames each second | p99 |
+| --- | --- | --- |
+| One fsync for each frame | 150 | 23.3 s |
+| Group commit, no linger | 503 | 1.53 s |
+| Group commit, 2 ms linger | 16,923 | 9.4 ms |
+| Group commit, 10 ms linger | 7,721 | 18.6 ms |
+
+Without a linger a group holds only what arrived while the previous fsync was
+in flight. The linger is what makes a group large.
+
+A longer linger is worse. At 10 milliseconds the device sits idle between
+syncs, and both throughput and latency degrade.
+
+The committer must release its lock while it writes and calls fsync. A
+committer that holds the lock across the sync prevents accumulation and defeats
+the mechanism. A prototype made that mistake and reported no gain at all.
+
+A group has a byte bound and a count bound as well as the time bound. A large
+group therefore cannot exhaust memory or hold a caller past its deadline.
+
+This value is for the TallyOwl append log. The Corndogs setting of the same
+name is a separate decision with a different measured answer. See D33 and
+[BENCHMARKS.md](BENCHMARKS.md) sections 11b and 13.
+
+## D48. Collector deployment unit — Withdrawn
+
+This decision co-located intake and forwarder, because a node-local payload
+spool cannot be read by a forwarder in another pod.
+
+The spool is gone. D4 explains why: Corndogs commit `b8c10b0` removed the
+reason for it. Nothing else required co-location.
+
+Therefore the original rule stands. Intake, forwarder, and compatibility
+receiver are independently deployable, and they coordinate through Corndogs
+rather than pod-local state.
+
+Two consequences of the withdrawn decision also go away:
+
+- a collector holds no durable state, so it needs no persistent volume and
+  stays a stateless Deployment;
+- payload durability is Corndogs durability again, so `durable_copies` means
+  what D4 says it means.
+
+The record stays here rather than disappearing, because the reasoning was
+correct for the design it addressed. A node-local spool breaks independent
+deployability. Co-location was the right trade while the spool was necessary.
+
+## D49. Row-group size and reader coalescing — Accepted
+
+A row group targets 8 to 16 MiB of uncompressed column data. A 256 MiB segment
+therefore holds roughly 16 to 32 row groups.
+
+A cold reader merges adjacent page ranges when the gap costs less than a round
+trip.
+
+The measured reason: row-group count sets the cold request count for a column
+read. At 16 columns in a 256 MiB segment, 256 row groups cost 256 requests and
+3.8 seconds at 15 milliseconds of latency. Sixteen row groups cost 16 requests
+and 240 milliseconds.
+
+The coalescing rule matters more than the size. One round trip costs about 15
+milliseconds, while 16 MiB of unwanted bytes costs about 160 milliseconds at
+100 MB each second. A reader should therefore merge across a gap of roughly
+1.5 MiB or less. The measured latency and bandwidth of the configured object
+store give the exact threshold.
+
+Both values are configurable. A larger row group costs more decode memory and
+gives coarser statistics pruning. Do not raise it to remove round trips that
+coalescing already removes.
+
+See [BENCHMARKS.md](BENCHMARKS.md) section 9 and
+[SEGMENT_FORMAT.md](SEGMENT_FORMAT.md).
+
+## D50. Approximate measure algorithms — Accepted
+
+An exact distinct count over a long window cannot merge from partial states
+without moving raw rows, and QUERY.md forbids that. A sketch is a bounded
+summary that answers such a question approximately and merges.
+
+Selection rule: **prefer accuracy over speed, provided the summary merges and
+persists.** A sketch that cannot merge is useless to a distributed query. A
+sketch that cannot persist cannot back a rollup.
+
+| Measure | Algorithm | Why |
+| --- | --- | --- |
+| `count_distinct_approx` | HyperLogLog++ | Merges, persists, and states an error for a given precision |
+| `quantile_approx` | DDSketch | States a guaranteed relative error |
+| `top_k_approx` | Space-Saving | Merges, and bounds its error by counter count |
+
+D21 requires every approximate result to name its method and its error bound.
+An algorithm that can state only an empirical accuracy cannot satisfy that
+rule. t-digest is more common in observability and is excellent at an extreme
+tail, and it cannot state a bound. DDSketch can.
+
+Because accuracy comes before speed, size each sketch for accuracy and not for
+footprint:
+
+- HyperLogLog++ precision defaults high enough for an error near 0.5 percent,
+  rather than the common 2 percent;
+- DDSketch relative accuracy defaults tight, and the result reports the value
+  that applied;
+- Space-Saving keeps enough counters that a normal top-k result is exact.
+
+Every value is configurable for a project that prefers a smaller footprint. A
+result always names the value that produced it.
+
+An exact measure never falls back to a sketch. D21 already requires that, and
+this decision does not weaken it.
+
+## D51. Saved query versioning — Accepted
+
+A saved query records the algebra version of its author. It always executes on
+the current algebra.
+
+QUERY.md section 16 forbids changing the meaning of an existing operator and
+permits only optional additions. Running on the current version is therefore
+safe, and the recorded version serves diagnosis.
+
+TallyOwl does not keep old execution paths alive. Pinning would build machinery
+to survive a violation of section 16. Enforce the rule instead.
+
+**Enforcement.** Golden query tests replay saved trees across versions and
+require identical results. A change that alters an existing operator's meaning
+fails the build rather than silently moving a number on a dashboard.
+
+Before beta, the project can break this contract along with any other. Section
+16 becomes binding at beta, and the golden tests become a release gate at the
+same point. See D31.
+
+## D52. Query explain output — Accepted
+
+An explain operation returns two layers, and it always returns both.
+
+**The plan tree.** Full detail for each node:
+
+- the operator;
+- the estimated rows and bytes;
+- the segments it would touch;
+- whether it reaches the cold tier;
+- the indexes it would use;
+- the exactness of each measure.
+
+An engineer reads this layer. It carries the verbosity that a serious query
+tool needs.
+
+**The summary.** Plain language derived from that tree. A person uses it to
+decide whether to run the query, to adjust it, or to drop it. They never have
+to read the tree.
+
+A summary states the cost in human terms, names the largest contributor, and
+suggests the adjustment that helps most. An example: this query reads about
+40 GiB across 8 months. Most of that is cold storage. A shorter time range
+reduces it most.
+
+The second layer is the point of this decision. A plan tree that only a
+specialist can read pushes every cost question to that specialist.
+
+An estimate that the planner cannot make returns unknown. It never returns a
+guess, because an operator will build a budget rule on whatever number appears.
+
+## D53. Durability and convergence, not recovery objectives — Accepted
+
+An earlier draft asked for a recovery point objective and a recovery time
+objective. Those are the wrong artifact for this design, and this decision
+replaces them with three statements.
+
+**A process crash is not a recovery event.** Every write is atomic. A restart
+loses nothing that TallyOwl acknowledged, and it needs no recovery procedure.
+There is no recovery time to state, because there is no recovery.
+
+**Storage redundancy is an infrastructure requirement.** The durability of a
+volume or a bucket belongs to the operator's infrastructure. TallyOwl states
+what it needs, such as a volume that honours fsync and an object store with its
+own durability guarantee. TallyOwl does not restate another product's
+durability numbers as its own objective. See [DEPLOYMENT.md](DEPLOYMENT.md).
+
+**Region loss is a convergence problem.** A multi-region installation is
+eventually consistent across regions. The useful statements are how divergence
+stays bounded, how convergence proceeds, and how an operator observes it
+through watermarks and replica lag. A region does not recover to a point in
+time. It converges.
+
+What TallyOwl therefore owes an operator:
+
+- the durability that each receipt policy gives, which D27 states;
+- the infrastructure that each profile requires, which DEPLOYMENT.md states;
+- the convergence behaviour and the metrics that show it, which CELLS.md
+  states.
+
+What an operator owes themselves: a backup policy and a storage class that meet
+their own obligations. TallyOwl cannot choose those.
+
+## D54. Plain language for anything a person reads — Accepted
+
+A person who does not operate TallyOwl must understand every message that
+reaches them. An error, a health state, or a status on a screen reaches an
+executive, a support conversation, or a customer email.
+
+This governs error codes and messages, health states, dashboard labels, and
+notification text. It does not govern internal storage terms such as tablet or
+locator run, which no such reader sees.
+
+The word "actor" failed this rule and is gone. An **end user** is a person or
+account that a customer's application identifies. An **operator** or a
+**member** signs in to TallyOwl.
+
+[CONVENTIONS.md](CONVENTIONS.md) holds the rule and the vocabulary.
+
+## D55. One entry point for build, test, and generate — Accepted
+
+`tools.sh` at the repository root is what a person types. It is a thin
+dispatcher and holds no logic.
+
+Orchestration lives in Python modules that use the runnerlib event lifecycle.
+Reactorcide jobs call the same modules, so local and CI cannot drift.
+
+`uv` provisions Python. A developer needs `uv` and nothing else for any verb
+that does not need a cluster.
+
+An earlier rule forbade every `.sh` wrapper. That rule aimed at shell
+orchestration, and it caught a dispatcher that every other repository here
+already has. The rule now forbids logic in shell rather than shell itself.
+
+The entry point exists to hold two rules in code rather than in prose:
+
+- csilgen runs from `csil/`, because an `include` resolves against the working
+  directory;
+- csilgen is a pinned release rather than a local build, once csilgen publishes
+  releases.
+
+## D56. Test data generation and branch coverage — Accepted
+
+Tests generate the data they need. A `DataUtils` helper exposes a
+`Create<Thing>(setup)` call for each stored kind. It fills every field that the
+test did not name, so a test declares only what it cares about. Other
+repositories here already use this pattern.
+
+Rules:
+
+- run inside a transaction and roll it back;
+- prefer in-memory storage, so the suite stays fast;
+- do not mock the storage interface. TallyOwl owns that interface, so a mock
+  would only prove that the mock behaves like the mock;
+- cover branches rather than the happy path, and exercise every decision except
+  operating-system logistics such as socket creation.
+
+The reference application is the system level and does not replace this. See
+[TESTBED.md](TESTBED.md).
+
+Scenarios grow. Start with enough to prove the ledger mechanism, then add one
+for each capability as its phase permits.
+
+**Turn every regression into a permanent scenario.** A defect then cannot
+return quietly, and the set becomes thorough without anyone predicting where
+the defects appear.

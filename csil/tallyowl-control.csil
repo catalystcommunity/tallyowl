@@ -221,7 +221,7 @@ UnionNode = {
 ;; Domain operators
 ;; ---------------------------------------------------------------------------
 
-CorrelationBasis = "actor" / "session" / "group"
+CorrelationBasis = "end-user" / "session" / "group"
 
 FunnelStep = {
     name: text .size (1..128),
@@ -267,7 +267,7 @@ TraceQuery = {
 TimelineQuery = {
     project_id: ProjectId,
     range: TimeRange,
-    ? actor_id: text .size (1..256),
+    ? end_user_id: text .size (1..256),
     ? session_id: SessionId,
     kinds: [* TelemetryKind],
     limit: uint,
@@ -434,7 +434,7 @@ ApiKeySummary = {
 
 DeletionTarget = {
     project_id: ProjectId,
-    ? actor_id: text .size (1..256),
+    ? end_user_id: text .size (1..256),
     ? event_ids: [* EventId],
     ? range: TimeRange
 }

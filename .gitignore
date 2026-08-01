@@ -1,0 +1,28 @@
+# Build output
+/target
+/prototypes/target
+/generated
+
+# Local development configuration. Never commit one person's workstation.
+# The committed example beside each of these holds no secret.
+/tallyowl.local.yaml
+/*.local.yaml
+/.local.env
+/.local/
+
+# Local run state: data directories, logs, and resolved secrets.
+/data/
+/run/
+*.log
+
+# Go prototype binaries built in place
+/prototypes/delivery-bench/delivery-bench
+
+# Python tooling
+.venv/
+__pycache__/
+*.pyc
+
+# Editor and operating system
+.DS_Store
+*.swp

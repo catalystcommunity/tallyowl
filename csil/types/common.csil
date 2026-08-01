@@ -16,14 +16,21 @@
 ;; survives propagation through a service that TallyOwl does not own.
 ;; ---------------------------------------------------------------------------
 
-EventId       = text .size (36..36)     ;; UUIDv7, canonical text
-BatchId       = text .size (36..36)     ;; UUID, stable across every retry
-WorkspaceId   = text .size (36..36)
-ProjectId     = text .size (36..36)
-SourceId      = text .size (36..36)
+;; An ID travels as raw bytes, never as hexadecimal text. A measurement showed
+;; that a unique ID column dominates a segment, and that 16 bytes costs 53
+;; percent less than 36 characters after encoding and compression. See
+;; docs/BENCHMARKS.md section 6.
+;;
+;; A driver converts to and from the text form at a propagation boundary, such
+;; as a W3C `traceparent` header. The text form never reaches TallyOwl storage.
+EventId       = bytes .size (16..16)    ;; UUIDv7
+BatchId       = bytes .size (16..16)    ;; stable across every retry
+WorkspaceId   = bytes .size (16..16)
+ProjectId     = bytes .size (16..16)
+SourceId      = bytes .size (16..16)
 SessionId     = text .size (1..64)      ;; opaque, project scope (D11)
-TraceId       = text .size (32..32)     ;; 16 bytes, lowercase hexadecimal
-SpanId        = text .size (16..16)     ;; 8 bytes, lowercase hexadecimal
+TraceId       = bytes .size (16..16)
+SpanId        = bytes .size (8..8)
 
 ;; Milliseconds since the Unix epoch. TallyOwl keeps three separate time facts
 ;; and never collapses them. See DATA_MODEL.md section 2.
@@ -130,7 +137,7 @@ Envelope = {
     ? service_name: text .size (1..128),
     ? request_id: text .size (1..128),
     ? session_id: SessionId,
-    ? actor_id: text .size (1..256),
+    ? end_user_id: text .size (1..256),
     ? anonymous_id: text .size (1..256),
     ? trace_id: TraceId,
     ? span_id: SpanId,

@@ -39,7 +39,7 @@ Apply these rules:
 
 The following words are TallyOwl technical nouns:
 
-- actor ID
+- end-user ID
 - app driver
 - batch
 - browser package
@@ -95,6 +95,7 @@ Terms that this project does not use:
 | Do not use | Use |
 | --- | --- |
 | adapter, backend adapter, host backend adapter, adapter library | app driver |
+| actor, actor ID | end user, end-user ID |
 | storage cell | cell |
 | tag, app tag, operator tag, attribute | property |
 | SDK, client library | app driver or browser package |
@@ -106,6 +107,13 @@ such as a PromQL adapter. It does not name a TallyOwl client component.
 
 The envelope field name `sdk_name` stays as written, because a wire field name
 is not prose.
+
+An **end user** is a person or account that a customer's application
+identifies. An **operator** or a **member** is a person who signs in to
+TallyOwl. The two never mean the same thing.
+
+Every message that reaches a person uses plain language. See
+[CONVENTIONS.md](CONVENTIONS.md) section 1.
 
 Use each technical term with one meaning. Add a term to this list before you use
 it with a new project-specific meaning.

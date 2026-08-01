@@ -7,7 +7,7 @@ TallyOwl's native store must handle both:
 - aggregate scans over common dimensions and time buckets;
 - exact retrieval by values that are unique on nearly every row.
 
-Examples include request, event, trace, span, session, actor, order, deployment,
+Examples include request, event, trace, span, session, end user, order, deployment,
 and arbitrary application correlation IDs. High cardinality is not an ingest
 error and does not justify silently dropping, hashing away, or coalescing data.
 Correctness and resource use remain explicit.
@@ -75,6 +75,8 @@ statistics:
 
 - **term postings:** sorted and prefix-compressed term dictionary plus compressed
   row-ID postings for repeated values;
+- **block filter:** one filter for each row group, at 12 bits for each key, for
+  a unique value. This is the default for a unique value;
 - **unique lookup:** sorted fixed-width fingerprints and row IDs for
   mostly-unique UUIDs and random identifiers, with full-value verification;
 - **ordered values:** sorted value and row blocks and skip data for range queries;
@@ -84,6 +86,13 @@ statistics:
 The writer selects a layout for each distribution. A random UUID must not create
 a large posting object for each row. Repeated service names use compressed
 postings.
+
+A block filter costs 2 bytes for each row against 12 for a unique lookup, and a
+measurement showed the difference is 21 percent of a whole segment. A filter
+answers "no" exactly and "maybe" 0.53 percent of the time, and the reader then
+decodes one column page for an exact answer. A unique lookup therefore needs a
+reason: a query that must find a row without decoding a page. See
+[SEGMENT_FORMAT.md](SEGMENT_FORMAT.md) section 7.
 
 Every format includes checksums, versioning, bounded decode allocations, and
 enough statistics to select a query path without opening all data pages.
@@ -114,7 +123,7 @@ An exact query:
 6. fetches selected columns and applies visible tombstones;
 7. merges exact rows in deterministic event-time and commit-time order.
 
-Cross-system request or actor timelines issue the same lookup across relevant
+Cross-system request or end-user timelines issue the same lookup across relevant
 telemetry kinds and merge their common envelopes. Trace parent and child assembly
 uses trace and span indexes rather than a scan.
 
@@ -125,7 +134,7 @@ period. Lower-cardinality projections accelerate predictable dashboards:
 
 - per-minute event, error, and service counts;
 - service-operation duration and error histograms;
-- active actor and session buckets;
+- active end user and session buckets;
 - campaign and conversion summaries;
 - metric downsampling tiers.
 
@@ -146,7 +155,7 @@ metric series. TallyOwl stores and verifies the complete label set. An exact
 index stores series metadata. Metric samples use time and value pages that use the
 series ID.
 
-Request, session, and actor IDs are usually cheaper as event or span attributes
+Request, session, and end-user IDs are usually cheaper as event or span attributes
 or metric exemplars. However, they remain valid labels. Configure limits for
 bytes, active-series memory, index work, write work, and retained storage. A
 limit causes visible backpressure or rejection according to project policy.
@@ -159,16 +168,16 @@ cold object-storage bundles retain the same field IDs, indexes, and checksums.
 Cold movement includes the data pages and exact indexes; local locator metadata
 continues to route queries without listing a bucket.
 
-An actor-erasure request resolves the actor ID through the exact locator,
+An end user-erasure request resolves the end-user ID through the exact locator,
 publishes a tablet-wide tombstone generation, and immediately hides matching
 rows in every tier.
 
 Compaction rewrites affected local segments and rebuilds their indexes and
-rollups. The cold tier uses cryptographic erasure instead of an object rewrite,
-because one actor can touch thousands of cold objects. See
+rollups. Cold bytes stay until retention expires them, because TallyOwl keeps
+one key for each project rather than one for each end user. See
 [STORAGE.md](STORAGE.md) section 11 and D28.
 
-The tombstone is a standing predicate. Late telemetry for an erased actor can
+The tombstone is a standing predicate. Late telemetry for an erased end user can
 still be in a collector queue when the erasure lands. That data must not become
 visible when it arrives. A replay carrying an older deletion generation cannot
 resurrect rows.
@@ -202,12 +211,12 @@ lookup latency, aggregation latency, and cold bytes fetched for:
 
 - one repeated value across millions of rows;
 - one random request ID per row;
-- Zipf-distributed actor and session IDs;
+- Zipf-distributed end user and session IDs;
 - trace IDs shared across multi-service spans and events;
 - dynamic field counts and sparse field presence;
 - high-cardinality metric series;
 - exact lookup with no time bound across local and cold retention;
-- actor deletion touching few rows across many segments;
+- end user deletion touching few rows across many segments;
 - rollup queries with and without a matching materialized view;
 - cache-cold and cache-warm object-store queries.
 

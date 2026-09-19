@@ -1,0 +1,69 @@
+{{- include "tallyowl-collector.validate" . -}}
+# A collector holds no durable state: Corndogs owns the queue and the payload.
+# So it is a stateless Deployment, and a restart loses nothing it acknowledged.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tallyowl-collector.fullname" . }}
+  labels:
+    {{- include "tallyowl-collector.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "tallyowl-collector.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tallyowl-collector.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include "tallyowl-collector.settings" . | sha256sum }}
+    spec:
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: collector
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - tallyowl-collector
+            - --config
+            - /etc/tallyowl/tallyowl.yaml
+          ports:
+            - name: intake
+              containerPort: {{ include "tallyowl-collector.port" .Values.collector.listen }}
+            - name: operational
+              containerPort: {{ include "tallyowl-collector.port" .Values.collector.operationalListen }}
+            {{- if .Values.compatibility.openTelemetry.enabled }}
+            - name: otlp
+              containerPort: {{ include "tallyowl-collector.port" .Values.compatibility.openTelemetry.listen }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: operational
+            periodSeconds: 10
+          readinessProbe:
+            # Readiness fails when the durable store is unreachable or the
+            # retry sweep has stopped. A collector that cannot make a batch
+            # durable must not accept it.
+            httpGet:
+              path: /readyz
+              port: operational
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tallyowl
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "tallyowl-collector.fullname" . }}

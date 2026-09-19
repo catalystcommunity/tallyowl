@@ -56,7 +56,7 @@ produce the message pattern that its kind of client produces.
 
 | Surface | How it sends | Primary telemetry |
 | --- | --- | --- |
-| Marketing site | Browser package | Page views, campaign touchpoints, consent |
+| Marketing site | Browser package | Page views, campaign touches, consent |
 | Web application | Browser package, TypeScript | Events, sessions, browser errors, browser spans |
 | Backend | Go app driver | Backend events, errors, spans, metrics, conversions |
 | Rich client | Rust app driver | Native events, errors, spans, offline buffering |
@@ -113,6 +113,15 @@ testbed/
 The second application reuses `api/` with different configuration. It does not
 need its own client surfaces.
 
+**What exists as of 2026-08-10:** `api/` including its web surface in
+`api/web.go`, `webapp/`, `simulator/`, `ledger/`, the load harness in
+`cmd/load`, and the soak driver in `cmd/soak`, which offers paced load for
+days and continuously reconciles what was acknowledged against what a query
+answers (see PHASE11_REPORT.md section 1). `marketing/`, `richclient/`,
+`mobile/`, `terminal/`, `harness/`, and `deploy/` are not built. `webapp/` has its own end-to-end tests in Go and
+TypeScript and does not yet carry a share of a ledger scenario, because the
+scenario stream is app-driver shaped and the browser path is ingest shaped.
+
 ## 5. The ledger: how correctness is proved
 
 The simulator is the source of truth. Before it sends anything, the simulator
@@ -123,7 +132,7 @@ The simulator knows these facts exactly:
 
 - how many end users started each funnel and how many completed it;
 - which end users returned in each retention period;
-- which touchpoint each attribution model must credit;
+- which touch each attribution model must credit;
 - the exact conversion value and currency total for each campaign;
 - how many occurrences belong to each error group;
 - the exact span count and parent and child shape of each trace;
@@ -168,6 +177,22 @@ anonymous (marketing site)
       -> identified on a second device
         -> erased
 ```
+
+**Built, from Phase 8.** `expandJourney` in the simulator is the cross-device
+part of this. Each person uses three client surfaces, each surface has its own
+project-scoped anonymous identifier, and each one identifies to the same known
+identifier. The ledger then predicts three things the sessions alone cannot
+reach:
+
+- **the funnel**, step by step, counted in people rather than in events;
+- **the retention matrix**, one cohort by as many periods as the scenario's
+  return days;
+- **the timeline**, as a count of items for each person across every surface.
+
+The journey uses its own event names and runs beside the sessions rather than
+inside them. **A fixture whose steps could also be matched by other traffic is
+one nobody can work out by hand**, and every number in this part of the ledger
+is a multiplication a reader can do in their head. See L111.
 
 ## 7. Headless browser layer
 
@@ -216,7 +241,7 @@ Each surface must exercise its telemetry kinds and its assertions:
 | Sessions | All client surfaces, including a terminal user interface | Session lifecycle, invalid-ID drops and their metric |
 | Tail sampling | Multi-service traces | Kept trace keeps every span; dropped trace leaves none |
 | Properties | Client, driver, and collector origins | Stamped origins, and a refused client attempt to set a protected name |
-| Consent | Marketing site | Campaign capture without a session link still measures the campaign |
+| Consent | Marketing site | Campaign linking without a session link still measures the campaign |
 | Erasure | Harness | Rows disappear; ledger confirms scope |
 | Multi-tenant isolation | Second application | Cross-project query returns nothing |
 
@@ -285,7 +310,25 @@ The test bed grows with the system. Do not build it all at the start.
 4. Add metrics and the compatibility receivers.
 5. Add the rich client and the mobile client.
 6. Add identity, funnels, retention, and paths.
-7. Add attribution, revenue, and cost.
+7. Add attribution, revenue, and cost. **Built.** The marketing journey sends
+   three touches exactly one decay half-life apart, an `identify` after all of
+   them, and a purchase with an order identifier that is delivered twice. Every
+   model therefore divides the conversion value into whole units, and the ledger
+   states the answer for each of the six before anything is sent.
 8. Add the failure cases and the upgrade case.
 
 Each step lands with the phase that makes it possible. See [PLAN.md](PLAN.md).
+
+
+## Alerting
+
+The reference application's own traffic is what an alert rule runs against in
+`an_alert_over_the_reference_applications_traffic_fires_and_agrees_with_the_ledger`.
+It asks the two questions a person would: does a rule over real application
+traffic fire, and does its value agree with what the ledger says arrived?
+
+**The second half is the point.** Every other alert test builds its own rows,
+which proves the rules and says nothing about whether an alert over a real
+application finds it. An alert value that disagreed with the ledger would be a
+number nobody could reconcile against their own records, and
+[ALERTS.md](ALERTS.md) section 2 puts that above every other property.

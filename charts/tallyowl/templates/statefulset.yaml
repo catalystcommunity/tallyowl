@@ -1,0 +1,162 @@
+{{- include "tallyowl.validate" . -}}
+# The head is a StatefulSet because a storage node keeps its identity on its
+# volume: a replacement pod finds the node ID there and requests a certificate
+# for the same node. See docs/DEPLOYMENT.md section 6.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "tallyowl.fullname" . }}
+  labels:
+    {{- include "tallyowl.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  serviceName: {{ include "tallyowl.fullname" . }}-nodes
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "tallyowl.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tallyowl.labels" . | nindent 8 }}
+      annotations:
+        # A configuration change restarts the pods. Without this, an edited
+        # value waits silently for the next unrelated restart.
+        checksum/config: {{ include "tallyowl.settings" . | sha256sum }}
+    spec:
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        {{- range .Values.topologySpread.constraints }}
+        - topologyKey: {{ .topologyKey }}
+          maxSkew: {{ .maxSkew }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "tallyowl.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- end }}
+      {{- if eq .Values.affinity.antiAffinity "required" }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: {{ .Values.affinity.topologyKey }}
+              labelSelector:
+                matchLabels:
+                  {{- include "tallyowl.selectorLabels" . | nindent 18 }}
+      {{- else if eq .Values.affinity.antiAffinity "preferred" }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: {{ .Values.affinity.topologyKey }}
+                labelSelector:
+                  matchLabels:
+                    {{- include "tallyowl.selectorLabels" . | nindent 20 }}
+      {{- end }}
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: head
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - tallyowl-head
+            - --config
+            - /etc/tallyowl/tallyowl.yaml
+          workingDir: /var/lib/tallyowl
+          env:
+            # The pod's stable name is the node's name, so a restarted pod is
+            # the same node rather than a new one.
+            - name: TALLYOWL_NODE__NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # The failure domain is the host the pod landed on. The controller
+            # places at most one voter of a tablet in each domain.
+            - name: TALLYOWL_NODE__FAILURE_DOMAIN
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: ingest
+              containerPort: {{ include "tallyowl.port" .Values.head.listen }}
+            - name: operational
+              containerPort: {{ include "tallyowl.port" .Values.head.operationalListen }}
+            {{- if .Values.dashboard.enabled }}
+            - name: dashboard
+              containerPort: {{ include "tallyowl.port" .Values.dashboard.listen }}
+            {{- end }}
+            {{- if .Values.replication.listen }}
+            - name: replication
+              containerPort: {{ include "tallyowl.port" .Values.replication.listen }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: operational
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: operational
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tallyowl
+              readOnly: true
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              # head.dataDir is ./data/head, resolved against the working
+              # directory, so the whole data tree lives on the volume.
+              mountPath: /var/lib/tallyowl/data
+            {{- end }}
+        {{- if .Values.corndogsDeployment.enabled }}
+        # The home profile runs one Corndogs beside the head. A larger
+        # installation references an existing Corndogs service instead and
+        # leaves this off.
+        - name: corndogs
+          image: "{{ .Values.corndogsDeployment.image }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: STORAGE_BACKEND
+              value: {{ .Values.corndogs.backend | quote }}
+            - name: CORNDOGS_FILESTORE_DIR
+              value: /var/lib/corndogs
+            - name: CORNDOGS_FILESTORE_SYNC
+              value: {{ .Values.corndogs.fsyncMode | quote }}
+            - name: CORNDOGS_LISTEN
+              value: "0.0.0.0:{{ include "tallyowl.port" .Values.corndogs.endpoint }}"
+          ports:
+            - name: corndogs
+              containerPort: {{ include "tallyowl.port" .Values.corndogs.endpoint }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/corndogs
+              subPath: corndogs
+          {{- end }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "tallyowl.fullname" . }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

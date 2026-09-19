@@ -1,0 +1,17 @@
+{{- include "tallyowl.validate" . -}}
+{{- if and .Values.disruption.enabled (gt (int .Values.replicas) 1) }}
+# A voluntary disruption must never take a quorum. `minAvailable` is a count
+# and not a percentage: a percentage of a shrinking set rounds in the wrong
+# direction. See docs/DEPLOYMENT.md section 6.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tallyowl.fullname" . }}
+  labels:
+    {{- include "tallyowl.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.disruption.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "tallyowl.selectorLabels" . | nindent 6 }}
+{{- end }}

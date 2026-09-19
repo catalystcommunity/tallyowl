@@ -1,0 +1,13 @@
+[package]
+name = "tallyowl-config"
+description = "One configuration loader for every TallyOwl binary: precedence, validation, secret references, and `config check`."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_yaml = { workspace = true }

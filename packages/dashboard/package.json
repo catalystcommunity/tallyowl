@@ -1,0 +1,22 @@
+{
+  "name": "@catalystcommunity/tallyowl-dashboard",
+  "version": "0.2.0",
+  "description": "The TallyOwl dashboard. It reaches the head over the same-origin browser carrier and speaks the generated control contract.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test dist/packages/dashboard/test/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7",
+    "@types/node": "^22"
+  }
+}

@@ -52,8 +52,11 @@ its workspace. See D32.
 One typed property namespace carries the remaining descriptive values. Each
 property records an origin of `client`, `driver`, or `collector`. The collector
 stamps an operator property such as `region` = `us-west2` from its own
-configuration, and it refuses a client value for a protected name. A property
-never grants access and never selects a destination. See D38.
+configuration, and it refuses a client value for a protected name. The
+correlation names `request_id`, `session_id`, `trace_id`, and `event_id` are
+protected as well: the row's own column carries each of these values, and a
+client property with one of these names would be shadowed by that column. A
+property never grants access and never selects a destination. See D38.
 
 TallyOwl stores IDs. A workspace name and a project name are display properties
 and never travel on the ingest path.
@@ -240,15 +243,31 @@ identity or latest-known identity.
 
 ### 3.6 Campaigns and attribution
 
-A touchpoint records:
+A touch records:
 
 - landing, session, and event ID;
 - referrer and referring domain;
 - source, medium, campaign, term, and content;
 - permitted external click IDs;
 - channel classification and classifier version;
-- first and last touch position;
 - occurred time and consent state.
+
+**A producer never sends a channel.** TallyOwl classifies it from the medium,
+the source, the click identifier, and the referring domain, in that order. A
+producer that could name its own channel could put paid traffic in the organic
+column, and the number that decides a marketing budget would be one that the
+marketing team wrote.
+
+**The classification is also computed at read time.** The stored channel lets a
+general aggregate group by it. Nothing that divides credit reads the stored
+value: attribution classifies again. A stored channel is a fact about the
+classifier that ran, so a corrected classifier would disagree with every earlier
+record and the only remedy would be a rewrite. A classification at read time
+takes effect at the next question.
+
+**First and last touch position is not a field.** It is a property of the set of
+touches that one conversion looked back over, and it is decided when the
+question is asked.
 
 A conversion records:
 
@@ -268,7 +287,7 @@ The attribution projector makes versioned results. Initial models:
 - position based;
 - time decay.
 
-A model change recalculates attribution. It does not change raw touchpoints or
+A model change recalculates attribution. It does not change raw touches or
 conversions.
 
 A separate typed import contains campaign cost data. Campaign and time identify

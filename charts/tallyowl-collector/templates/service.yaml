@@ -1,0 +1,19 @@
+{{- include "tallyowl-collector.validate" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tallyowl-collector.fullname" . }}
+  labels:
+    {{- include "tallyowl-collector.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "tallyowl-collector.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: intake
+      port: {{ include "tallyowl-collector.port" .Values.collector.listen }}
+    - name: operational
+      port: {{ include "tallyowl-collector.port" .Values.collector.operationalListen }}
+    {{- if .Values.compatibility.openTelemetry.enabled }}
+    - name: otlp
+      port: {{ include "tallyowl-collector.port" .Values.compatibility.openTelemetry.listen }}
+    {{- end }}

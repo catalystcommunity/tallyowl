@@ -1,0 +1,19 @@
+# What `cargo audit` may pass over, and why. Every entry here is a known and
+# ranked finding in the Phase 11 security review, not a dismissal. Remove the
+# entry when the cause is gone, so the audit fails if it comes back.
+
+[advisories]
+ignore = [
+    # hickory-proto 0.24: CPU exhaustion during DNS message encoding. It
+    # reaches this build through the pinned linkkeys-local-rp revision, and
+    # linkkeys itself still requires hickory-resolver 0.24 at its newest
+    # revision, so no pin bump here can fix it. The fix is a linkkeys change to
+    # hickory 0.26. Exposure is bounded: the resolver runs only when LinkKeys
+    # sign-in is enabled, and `linkkeys.enabled` is false by default.
+    "RUSTSEC-2026-0119",
+    # rkyv 0.7: out-of-bounds reads validating hostile archives. It is in the
+    # lockfile through an optional feature of rust_decimal that no TallyOwl
+    # build enables: `cargo tree -i rkyv` prints nothing. No TallyOwl binary
+    # contains the code.
+    "RUSTSEC-2026-0235",
+]

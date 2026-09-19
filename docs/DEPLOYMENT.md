@@ -14,6 +14,23 @@ clusters, and those releases must coordinate. That case is not an afterthought
 in this design. Section 5 gives it first-class treatment, because a chart that
 only works for one cluster is not useful to the people who need cells.
 
+
+### One installation, one device
+
+`storage.reserveBytes` holds space back so that recovery can still write when a
+device fills. **The reserve belongs to the device and one process enforces it**,
+so two installations sharing a device each hold back the same bytes and each
+treats them as its own. Both can spend the reserve at once.
+
+No data is at risk from this: a write is still refused when the device cannot
+take it, because that check reads the real free space. What is at risk is the
+recovery the reserve exists for.
+
+An installation reports its device at start-up and in
+`tallyowl_storage_device_info`. Two installations reporting the same number are
+sharing a reserve. Give each one a device, or accept that the reserve is
+advisory. See FAILURE_MODES.md section 10.
+
 ## 2. Charts
 
 | Chart | Installs |
@@ -80,9 +97,66 @@ A profile change is an online change. It moves data. It does not rewrite it.
 | `corndogs.durableCopies` | Copies required before a collector acknowledgement |
 | `corndogs.backend` | `file` or `postgres` |
 | `corndogs.maxPayloadBytes` | Corndogs payload limit; 16 MiB by default |
+| `corndogs.maxDeliveryAge` | How long a batch may keep being retried; 24 hours by default |
+| `storage.deduplicationWindow` | How long the head remembers a batch ID; 72 hours by default |
+
+### Replication and placement
+
+A home installation leaves `replication.listen` empty and none of the rest
+applies. An operator turns replication on by giving the node an address that
+peers can reach: no address, no listener, no cluster.
+
+| Value | Meaning |
+| --- | --- |
+| `replication.listen` | Where this node answers other storage nodes. Empty in the home profile |
+| `replication.peers` | The peers a first bootstrap starts with. A cell learns its peers from its controller quorum afterwards |
+| `replication.writeTimeout` | How long a write waits for its tablet group to commit; 10 seconds by default |
+| `node.name` | What the control plane calls this node. Empty means the head assigns one at enrollment |
+| `node.failureDomain` | The rack, zone, or host this node is in |
+| `placement.mode` | `automatic`, `recommendation-only`, or `paused`; recommendation-only by default |
+| `placement.splitAbove` | Split a tablet larger than this; 64 GiB by default |
+| `placement.mergeBelow` | Merge two adjacent tablets smaller than this; 8 GiB by default |
+| `placement.concurrentChanges` | Splits, merges, and movements that may run at once in one cell; one by default |
+| `query.maxFanOut` | Tablets one query may ask at once; 256 by default |
+
+`replication.listen` must have an address when `storage.tabletVoters` is
+greater than one, and TallyOwl refuses to start when it does not. A node with
+peers and no address to be reached at elects nothing and refuses every write,
+which reads as a storage fault rather than as a missing setting.
+
+`placement.mergeBelow` must be below half of `placement.splitAbove`, and
+TallyOwl refuses to start when it is not. Two merged tablets that were
+immediately over the split threshold would make a cell rewrite the same data for
+ever. See CELLS.md section 6 on hysteresis.
+
+`placement.mode` is `recommendation-only` by default. The controller decides in
+every mode and the mode selects whether it acts, so the automatic path is
+exercised at every installation rather than being code nobody ran until the day
+it was switched on.
 
 `corndogs.maxPayloadBytes` must exceed the batch seal size in D19, which is
 512 KiB.
+
+`storage.deduplicationWindow` must exceed `corndogs.maxDeliveryAge`, and
+TallyOwl refuses to start when it does not. D36 makes the two one decision: a
+retry that arrives after the head has forgotten the batch ID commits a second
+logical batch, and no query can remove it afterwards.
+
+### Dashboard
+
+| Value | Meaning |
+| --- | --- |
+| `dashboard.enabled` | Serve the dashboard; on by default |
+| `dashboard.listen` | Where the dashboard serves its document, its bundle, and the browser carrier |
+| `dashboard.assets` | Where the built dashboard bundle is |
+| `dashboard.callbackPath` | The path a LinkKeys sign-in returns to |
+
+`dashboard.listen` is the origin `linkkeys.callbackUrl` must name, and
+`dashboard.callbackPath` must be that URL's path. A sign-in returns to an
+address nothing serves when the two disagree.
+
+The dashboard carries `TallyOwlControl` and refuses every other service, so it
+is not an ingest surface. Telemetry reaches a collector over CSIL.
 
 ### Integrity and recovery
 
@@ -208,6 +282,25 @@ that show convergence.
   pod requests a certificate for that same node ID;
 - a stateless pod gets a new node ID for each start.
 
+The head chart carries three groups of values for this. A home installation has
+one replica and none of them applies to it.
+
+| Value | Meaning |
+| --- | --- |
+| `topologySpread.constraints` | Spread replicas across zones and then across nodes, with a skew of one |
+| `affinity.antiAffinity` | `required` by default: two voters of one tablet never share a node |
+| `disruption.minAvailable` | How many replicas must stay during a voluntary disruption; two of three by default |
+
+`disruption.minAvailable` is a count and not a percentage. A percentage of a
+shrinking set rounds in the wrong direction, and this number has to hold when
+the set is already smaller than it should be.
+
+A node reports its own domain in `node.failureDomain`, and the controller places
+at most one voter of a tablet in each domain. When a cell has fewer domains than
+a tablet has voters, the controller still places the tablet and reports that one
+domain's loss can end its quorum. It does not refuse, because refusing to place
+data is worse than placing it and saying what the risk is.
+
 ## 7. Upgrade order
 
 1. Upgrade the head ingest and query roles first, because the head accepts the
@@ -217,10 +310,73 @@ that show convergence.
    accept.
 4. Upgrade cells one at a time in a multi-region installation.
 
-Before a release candidate there is no client compatibility window. See D31.
+The compatibility window opened at the first release, 0.2.0, and it is
+enforced rather than promised. An app driver declares the protocol version it
+speaks on every batch, and a collector declares its own when it forwards.
+Collector intake and the head each accept the current version and the one
+before it, from one list. A version outside the window is refused with a
+message that names both ends, and `tallyowl_protocol_version_refused_total`
+counts it, by version.
+
+That is what makes the order above safe: the head is upgraded first, so every
+collector still running is one version behind the head it forwards to, which is
+inside the window by construction. Support for a protocol version ends one
+minor release after the release that replaces it, and the release notes say so
+before it ends. There is one protocol version today, so nothing a current
+client sends is refused. See D31, `docs/RELEASE_NOTES.md`, and L183.
 
 Head ingest stops readiness before it drains. Collectors stop intake, finish or
 release claimed tasks, and leave queued data durable.
+
+## 7b. Reaching an installation
+
+### What a pod binds
+
+The settings tree keeps the loader's own defaults, and those are loopback: a
+process on a workstation must not open a port to the network because somebody
+started it. A pod is the other case. A loopback bind there reaches nothing, and
+the Service in front of it forwards to a port no client can use.
+
+Both charts therefore rewrite the host part of every listening address in the
+rendered configuration, from the deployment value `bindAddress`, which defaults
+to `0.0.0.0`. The port always comes from the setting, so a changed port reaches
+the process and the Service together. `replication.listen` stays empty when it
+is empty, because an empty value means a node with no replication port.
+
+Set `bindAddress` to `127.0.0.1` for a pod whose only client is a sidecar.
+
+### The dashboard bundle
+
+The container image carries the dashboard at
+`/usr/local/share/tallyowl/dashboard`, and the deployment value
+`dashboardAssets` points the head at it. The setting keeps the loader default,
+which is the path a developer builds into. An image without the bundle serves
+an empty page, which is why `helm-check` refuses a rendered configuration whose
+`dashboard.assets` is a relative path.
+
+### Gateway API
+
+Traffic from outside the cluster reaches the dashboard through an **HTTPRoute**.
+The charts render one when `gateway.enabled` is true, and refuse to render a
+route with no `gateway.parentRef.name`, a dashboard route with the dashboard
+turned off, or a dashboard route on the collector chart, which serves none.
+
+```sh
+helm install tallyowl oci://…/tallyowl \
+  --set gateway.enabled=true \
+  --set gateway.parentRef.name=platform \
+  --set gateway.hostnames[0]=tally.example.com
+```
+
+**No Gateway is created.** A Gateway carries a listener and an address that
+belong to the platform, and a chart that created one would be claiming both.
+
+**Ingest gets no route.** Native TallyOwl traffic is CSIL over TLS over TCP and
+an application reaches the collector directly. An HTTPRoute in front of intake
+would be a generic HTTP ingest API, which `AGENTS.md` forbids.
+
+**There is no Ingress template.** Gateway API is the interface these charts
+support. Ingress can be added when somebody needs it.
 
 ## 8. Required tests
 

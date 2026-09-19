@@ -1,0 +1,34 @@
+[package]
+name = "tallyowl-store"
+description = "The native TallyOwl store, behind its own versioned API contract. See D25."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tallyowl-obs = { workspace = true }
+serde_json = { workspace = true }
+
+# The storage format's own dependencies. D44 gives the two hash functions and
+# why they are two; D17 gives the compression codec and its level.
+zstd = { workspace = true }
+xxhash-rust = { workspace = true }
+blake3 = { workspace = true }
+redb = { workspace = true }
+aes-gcm = { workspace = true }
+getrandom = { workspace = true }
+libc = { workspace = true }
+
+# Node identity, per NODE_IDENTITY.md sections 4 and 6. The node generates its
+# own key; these sign the request it sends and read the request it built.
+rcgen = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+# The identity tests act as a node: they generate a key and build a real
+# certificate request, then read back the certificate the control plane signed.
+x509-parser = { workspace = true }

@@ -1,0 +1,31 @@
+{
+  "name": "@catalystcommunity/tallyowl-browser",
+  "version": "0.2.0",
+  "description": "The TallyOwl browser package. It rides the host application's existing connection and never opens one of its own.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "//": "A published tarball carries `dist` and nothing else. The compiler puts the generated client and the CSIL transport under `dist` as well, because `rootDir` is the repository root, so an installed package needs no path outside itself. `./tools.sh release package` builds before it packs, and refuses a tarball that has no entry point.",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/packages/browser/src/index.js",
+  "types": "./dist/packages/browser/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/packages/browser/src/index.d.ts",
+      "default": "./dist/packages/browser/src/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test dist/packages/browser/test/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7",
+    "@types/node": "^22"
+  }
+}

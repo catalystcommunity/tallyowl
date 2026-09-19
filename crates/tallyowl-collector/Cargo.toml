@@ -1,0 +1,44 @@
+[package]
+name = "tallyowl-collector"
+description = "Collector intake and forwarder: the durable boundary between an application and the head."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tallyowl-collector"
+path = "src/main.rs"
+
+[lib]
+name = "tallyowl_collector"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tallyowl-obs = { workspace = true }
+tallyowl-compat = { workspace = true }
+tallyowl-wire = { workspace = true }
+tallyowl-config = { workspace = true }
+tallyowl-rpc = { workspace = true }
+tallyowl-collector-api = { workspace = true }
+corndogs = { workspace = true }
+tallyowl-queue = { workspace = true }
+csilgen-transport = { workspace = true }
+# A queued batch travels compressed. D17 picked this codec and its level for
+# segment pages; a queue payload lives for seconds, so the same reasoning
+# applies more strongly. See src/task.rs.
+zstd = { workspace = true }
+
+[dev-dependencies]
+# The testbed runs the reference application twice: once against the local
+# store and once against a real tablet group. Phase 7's last exit criterion is
+# that nothing else changes between the two.
+tallyowl-cluster = { workspace = true }
+tallyowl-head = { path = "../tallyowl-head" }
+tallyowl-driver-rust = { path = "../tallyowl-driver-rust" }
+tallyowl-control-api = { workspace = true }
+tallyowl-store = { workspace = true }
+serde_json = { workspace = true }

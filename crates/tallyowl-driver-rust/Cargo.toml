@@ -1,0 +1,23 @@
+[package]
+name = "tallyowl-driver-rust"
+description = "The Rust app driver: buffering, batching, configuration, and host integration."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tallyowl-obs = { workspace = true }
+tallyowl-wire = { workspace = true }
+tallyowl-rpc = { workspace = true }
+tallyowl-collector-api = { workspace = true }
+# Trace and span identifiers. A span ID has to be unpredictable as well as
+# unique: a guessable one lets a caller attach a span to somebody else's trace.
+getrandom = { workspace = true }
+
+[dev-dependencies]
+tallyowl-config = { workspace = true }
+tallyowl-control-api = { workspace = true }

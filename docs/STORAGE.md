@@ -215,6 +215,10 @@ format/<component>
 control/workspace/<workspace-id>
 control/project/<project-id>
 control/source/<source-id>
+control/policy/<scope>/<scope-id>
+control/policy-generation
+control/analysis/<project-id>/<analysis-id>
+control/dashboard/<project-id>/<dashboard-id>
 auth/api-key/<key-id>
 receipt/<source-id>/<batch-id>
 tablet/<tablet-id>/log-checkpoint
@@ -283,7 +287,42 @@ detects and cannot repair. See D57 and
 5. Return a committed receipt.
 6. Segment committed ranges asynchronously.
 7. Publish complete segments in one catalog generation.
-8. Advance the segment checkpoint and eventually remove covered WAL files.
+8. Advance the segment checkpoint and remove the covered prefix of the WAL.
+
+**Step 8 removes a prefix, not the file.** A commit that lands while step 7 is
+building sits above the range being published, and its frame is the only durable
+copy of an acknowledged batch until a later seal takes it. Removing the whole
+file loses that batch on an abrupt kill. The prefix is removed by writing a new
+log beside the old one and renaming it, so a crash leaves one or the other and
+never a half-written log; a crash before the rename replays frames a segment
+already holds, and deduplication makes that harmless.
+
+**The rewrite waits until the covered prefix is at least half the file**, or has
+reached `min_reclaim_bytes`. A seal reclaims the range it has just published,
+which is small next to whatever is queued behind it, so rewriting for each seal
+copies the whole tail each time and the total work is quadratic in the backlog.
+Waiting makes it amortised, and the cost of waiting is that the log holds at
+most twice what it needs. See the implementation log, L056 and L060.
+
+**A rewrite asks a group commit to stand down, and never races one.** A
+committer that has released the log lock is writing at an offset it captured
+before it let go. A rewrite renames a new file over that one, so those bytes
+would land where nothing can read them and the committer would still report them
+durable. The rewrite therefore waits for the group in flight to finish.
+
+**Waiting is not the same as stepping aside.** A committer keeps the role for as
+long as callers keep arriving, so a log that never goes quiet has a group in
+flight at every moment a seal looks. A rewrite that gave up and left it to the
+next seal never ran at all on a busy installation, and the log kept every byte it
+had ever taken. The rewrite states that it is waiting; a committer stands down as
+soon as its own frame is durable, and a new caller waits rather than taking the
+role. See L132.
+
+**A refused write stops the log.** A group commit the device refuses leaves a
+gap, and recovery stops at the first frame that does not check out — so a frame
+written after the gap would be acknowledged and unreadable. The log refuses every
+later append, names the reason, and fails readiness. Restarting is what clears
+it, because recovery truncates to the last complete frame.
 
 The recovery scanner truncates only a torn final frame, replays complete frames
 after the catalog checkpoint, reconstructs missing receipt entries, and resumes
@@ -616,6 +655,30 @@ Compaction rewrites only affected bounded segments. A project and time-range
 deletion can remove fully covered segments without reading them. Compaction can
 combine small tombstones to keep query filtering bounded.
 
+### Cold consolidation
+
+Compaction also serves the locator. Once a time bucket's segments are older
+than `compaction.coldGroupAfter`, one pass reads them together, orders the
+rows by the grouping value, and rewrites the bucket as few segments in which
+one person's rows sit together. A bucket is due only while it holds more
+segments than its bytes need at the target size
+(`compaction.coldGroupTarget`), so the pass converges and never rewrites a
+consolidated bucket again. HIGH_CARDINALITY.md carries the reason and the
+measurement: only compaction changes which segment holds a row, and grouping
+the cold majority is a 13-fold candidate reduction.
+
+One pass takes at most `compaction.coldGroupBatch` of stored source bytes,
+and the bound holds inside a single bucket, not only across buckets: a pass
+holds its taken rows decompressed in memory at many times their stored size,
+and a soak-aged day was one group holding two gigabytes. The pass takes a
+bucket's smallest segments first, up to the budget, and leaves the rest for
+the next maintenance interval; a taken set that would not shrink is left
+alone, so a bucket may settle one segment above the ideal count rather than
+rewrite the same bytes forever. BENCHMARKS.md section 23.1 measures the
+converged layout; section 24.1 measures what the target size costs a cold
+exact lookup, which is the trade an operator tunes these two settings
+against.
+
 ### A tombstone is a standing predicate
 
 A tombstone is not only a filter over data that already exists. Telemetry for
@@ -765,6 +828,15 @@ A worker hard-links, copies, or incrementally transfers an immutable segment.
 Only new segments and catalog snapshots need copying after the first backup.
 The snapshot can refer to cold objects that satisfy placement and checksum
 rules. It does not have to copy them again.
+
+The shard logs travel with the snapshot, and they are copied last. A row that
+TallyOwl accepted but did not yet write into a segment is only in the log. A
+snapshot that copied the segments and the catalog alone would lose that row and
+still look complete. The order is important when the directory receives writes:
+if the log copy is last, the copy can contain a batch whose receipt did not
+travel. That batch becomes visible again, and a retry of it can count twice.
+The opposite order loses the rows. Duplicated rows are recoverable. Lost rows
+are not.
 
 ### Restore
 

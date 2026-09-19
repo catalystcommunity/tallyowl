@@ -1,0 +1,63 @@
+[package]
+name = "tallyowl-head"
+description = "The head: ingest, storage, and the query service, from one directory and no external database."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tallyowl-head"
+path = "src/main.rs"
+
+[lib]
+name = "tallyowl_head"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tallyowl-obs = { workspace = true }
+tallyowl-compat = { workspace = true }
+# The head publishes its own instruments through a collector, using the same app
+# driver an application uses. See `selfobs`.
+tallyowl-driver-rust = { workspace = true }
+tallyowl-wire = { workspace = true }
+tallyowl-config = { workspace = true }
+tallyowl-rpc = { workspace = true }
+# The dashboard carrier reads and writes CSIL-RPC frames directly, because a
+# browser cannot open a socket and the frame is what every other hop carries.
+csilgen-transport = { workspace = true }
+tallyowl-store = { workspace = true }
+# The durable task boundary. Alert evaluation, notification delivery, and every
+# projector workflow are Corndogs tasks, for the same reason a batch is.
+tallyowl-queue = { workspace = true }
+# Parquet export is a first-class compatibility contract, and the export
+# workflow is what runs it on a schedule.
+tallyowl-export = { workspace = true }
+# Phase 7. A home installation never starts a group; see `cluster.rs`.
+tallyowl-cluster = { workspace = true }
+tallyowl-cluster-api = { workspace = true }
+# The error grouping fingerprint. D44 already keeps this crate in the workspace
+# for a segment content address; a group digest needs the same property.
+blake3 = { workspace = true }
+# LinkKeys owns human authentication. See src/linkkeys.rs.
+linkkeys-local-rp = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+# An alert webhook is the one outbound connection to something TallyOwl does not
+# own. See src/notify.rs.
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+webpki-roots = { workspace = true }
+getrandom = { workspace = true }
+serde_json = { workspace = true }
+tallyowl-collector-api = { workspace = true }
+tallyowl-control-api = { workspace = true }
+
+[dev-dependencies]
+# The enrollment tests act as a node: they generate a key, build a real
+# certificate request, and read back the certificate the head signed.
+rcgen = { workspace = true }
+x509-parser = { workspace = true }

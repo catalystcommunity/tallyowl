@@ -1,0 +1,26 @@
+TallyOwl {{ .Chart.AppVersion }} is installed as {{ .Release.Name }}.
+
+Profile: {{ .Values.installation.profile }}. Replicas: {{ .Values.replicas }}.
+Receipt policy: {{ .Values.storage.receiptPolicy }} with
+{{ .Values.storage.tabletVoters }} tablet voter(s).
+
+Health and metrics are on port {{ include "tallyowl.port" .Values.head.operationalListen }}:
+  /livez, /readyz, and /metrics.
+
+{{- if .Values.dashboard.enabled }}
+The dashboard is on port {{ include "tallyowl.port" .Values.dashboard.listen }}.
+{{- end }}
+
+To make a key for an application:
+  kubectl exec {{ include "tallyowl.fullname" . }}-0 -- \
+    tallyowl-head --config /etc/tallyowl/tallyowl.yaml provision <project>
+
+The key is printed once. Store it as a secret and give the collector release a
+reference to it, never the value.
+
+{{- if gt (int .Values.replicas) 1 }}
+
+This is a replicated installation. Upgrade order matters:
+head roles first, then storage nodes one failure domain at a time, then
+collectors. See docs/DEPLOYMENT.md section 7.
+{{- end }}

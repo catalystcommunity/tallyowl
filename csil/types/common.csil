@@ -42,16 +42,46 @@ DurationMs    = int
 ;;
 ;; A property value keeps its type. TallyOwl never converts a value to text to
 ;; make it fit. A query selects one type when a name holds more than one (D20).
+;;
+;; THE DISCRIMINANT IS EXPLICIT, AND IT HAS TO BE.
+;;
+;; An earlier draft wrote this as a bare choice, `null / bool / int / uint /
+;; float / decimal / text / bytes`. A choice with more than one non-literal arm
+;; encodes as `[variant_index, value]`, and an encoder picks the arm from the
+;; runtime type of the value it holds. A dynamically typed language has no
+;; runtime type that separates `int` from `uint` from `float`: all three are one
+;; JavaScript `number`. csilgen's own wire contract says so, and states the
+;; consequence: among arms that share one runtime dispatch type, the first
+;; declared wins. Every TypeScript `float` therefore left as an `int`.
+;;
+;; A `kind` field costs a few bytes and removes the guess. Every language reads
+;; the field and selects the matching value field, so Rust, Go, and TypeScript
+;; agree byte for byte. The golden vectors in `golden/` hold that agreement to
+;; a test. See docs/IMPLEMENTATION_LOG.md L017.
 ;; ---------------------------------------------------------------------------
 
-TypedValue = nil
-           / bool
-           / int
-           / uint
-           / float
-           / decimal
-           / text
-           / bytes
+TypedValueKind = "null"
+               / "bool"
+               / "int"
+               / "uint"
+               / "float"
+               / "decimal"
+               / "text"
+               / "bytes"
+
+;;; One typed value. `kind` names which value field carries it. A `kind` of
+;;; `null` carries no value field, which is how a null property differs from an
+;;; absent one.
+TypedValue = {
+    kind: TypedValueKind,
+    ? bool_value: bool,
+    ? int_value: int,
+    ? uint_value: uint,
+    ? float_value: float,
+    ? decimal_value: decimal,
+    ? text_value: text,
+    ? bytes_value: bytes
+}
 
 ;;; Where a property came from. An operator can trust a `collector` origin,
 ;;; because the collector stamps it from its own configuration and refuses a
@@ -66,11 +96,18 @@ Property = {
 
 PropertyList = [* Property]
 
+;;; A measure is a number, so its kinds are the three numeric ones. It carries
+;;; its own discriminant for the same reason `TypedValue` does.
+MeasurementKind = "float" / "decimal" / "int"
+
 ;;; A numeric observation with a unit, kept apart from a property so that a
 ;;; measure never has to guess whether a value is a dimension or a number.
 Measurement = {
     key: text .size (1..64),
-    value: float / decimal / int,
+    kind: MeasurementKind,
+    ? float_value: float,
+    ? decimal_value: decimal,
+    ? int_value: int,
     ? unit: text .size (1..32)
 }
 

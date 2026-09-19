@@ -18,8 +18,9 @@ options {
     package: "tallyowl-collector",
     version: "v1alpha1",
     emit_packages: ["rust", "go", "typescript"],
-    package_name: "github.com/CatalystCommunity/tallyowl/clients/tallyowl-collector",
-    package_version: "0.0.0",
+    package_name: "tallyowl-collector-api",
+    go_module: "github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api",
+    package_version: "0.2.0",
     decimal_mapping: "csil"
 }
 
@@ -47,7 +48,13 @@ Batch = {
 
 SubmitBatchRequest = {
     batch: Batch,
-    ? policy_version: uint
+    ? policy_version: uint,
+    ;; The protocol version the app driver speaks. A collector and the head
+    ;; each accept the current version and the one before it, so a rolling
+    ;; upgrade never refuses a client that is one version behind. An absent
+    ;; value is read as the current version, because a driver older than this
+    ;; field predates the window and there is only one version behind it.
+    ? protocol_version: uint
 }
 
 ;;; The receipt names the durability that the collector actually reached. It
@@ -74,7 +81,12 @@ ReceiptPolicy = "local-one" / "local-quorum" / "remote-one" / "custom"
 CommitBatchRequest = {
     batch: Batch,
     source_id: SourceId,
-    ? attempt: uint
+    ? attempt: uint,
+    ;; The protocol version this collector speaks. The head is the authority
+    ;; on the window and checks it here: the upgrade order puts the head first,
+    ;; so a collector is briefly one version behind the head it forwards to,
+    ;; and the head must refuse what it cannot store correctly.
+    ? protocol_version: uint
 }
 
 CommitBatchResponse = {
@@ -87,6 +99,78 @@ CommitBatchResponse = {
     projector_version: uint,
     ? rejected: [* RejectedItem],
     ? deduplicated: bool
+}
+
+;; ---------------------------------------------------------------------------
+;; The delivery task
+;;
+;; Collector intake writes this into the Corndogs task and a forwarder reads it.
+;; The two roles are independently deployable, so the shape between them is a
+;; contract rather than a private structure, and it belongs here.
+;;
+;; Corndogs holds task state, atomic claims, timeout state swaps, priority, and
+;; durable backends. It holds no attempt count and no next-attempt time, so
+;; TallyOwl carries those here until Corndogs grows a native scheduling
+;; contract. See DELIVERY.md section 4.
+;;
+;; The batch travels compressed. A batch is CBOR full of repeated keys and
+;; repeated dimension values, so it compresses well, and every byte saved is a
+;; byte the durable queue does not have to write, fsync, and read back.
+;;
+;; `uncompressed_bytes` is declared so that a reader can refuse a payload before
+;; it produces one. The absolute bound is what protects memory. A ratio bound
+;; does not separate a bomb from ordinary telemetry, because the shape that
+;; makes a columnar format work and the shape a bomb uses are the same shape.
+;; See docs/IMPLEMENTATION_LOG.md L021.
+;; ---------------------------------------------------------------------------
+
+DeliveryTask = {
+    task_version: uint,
+    batch_id: BatchId,
+    source_id: SourceId,
+    batch: bytes,
+    compression: Compression,
+    uncompressed_bytes: uint,
+
+    ;; How many delivery attempts have already been made.
+    attempts: uint,
+    accepted_at: Timestamp,
+    ? last_attempt_at: Timestamp,
+    ? next_attempt_at: Timestamp,
+    ;; Why the last attempt failed, in the words an operator reads. It never
+    ;; holds a credential or a payload value.
+    ? last_failure: text .size (1..512)
+}
+
+;; ---------------------------------------------------------------------------
+;; Source key resolution
+;;
+;; An instrumented application holds a scoped API key with project scope. It
+;; never sends a workspace, a project, or a source ID. Collector intake presents
+;; the credential here and the head answers from the control catalog, which is
+;; the only place a key is stored. See D32 and NODE_IDENTITY.md section 1.
+;;
+;; The credential travels whole, rather than split into an identifier and a
+;; secret. The head owns the credential format, so a change to that format
+;; reaches one component instead of two.
+;;
+;; A collector holds no durable state of its own, so it never becomes the
+;; authority for a key. It holds the answer for `cache_ttl_ms` and asks again.
+;; A revocation therefore takes effect at the end of that period, which is what
+;; DELIVERY.md section 9 means by a very short safe cache.
+;; ---------------------------------------------------------------------------
+
+ResolveKeyRequest = {
+    credential: text .size (1..512)
+}
+
+ResolveKeyResponse = {
+    key_id: text .size (1..64),
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+    source_id: SourceId,
+    cache_ttl_ms: DurationMs,
+    ? expires_at: Timestamp
 }
 
 ;; ---------------------------------------------------------------------------
@@ -125,6 +209,11 @@ ProtectedKey = {
     origin: PropertyOrigin
 }
 
+;;; How much of a campaign touch is joined to the person who made it. The same
+;;; three values as `CampaignLinking` in tallyowl-control.csil, and the same
+;;; meaning. See D30.
+CampaignLinking = "linked" / "unlinked" / "none"
+
 CollectionPolicy = {
     policy_version: uint,
     enabled_kinds: [* TelemetryKind],
@@ -141,6 +230,14 @@ CollectionPolicy = {
     max_properties: uint,
     session_max_lifetime_ms: DurationMs,
     ? redact_keys: [* text],
+    ;; Event names this snapshot refuses. A collector that holds them stops a
+    ;; blocked event before it costs a batch, a queue write, and a delivery.
+    ;; The head enforces the same list, because a rule enforced only at the edge
+    ;; is a rule an edge that skipped it can break. See POLICY.md section 7.
+    ? blocked_event_names: [* text .size (1..128)],
+    ;; Property keys this snapshot drops before anything is stored.
+    ? blocked_property_keys: [* text .size (1..64)],
+    ? campaign_linking: CampaignLinking,
     ? kill_switch: bool
 }
 
@@ -165,6 +262,14 @@ CollectorHealth = {
     oldest_task_age_ms: DurationMs,
     quarantine_count: uint,
     applied_policy_version: uint,
+    ;; How long since the head last answered a policy fetch. Absent when this
+    ;; collector has never fetched one, which is not the same as a stale one.
+    ;;
+    ;; A stale policy never fails readiness. A collector that stopped accepting
+    ;; telemetry when it lost the head would turn a control-plane outage into a
+    ;; data-plane one, and the last good policy is still in force. This is the
+    ;; number an operator alerts on instead.
+    ? policy_age_ms: DurationMs,
     ;; The forwarder owns the Corndogs timeout sweep. Readiness fails when the
     ;; sweep stops, because retry and dead-worker recovery stop with it. See D33.
     ? last_sweep_at: Timestamp
@@ -188,5 +293,10 @@ service TallyOwlCollector {
 
     ;;; Report collector health for readiness and for operators.
     @wire-id(3)
-    health: HealthRequest -> CollectorHealth / ServiceError
+    health: HealthRequest -> CollectorHealth / ServiceError,
+
+    ;;; Resolve a source credential to its tenancy. The head answers this from
+    ;;; the control catalog. A collector never stores a key.
+    @wire-id(4)
+    resolve-key: ResolveKeyRequest -> ResolveKeyResponse / ServiceError
 }

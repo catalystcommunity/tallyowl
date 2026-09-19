@@ -279,7 +279,9 @@ Deliverables:
 - optional hot and warm to cold object-storage tiering with bounded local cache;
 - optional Parquet exporter and direct DuckDB verification;
 - snapshot, restore, and catalog rebuild command;
-- per-end-user key material and cryptographic erasure for the cold tier;
+- per-project segment encryption keys and cryptographic erasure for the cold
+  tier (D61). An earlier draft said per-end-user key material; D28 weighed that
+  and refused it, and DECISIONS.md beats this document on a decision it holds;
 - storage and capacity metrics through native and Prometheus and OpenMetrics paths.
 
 Failure work, from [FAILURE_MODES.md](FAILURE_MODES.md):
@@ -304,9 +306,12 @@ Exit criteria:
 - one binary runs the head, query service, and durable store from one directory;
 - one binary requires no external database;
 - accepted data survives abrupt process and host restart;
-- a point or end user deletion disappears immediately, rewrites only intersecting
-  bounded local segments, and erases cold data by key destruction;
-- a read of cold data after key destruction fails and cannot recover the value;
+- a point or end user deletion disappears immediately and rewrites only
+  intersecting bounded local segments;
+- destroying a project key erases that project's cold data, and a read after
+  destruction fails and cannot recover the value. An end-user erasure is
+  immediate and logical in every tier and reclaims cold bytes at retention;
+  D28 states that promise and this phase does not widen it;
 - a tombstone hides a matching event that arrives after the erasure request;
 - mostly-unique request IDs remain exactly retrievable without scanning every
   retained segment;
@@ -497,7 +502,7 @@ Exit criteria:
 Deliverables:
 
 - campaign and referrer capture and classification;
-- touchpoint, conversion, exact value and currency, and cost import types;
+- touch, conversion, exact value and currency, and cost import types;
 - versioned attribution models and windows;
 - campaign, conversion, value, cost, and return dashboards;
 - consent-aware collection and attribution behavior;
@@ -512,6 +517,22 @@ Exit criteria:
   reference marketing site landing pages.
 
 ## Phase 10 — alerts and workflows
+
+**Built.** `docs/PHASE10_REPORT.md` states each deliverable and each exit
+criterion.
+
+Four items carry in from earlier phases, scheduled at the Phase 9 review rather
+than deferred again. **All four are built**: L134, L135, L136, and L133.
+
+- calendar periods in a supplied timezone, so a retention month is a month.
+  Store everything in UTC and convert only where a UTC comparison will not do,
+  such as a daylight-saving boundary. Alert evaluation needs correct local time
+  anyway;
+- a materialised identity graph, which today is rebuilt from every `identify`,
+  `alias`, and `group` record on every question;
+- aggregate pushdown for the general algebra;
+- the consensus-log snapshot threshold and retained-log length as settings.
+
 
 Deliverables:
 
@@ -529,6 +550,11 @@ Exit criteria:
 - deletion tombstones prevent replay resurrection.
 
 ## Phase 11 — production hardening
+
+**Built.** `docs/PHASE11_REPORT.md` states each deliverable and each exit
+criterion. The soak it built runs continuously rather than completing; its
+state is `./tools.sh soak status`. Publishing awaits the owner's registry
+decisions, and the two-version upgrade drill awaits a second version.
 
 Deliverables:
 

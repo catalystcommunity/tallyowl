@@ -27,12 +27,12 @@ make the unresolved part a separate decision.
 | D7 | LinkKeys relying-party mode | Accepted |
 | D8 | Tenant model | Accepted |
 | D9 | Privacy defaults | Accepted |
-| D10 | Capacity envelope | Accepted, storage half measured |
+| D10 | Capacity envelope | Accepted, both halves measured |
 | D11 | Session replay and the session model | Accepted |
 | D12 | Metrics compatibility and self-observability | Accepted |
 | D13 | External notification channels | Accepted |
 | D14 | Repository license | Accepted |
-| D15 | Replication implementation | Accepted pending benchmark |
+| D15 | Replication implementation | Accepted pending benchmark. Built; two prototype gaps remain |
 | D16 | Tablet sizing and project sub-sharding | Accepted |
 | D17 | Native page compression and sizing | Accepted, measured |
 | D18 | Query consistency and coordinator behavior | Accepted pending benchmark |
@@ -40,7 +40,7 @@ make the unresolved part a separate decision.
 | D20 | Property schema and high-cardinality indexing | Accepted, measured |
 | D21 | Exact versus approximate analytics | Accepted |
 | D22 | Node trust and role enrollment | Accepted |
-| D23 | Home-profile resource budgets | Accepted pending benchmark |
+| D23 | Home-profile resource budgets | Accepted, partly measured |
 | D24 | Hot, warm, and cold storage tiering | Accepted pending benchmark |
 | D25 | Reusable high-cardinality store module | Accepted |
 | D26 | Cell hierarchy | Accepted |
@@ -48,7 +48,7 @@ make the unresolved part a separate decision.
 | D28 | Erasure timing and cold-tier erasure | Accepted |
 | D29 | Documentation language | Accepted |
 | D30 | Consent behavior | Accepted |
-| D31 | Package, registry, and support window | Accepted for now |
+| D31 | Package, registry, and support window | Accepted |
 | D32 | Source identity and tenancy resolution | Accepted |
 | D33 | Retry backoff and timeout sweeping | Accepted |
 | D34 | Browser unload flush | Accepted |
@@ -78,6 +78,7 @@ make the unresolved part a separate decision.
 | D58 | Quorum loss: restore by default, unsafe recovery behind a flag | Accepted |
 | D59 | Catalog snapshots, off by default | Accepted |
 | D60 | A slow node alerts and says why | Accepted |
+| D61 | Segment encryption keys | Accepted |
 
 ## Next decision order
 
@@ -110,18 +111,25 @@ that does not exist yet.
    non-isolation partition, and recovery from a corrupt log are unmeasured.
 6. Test D16, D26, and D27 with cell prototypes.
 7. Test D18 with distributed correctness fixtures.
-8. Design the D28 segment encryption keys before cold tiering carries erasable
-   data.
+8. ~~Design the D28 segment encryption keys before cold tiering carries erasable
+   data.~~ Closed by D61, 2026-08-02.
 9. Measure D20 deletion and cold-object lookup, which need a deletion path.
 10. Measure the segment opens that follow a locator probe, locator merge cost
     during compaction, and locator fan-out across tablets. Section 12b measures
     the locator itself; these three are what follow it.
+11. ~~Select the D40 attribution default values in Phase 9.~~ Closed by D40,
+    2026-08-05. The values are in D40 and each one states the reason it holds.
 
 ### Open, scheduled
 
-11. Select the D40 attribution default values in Phase 9.
-12. Reopen D31 at the release candidate and select the distribution
-    coordinates.
+12. ~~Reopen D31 at the release candidate and select the distribution
+    coordinates.~~ Closed by D31, 2026-08-12. Every coordinate is selected
+    except the crates.io dependency clearance, which is the owner's and is
+    named in L167.
+13. Phase 10 carries four items the owner scheduled at the Phase 9 review:
+    calendar periods in a supplied timezone, a materialised identity graph,
+    aggregate pushdown, and the consensus-log constants as settings. See
+    `PHASE9_REPORT.md` section 6.
 
 These numeric defaults are first values for measurement. The reference
 application confirms or changes each one. They are not recommendations.
@@ -332,7 +340,7 @@ Accepted defaults:
 The project accepts the direct-personal-data prohibition and the end user-ID
 exception. D30 holds the unresolved jurisdiction and consent behavior.
 
-## D10. Capacity envelope — Accepted pending benchmark
+## D10. Capacity envelope — Accepted, measured
 
 The product must cover both:
 
@@ -355,6 +363,58 @@ simulator already makes realistic load across every surface, and its ledger
 already proves the results. Scale its scenarios to get the capacity numbers.
 Therefore one workload proves correctness and capacity together. See
 [TESTBED.md](TESTBED.md).
+
+### Measured, 2026-08-03 — the ingest half
+
+> These are the collector's rates, not the system's. See the 2026-08-04 re-run
+> after it, which separates the two.
+
+The reference application and its load harness now answer the ingest side, on
+the home profile, on real storage. BENCHMARKS.md section 12c holds the whole
+table and the method.
+
+| Asked for | Answer |
+| --- | --- |
+| Events each second | **36,525** sustained with nothing refused, and **5,405** for one synchronous producer |
+| p99 payload size | A batch of 256 items at the D19 defaults; each item carried an event name, a session, a route, and a unique request ID |
+| Burst multiplier | **Not measured.** The harness could not offer faster than the system took; see below |
+| Collector outage buffer target | **Still open.** `corndogs.maxDeliveryAge` defaults to 24 hours as a placeholder, and D36 pairs it with a deduplication window nothing yet bounds |
+| Recovery time | **462 milliseconds** after `kill -9` under load, with no loss |
+| Dashboard query concurrency | **Not measured.** Query latency is 51 milliseconds at p50 for both a point lookup and an aggregate over 387,177 events |
+
+### Measured, 2026-08-04 — the ingest half, re-run
+
+BENCHMARKS.md section 16 holds the whole table and the method.
+
+| Asked for | Answer |
+| --- | --- |
+| Events each second | **67,624** at the collector, and **19,534** for one producer. The one-producer figure moved 3.6 times because both drivers now pipeline; see L055 |
+| Events each second, end to end | **About 3,600.** The head commits at 17 batches each second, and every earlier figure in this decision was the collector's rather than the system's |
+| Burst multiplier | **Still not measured.** The producer is fixed and the harness is now the slower half |
+| Collector outage buffer target | **Answerable now.** The queue absorbs the gap between 67,624 and 3,600, so the buffer is sized by how long a burst lasts rather than by an outage alone. `storage.deduplicationWindow` bounds the pairing D36 asks for |
+| Recovery | 543,994 events sent, accepted, and committed, with no loss |
+| Dashboard query concurrency | **Not measured.** Query latency is 103 milliseconds at p50 for both a point lookup and an aggregate over 543,994 events |
+
+**The distinction this run added is the important one.** A collector
+acknowledges when Corndogs is durable and the head drains afterwards. Both rates
+are real and only the head's is sustainable without a queue that keeps growing.
+
+**The derived envelope held**, which is worth saying because several confident
+predictions in this project did not. Section 12 derived 26,000 to 38,000 events
+each second on this hardware and the 2026-08-03 measurement landed inside it.
+The 2026-08-04 collector figure is above it, because the connection now serves
+correlated batches at the same time.
+
+**One finding changes what an application should do.** A driver flush waits for
+its durable acknowledgement, so one synchronous producer is bounded by the round
+trip rather than by anything in TallyOwl. DELIVERY.md section 3 already permits
+an application to pipeline correlated batch calls, and neither maintained driver
+does. Until one does, an application with a single telemetry worker gets about a
+seventh of the ceiling.
+
+Metric series and label cardinality, retention, and query concurrency remain
+unanswered, because Phase 6 has not started and no scenario runs long enough for
+retention to apply.
 
 ### Measured, 2026-08-01 — the storage half
 
@@ -396,6 +456,21 @@ until measurements prove its storage and query behavior.
 
 The D36 deduplication window depends on the collector outage buffer target in
 this list. Select them together.
+
+### Measured, 2026-08-04 — Phase 6, and the sustained figure is a range
+
+BENCHMARKS.md section 17 holds the whole table and the method.
+
+| Asked for | Answer |
+| --- | --- |
+| Events each second | **37,874** on the clean run, and 37,874 to 80,000 across four runs of one harness on one machine. The spread is the answer rather than noise: the collector's rate is bounded by how much room the Corndogs queue has, and that is bounded by how far behind the head is. One synchronous producer is **19,566**, stable to a tenth of a percent across all four and unmoved by Phase 6 |
+| Metric points each second | **Not separated.** The series ledger and the merge pass are on the same path and neither is measurable on an event workload, which is the useful half of the answer: an installation that sends no metrics pays nothing for the feature |
+| Active metric series and label cardinality | **Bounded rather than measured.** `metrics.maxSeriesForEachMetric` defaults to 100,000 for one name in one project and `metrics.maxBytesForEachMetric` to 64 MiB. Both are chosen, not measured; a measurement should set them. See L068 |
+| Candidate segments for a high-cardinality lookup | **Answered.** 3,000 for a scattered layout over 30 days, and **228** with hot data scattered and cold data grouped by end user during compaction, which needs no change to ingest routing. `prototypes/locator-bench`, and BENCHMARKS.md section 18.4 |
+| Burst multiplier | **Answered.** Eight unpaced producers offered **39,714 events each second and none were refused**. Every earlier figure measured a harness that paced itself; see L082. A larger offer needs more producer machines rather than a different harness mode |
+| Recovery time | **314 milliseconds** after `kill -9` under load, with no loss and, this time, **no refusal**: 610,423 offered and 610,423 accepted while the head was gone |
+| Dashboard query concurrency | **Still not measured**, but the query itself now is: a point lookup is **41 milliseconds at p50 and 42 at p99** and an aggregate is 104 and 120. The point lookup asks the locator rather than reading the range (L079), so the two are no longer the same number for the wrong reason |
+| Collector outage buffer target | **Still open.** Section 17 shows the buffer is what sets the sustained rate, so the two settings are one decision |
 
 ## D11. Session replay and the session model — Accepted
 
@@ -485,7 +560,7 @@ Both channels use the same alert instance, deduplication, and retry state.
 Apache License, Version 2.0 applies to the repository and to TallyOwl-owned
 generated packages.
 
-D31 holds the unresolved distribution coordinates.
+D31 holds the distribution coordinates, selected at the release candidate.
 
 ## D15. Replication implementation — Accepted pending benchmark
 
@@ -546,6 +621,26 @@ Still unmeasured, and needed before the selection becomes final:
 
 Selection is no longer open on the grounds of doubt about the library. It stays
 open until those four run against the real storage and transport.
+
+### Built, 2026-08-04 — one of the four is closed and one is partly closed
+
+Phase 7 built the integration: `crates/tallyowl-cluster` supplies the tablet
+state machine, the durable log, the multiplexed transport, and the placement
+integration, and openraft supplies the algorithm. The tests run real groups over
+real loopback sockets against real durable storage.
+
+| Left open by the prototype | State |
+| --- | --- |
+| Durable storage, where every append pays an fsync | **Closed.** The log is redb with immediate durability. A committed write survives dropping and reopening every process |
+| A real network with loss, reordering, and delay | **Partly closed.** Real sockets, the real CSIL codec, and the real framing. Loopback does not lose, reorder, or delay |
+| A partition that splits a group other than by isolating one node | **Still open** |
+| Recovery from a corrupt or truncated log | **Still open** |
+
+**The selection therefore stays open**, on the two remaining rows and not on any
+doubt about the library. Nothing found during the integration argued against
+openraft: the multi-group shape held, the membership API did what the prototype
+said, and every defect found was TallyOwl's own. See
+`docs/IMPLEMENTATION_LOG.md` L084 to L093.
 
 See [BENCHMARKS.md](BENCHMARKS.md) section 10.
 
@@ -879,7 +974,7 @@ The CA signing key belongs to the control-plane signing role. It does not belong
 to the public dashboard process. The first release uses operator volume and
 bucket encryption. Native segment encryption needs a separate key design.
 
-## D23. Home-profile resource budgets — Accepted pending benchmark
+## D23. Home-profile resource budgets — Accepted, partly measured
 
 Set default idle and active budgets for:
 
@@ -894,6 +989,55 @@ The home profile must support at least 12 applications without manual worker
 tuning. Operators can configure each budget.
 
 Measure all default budgets together before release.
+
+### Measured, 2026-08-03 — what the alpha run showed
+
+> The disk row below was explained wrongly. See the 2026-08-04 re-run after it.
+
+The load run in BENCHMARKS.md section 12c is the first time these budgets ran
+together on one machine at load. What it settled:
+
+| Budget | What the run showed |
+| --- | --- |
+| Head and storage | 36,525 events each second sustained on 8 cores with nothing refused. Memory was never a limit at this rate |
+| Collector intake and forwarder | Both roles in one process, 8 concurrent driver connections, nothing refused |
+| Corndogs disk budget and maximum task age | **Still open.** `corndogs.maxDeliveryAge` defaults to 24 hours and is a placeholder; D36 pairs it with a deduplication window nothing bounds |
+| Default retention and disk-pressure thresholds | **Still open, and now urgent.** 387,177 events left 86 MiB on disk, of which the segments were 8.7 MiB. Nothing reclaims an append-log range or expires a receipt, so a home installation grows at 223 bytes for each event rather than 32 |
+| Native self-telemetry volume | Not measured; Phase 6 has not started |
+| Compaction and export | Not measured under load |
+
+**Twelve applications is not the limit this run found.** The limit is the number
+of concurrent producers, because a driver flush waits for its acknowledgement.
+Twelve applications each with one telemetry worker would reach about 65,000
+events each second between them, which is above the single-installation ceiling
+this run measured, so the applications are not what runs out first.
+
+### Measured, 2026-08-04 — what the re-run changed
+
+BENCHMARKS.md section 16. Two of the rows above are now answered differently and
+one of them was answered wrongly.
+
+| Budget | What the re-run showed |
+| --- | --- |
+| Head and storage | **The head is the budget that binds.** It commits 17 batches each second, about 3,600 events, at a flat 60 milliseconds for each batch. The collector's 67,624 is absorbed by the queue. Memory was still never a limit |
+| Corndogs disk budget | **Now sizeable, and larger than it looked.** The queue holds the difference between 67,624 and 3,600 for as long as a burst lasts, so the budget is a burst-duration decision and not only an outage one |
+| Default retention and disk-pressure thresholds | **The previous row's explanation was wrong.** Reclamation exists now: the append log fell from 88.8 bytes for each event to 25.8. The directory figure barely moved, from 223 to 216, because the catalog is 157 of those bytes. That is the tablet locator holding one entry for each value and segment pair, and it is the price of exact high-cardinality lookup rather than reclaimable overhead |
+
+**Twelve applications is a different question now.** One telemetry worker reaches
+19,534 events each second rather than 5,405, so twelve of them would offer far
+more than the head commits. The applications still are not what runs out first;
+the head's per-batch catalog transaction is.
+
+### Measured, 2026-08-04 — Phase 6
+
+BENCHMARKS.md section 17.
+
+| Budget | What the run showed |
+| --- | --- |
+| Native self-telemetry volume | **Bounded rather than measured.** Self-observation is off by default, and when it is on the cost is one batch of one point for each series in each period, because the recursion guard stops a push from measuring itself. See L072 |
+| Default retention and disk-pressure thresholds | **Settled at last.** A fully sealed store costs **176.3 bytes for each event**: 39.9 in segments, against the 39.75 this envelope predicted, and 136.4 in the catalog. Retention expiry is built (L080) and a background segmenter empties the append log (L078). The catalog is now the whole question |
+| Corndogs disk budget and maximum task age | **Still open, and now the same decision as the ingest ceiling.** The collector's sustained rate is the queue's room |
+| Head and storage | **Accepted equals committed exactly**: 440,522 items accepted, 440,522 events committed, 2,631 batches accepted and 2,631 delivered. An earlier run appeared to store 1.61 rows for each event, and BENCHMARKS.md section 17.4 records that this was a Corndogs left running across a wipe rather than anything TallyOwl did |
 
 ## D24. Hot, warm, and cold storage tiering — Accepted pending benchmark
 
@@ -1112,44 +1256,74 @@ TallyOwl does not guess a jurisdiction and does not change behavior by
 geography. TallyOwl is not the policy authority for an application.
 
 An application that must collect less configures that in its own collection
-policy. The policy controls enabled telemetry kinds, campaign capture, and
+policy. The policy controls enabled telemetry kinds, campaign linking, and
 property filtering. The operator makes that choice with knowledge that TallyOwl
 does not have.
 
 Consent state still travels with an applicable event and TallyOwl stores it, so
 a later policy can act on it.
 
-One boundary the implementation must respect: a session ID links touchpoints
+One boundary the implementation must respect: a session ID links touches
 over time. That link is what makes attribution work and it is also the point
-where a stricter policy applies. Keep campaign capture usable without a session
+where a stricter policy applies. Keep campaign linking usable without a session
 link, so an operator who turns off session-linked campaign data still measures
 campaign performance.
 
 The reference application must exercise both configurations. See
 [TESTBED.md](TESTBED.md).
 
-## D31. Package, registry, and support window — Accepted for now
+### How the implementation reads this
+
+Phase 9 built it. Three rules come out of the paragraphs above and each one is a
+behavior rather than a preference:
+
+1. **Campaign linking has three levels**, and the middle one is the boundary
+   this decision names. See [POLICY.md](POLICY.md) section 7.1.
+2. **An absent consent state is not a refusal.** An application that never sent
+   a consent state has not refused on behalf of its person, and TallyOwl does not
+   guess. An installation that wants the stricter reading turns it on, which is
+   the operator making the choice with knowledge that TallyOwl does not have.
+3. **The consent state is stored whatever the setting is**, so a policy that
+   changes next month can act on what arrived this month.
+
+## D31. Package, registry, and support window — Accepted
 
 D14 accepts the license. This decision holds the distribution items.
 
-**Before the release candidate:** there is no client compatibility window. The
-project is pre-alpha. The head does not have to accept an old client, and a
-protocol change does not need a migration path. Do not spend effort on version
-skew during this period.
+**Before the release candidate:** there was no client compatibility window. The
+project was pre-alpha. The head did not have to accept an old client, and a
+protocol change did not need a migration path.
 
-**At the release candidate:** select these items.
+**At the first release, 2026-08-12,** the four items this decision reserved
+are selected. The tree carries one version everywhere, and `./tools.sh version
+check` fails the build when two version sites disagree.
 
-- package coordinates and registries for each maintained language;
-- container registry;
-- chart registry;
-- how many protocol versions the head accepts, and for how long.
+| Item | Selected |
+| --- | --- |
+| Version numbers | `semver-tags` computes them from the conventional commits since the last tag, as every repository here does. The first published release is 0.2.0: semver-tags starts an untagged repository at 0.1.0, and the commits in this one ask for a minor release |
+| Package coordinates for TypeScript | npmjs, public access, in the organization's own scope: `@catalystcommunity/tallyowl-browser`. The publish is **staged**, and a maintainer approves it with 2FA |
+| Package coordinates for Go | The module path is the repository path. The app driver is `github.com/CatalystCommunity/tallyowl/packages/driver-go`, and a generated client is `github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-<name>-api`. Each module needs its own tag, which is the module directory and then the version |
+| Package coordinates for Rust | **Deferred.** The owner turned crates.io off on 2026-08-12 until the release pages have proved themselves. A Rust application depends on the driver by Git revision meanwhile, which is how this repository already depends on csilgen and Corndogs. `./tools.sh release crates-plan` says what turning it on would publish, in push order. See L167 and L182 |
+| Container registry | `containers.catalystsquad.com/public/catalystcommunity/tallyowl`, one image for the head and the collector. It is the registry every other service here uses, on the grant that already exists |
+| Chart registry | The `catalystcommunity/charts` repository, which serves the packaged charts, and a GitHub release beside each tag |
+| Binaries | The GitHub release page: one archive for each platform, holding both services and the license, with a `SHA256SUMS` beside it. The binaries come out of the image that was built, so a downloaded TallyOwl and a deployed TallyOwl are one build |
+| Protocol versions the head accepts | The current version and the one before it, **enforced**: a driver and a collector each declare what they speak, collector intake and the head each check it against one list in `tallyowl_wire::protocol`, and a refusal names both ends and is counted. Support for a version ends one minor release after the release that replaces it, and the release notes say so before it ends. There is one protocol version today, so nothing a current client sends is refused. L183 |
 
-The support window then matters more than usual. An application compiles the
+**The version shape** is three numbers, with `-rc.N` available for a candidate.
+Cargo, npm, Helm, and a Go module tag all read that shape the same way. A
+release tag is the version with a `v` in front.
+
+**The release is automatic.** A merge to main runs every gate and then the
+release job, which writes the computed version into the tree, commits it, tags
+it, and publishes. This is the one place where CI writes to the source, and the
+owner accepted that exception on 2026-08-12: the alternative is a person
+writing one version into nineteen files. See CI-CD.md section 1.
+
+The support window now matters more than usual. An application compiles the
 TallyOwl ingest schema into its own build. An application therefore upgrades on
-its own schedule, and version skew across applications becomes normal.
+its own schedule, and version skew across applications is normal.
 
-Reopen this decision at the release candidate. Do not let the pre-alpha
-exemption survive into a release.
+See `docs/RELEASE_NOTES.md`, `docs/CI-CD.md` section 6, and L173 to L180.
 
 ## D32. Source identity and tenancy resolution — Accepted
 
@@ -1415,7 +1589,7 @@ group ID would not survive that rebuild.
 
 ## D40. Attribution configuration — Accepted
 
-Attribution is a pure function over immutable touchpoints. A model parameter is
+Attribution is a pure function over immutable touches. A model parameter is
 configuration, not code, and not a schema decision.
 
 An operator configures these values for each project:
@@ -1425,17 +1599,39 @@ An operator configures these values for each project:
 - the lookback window;
 - the enabled models.
 
-A change to a parameter recomputes the result. Raw touchpoints never change.
-Each result names its model and its model version.
+A change to a parameter recomputes the result. Raw touches never change.
+Each result names its model, its model version, and its settings version.
 
-Phase 9 selects the shipped default values. There is no migration cost in
-selecting them later.
+### The shipped default values
+
+**Phase 9 selects these.** Each one holds for a stated reason, because a default
+that nobody can argue with is a default that nobody can change with confidence.
+
+| Value | Default | Why |
+| --- | --- | --- |
+| First-touch position weight | 0.4 | The first touch is the discovery |
+| Last-touch position weight | 0.4 | The last touch is the decision |
+| Middle share | 0.2, divided equally | What the touches between them did |
+| Decay half-life | 7 days | A touch a week before a purchase earns half of what a touch on the day earns. A shorter value hides everything but the last week; a longer value makes the decay model behave like the linear model |
+| Lookback window | 30 days | Most purchase decisions fit inside it, and a person can hold a journey of that length in their head |
+| Touchpoint retention | 90 days | Three times the lookback, so an operator can make the window wider two times before the coupling below refuses the query |
+| Enabled models | All six | A model that nobody enables cannot be compared with the one they do enable, and the comparison is the reason there are six |
+
+The position model has two special cases:
+
+- **one touch** takes all of it;
+- **two touches** divide what the two ends were given, in proportion. There is
+  no middle to hold the rest, and an operator who set 0.4 and 0.4 meant the two
+  ends equally.
+
+An operator changes any of these for a project. A change recomputes every later
+result and rewrites nothing.
 
 ### Lookback and retention
 
-The lookback window must not exceed the touchpoint retention for that project.
+The lookback window must not exceed the touch retention for that project.
 
-If touchpoints age out inside the window, attribution moves credit to later
+If touches age out inside the window, attribution moves credit to later
 touches. The result looks correct and is wrong.
 
 TallyOwl therefore refuses an attribution query whose window exceeds the
@@ -1934,3 +2130,80 @@ one.
 
 See [FAILURE_MODES.md](FAILURE_MODES.md) section 6.1.
 
+
+## D61. Segment encryption keys — Accepted
+
+D28 defers this: "The key design is separate work and gates cold tiering for a
+project that permits erasure." This decision is that work. It changes nothing
+D28 decided; it says how.
+
+### One key for each project
+
+D28 already refused per-end-user keys, because that costs a key for every person
+and a key lookup for every person on a cold scan. This decision does not reopen
+it. `docs/PLAN.md` Phase 3 said "per-end-user key material", which contradicted
+D28; the plan is amended rather than the decision.
+
+**What this gives, stated plainly.** Destroying a project key erases that whole
+project instantly, and an object-store reader without the key reads nothing
+useful. It does **not** physically destroy one end user's cold bytes. An
+end-user erasure stays what D28 says it is: immediate and logical in every tier,
+hot and warm rewritten within the 24-hour target, and cold bytes reclaimed when
+retention expires them.
+
+### Where a key lives
+
+A project key is generated locally and stored in the catalog, wrapped by an
+installation root key. The root key is a secret reference in configuration —
+`file:`, `env:`, or a secret store — and CONVENTIONS.md section 5 already
+requires that a secret is a reference and never a value.
+
+The alternatives were an external key manager, required or optional. Required
+contradicts D1 and STORAGE.md section 1: the home profile runs one binary and one
+data directory with no external service. Optional, behind a seam with one
+implementation, is speculative generality of the kind D25 warns against, and can
+be added when a second implementation exists.
+
+**What this asks of an operator.** DEPLOYMENT.md section 5a gains one
+requirement: the installation root key is theirs to protect and to back up. A
+data directory restored without its root key holds unreadable cold segments.
+That is the same property that makes erasure work, and it cuts both ways.
+
+### What is encrypted
+
+The data region and the index region. The prologue, the header, and the footer
+stay readable, so a reader still prunes by project, kind, and time without a key,
+and the tablet locator is local and unencrypted so routing still works.
+
+The index region is encrypted because it holds fingerprints of end-user,
+session, request, and trace identifiers. D9 makes the end-user ID an erasure
+key. A readable fingerprint index sitting in a bucket would let anyone with
+object-store access enumerate and correlate exactly the values erasure exists to
+make unreadable, so leaving it in the clear would weaken the guarantee this
+decision exists to provide.
+
+### Rotation
+
+A project key has generations. Each encrypted segment names the generation it
+used, so rotation writes a new generation and leaves already-written objects
+readable until retention expires them or compaction rewrites them. Destroying a
+project destroys every generation.
+
+Rotation without generations would mean re-encrypting every cold object on the
+spot, which is the cost D28 refused for per-end-user keys and refuses again here.
+
+### Destruction
+
+Destruction removes the wrapped key from the catalog and writes the destruction
+to the erasure ledger, which is durable independently of the catalog and travels
+with a snapshot and a restore. FAILURE_MODES.md section 9 rule 3 gives the
+reason: an erasure that a rebuild can undo is not an erasure. A restored catalog
+therefore cannot resurrect a destroyed project key.
+
+### What this does not decide
+
+The cipher and the nonce discipline are implementation choices and belong in the
+implementation log rather than here, because changing them changes no promise
+this decision makes and no document that describes one.
+
+See [SEGMENT_FORMAT.md](SEGMENT_FORMAT.md) section 11 and D28.

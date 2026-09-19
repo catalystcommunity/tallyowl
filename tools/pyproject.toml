@@ -1,0 +1,18 @@
+[project]
+name = "tallyowl-tools"
+version = "0.2.0"
+description = "The build, test, generate, and development-loop verbs. tools.sh and Reactorcide both call these."
+requires-python = ">=3.11"
+# One dependency, and it earns its place: `helm-check` reads the settings out
+# of the rendered ConfigMap, which is the only way to catch a deployment key
+# that the chart's `omit` list forgot. A hand-written parser for embedded YAML
+# is the kind of thing that is wrong in the case nobody tested. `uv` resolves
+# it, so a developer still needs `uv` and nothing else.
+dependencies = ["pyyaml>=6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tallyowl_tools"]

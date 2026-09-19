@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": false,
+    "lib": ["es2022", "dom"],
+    "rootDir": "../..",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "../../generated/typescript/tallyowl-control-api/types.gen.ts",
+    "../../generated/typescript/tallyowl-control-api/codec.gen.ts",
+    "../../.deps/csilgen/transports/typescript/src/*.ts"
+  ]
+}

@@ -59,7 +59,7 @@ This document uses these abbreviations:
 - Counters, gauges, histograms, and exemplars
 - Users and end users, anonymous identities, aliases, groups, and cohorts
 - Funnels, paths, retention, and feature and adoption analysis
-- Campaign touchpoints, attribution, conversions, and revenue
+- Campaign touches, attribution, conversions, and revenue
 - Saved queries, dashboards, alerts, and derived monitors
 - Sampling, redaction, retention, and per-project collection policy
 

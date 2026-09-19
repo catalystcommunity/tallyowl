@@ -1,0 +1,427 @@
+# Values for the TallyOwl collector chart.
+#
+# The settings tree below is the same tree as `tallyowl.example.yaml` and the
+# same tree the configuration loader reads. A test renders this chart and
+# asserts that the chart and the loader agree on every key, every type, and
+# every required value. A setting added to only one of them fails that test.
+# See docs/DEPLOYMENT.md section 8 and docs/PLAN.md Phase 1.
+#
+# Keys under `image`, `replicas`, `resources`, and `persistence` are deployment
+# concerns rather than TallyOwl settings, and the parity test ignores them.
+
+# The head and the collector are one image, and each chart selects its binary
+# with `command`. An empty tag means the chart's `appVersion`, which is the
+# version the whole tree carries. See docs/CI-CD.md section 6.
+image:
+  repository: containers.catalystsquad.com/public/catalystcommunity/tallyowl
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+resources: {}
+
+# The image runs as user and group 65532 and cannot write as root. A collector
+# holds no durable state, so it mounts no volume and needs no `fsGroup`.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+
+# A collector holds no durable state. Corndogs owns the queue and the payload,
+# so a collector stays a stateless Deployment and needs no volume.
+persistence:
+  enabled: false
+
+# ---------------------------------------------------------------------------
+# Autoscaling
+#
+# A collector is stateless, so it scales horizontally on load. Every replica
+# must reach the same Corndogs service, which is where the durable queue lives.
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 4
+  targetCpuPercent: 75
+
+# ---------------------------------------------------------------------------
+# What the pod binds, and where the dashboard bundle is
+#
+# These are deployment concerns, not TallyOwl settings, and the parity test
+# ignores them along with `image` and `replicas`.
+#
+# **The settings tree below keeps the loader's own defaults**, which are
+# loopback: a process on a workstation must not open a port to the network
+# because somebody started it. A pod is the other case — a loopback bind there
+# reaches nothing, and the Service in front of it forwards to a port no client
+# can use — so the rendered configuration replaces the host part of every
+# listening address with this one. The port always comes from the setting.
+#
+# Set this to 127.0.0.1 for a pod whose only client is a sidecar.
+bindAddress: 0.0.0.0
+
+# Where the dashboard bundle is in the container image. The head serves
+# `/assets/<path>` from inside this directory. The setting below keeps the
+# loader default, which is the path a developer builds into.
+dashboardAssets: /usr/local/share/tallyowl/dashboard
+
+# ---------------------------------------------------------------------------
+# Gateway API
+#
+# How traffic from outside the cluster reaches this installation. An HTTPRoute
+# attaches to a Gateway somebody else owns: a Gateway is cluster
+# infrastructure, and a chart that created one would be claiming a listener and
+# an address that belong to the platform.
+#
+# **This is off by default**, like every other port TallyOwl can open. An
+# operator turns it on and names the Gateway.
+#
+# There is no Ingress template. Gateway API is the interface this chart
+# supports; Ingress can be added if somebody needs it.
+# ---------------------------------------------------------------------------
+gateway:
+  enabled: false
+  # The Gateway to attach to. `namespace` may be empty for a Gateway in this
+  # release's own namespace.
+  parentRef:
+    name: ""
+    namespace: ""
+    sectionName: ""
+  # The names this installation answers to. An empty list attaches to every
+  # hostname the Gateway listener accepts, which is rarely what anybody wants.
+  hostnames: []
+  # Which surfaces get a route. The dashboard is a browser surface and is the
+  # one an operator usually publishes. Ingest is a native CSIL over TLS over
+  # TCP path and is **not** HTTP, so it gets no HTTPRoute: an application
+  # reaches the collector directly. See AGENTS.md, "Protocol boundaries".
+  dashboard:
+    enabled: false
+    path: /
+  # The operational surface: health and metrics, and nothing else. Publishing
+  # it outside the cluster is a decision rather than a default.
+  operational:
+    enabled: false
+    path: /metrics
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# TallyOwl settings
+# ---------------------------------------------------------------------------
+installation:
+  id: local
+  # `home` is one head, one collector, and one Corndogs. It is the smallest
+  # supported production deployment, which is why the development loop uses it.
+  profile: home
+
+cell:
+  id: home
+  region: home
+  # A home installation has one controller and no quorum. A cell uses three or
+  # five.
+  controllers: 1
+
+# ---------------------------------------------------------------------------
+# The durable store
+#
+# Corndogs owns the queue and the payload. The collector holds no durable state
+# of its own, so a collector restart loses nothing that it acknowledged.
+# ---------------------------------------------------------------------------
+corndogs:
+  endpoint: 127.0.0.1:5080
+  backend: file
+  # One fsynced copy and no redundancy. Redundancy is an operator choice and is
+  # not part of the word "durable".
+  durableCopies: 1
+  # `interval` and `never` acknowledge writes that a power loss can destroy, so
+  # TallyOwl refuses to start against them.
+  fsyncMode: group
+  # A whole batch travels inside one task, so this must exceed the batch seal.
+  maxPayloadBytes: 16MiB
+  # How long a batch may keep being retried before it goes to quarantine. An
+  # automatic retry must stop before the head forgets the batch ID, or a later
+  # retry would be counted twice.
+  maxDeliveryAge: 24h
+  deliveryQueue: tallyowl-delivery
+  quarantineQueue: tallyowl-quarantine
+  # Nothing retries without this sweep. Retry, backoff, and dead-worker recovery
+  # all stop when it stops, and readiness fails with it.
+  sweepInterval: 1s
+
+# ---------------------------------------------------------------------------
+# The collector
+# ---------------------------------------------------------------------------
+collector:
+  listen: 127.0.0.1:5100
+  # Health and metrics only. This address serves nothing else.
+  operationalListen: 127.0.0.1:5101
+  # Intake, forwarder, and compatibility-receiver are independently deployable.
+  # The home profile runs the first two in one process.
+  roles:
+    - intake
+    - forwarder
+  maxBatchBytes: 512KiB
+  maxEventBytes: 64KiB
+  maxProperties: 128
+  # How long a collector holds a resolved key before it asks the head again.
+  # This is how long a revocation takes to reach an application.
+  keyCacheTtl: 30s
+  # How long a collector may keep using a key answer it already had, when it
+  # cannot reach the head. An outage extends what already worked; a credential
+  # the collector never resolved still cannot start.
+  keyCacheGrace: 60s
+  # How often a collector fetches the collection policy from the head. This is
+  # how long a policy change and a kill switch take to reach a collector, so
+  # keep it short. A fetch with nothing new to send costs a few bytes.
+  policyInterval: 30s
+  # A secret is a reference, never a value. Write `file:/path` or `env:NAME`.
+  # Make one with `tallyowl-head provision <project>`, which prints it once.
+  apiKey: ""
+
+# ---------------------------------------------------------------------------
+# The head
+# ---------------------------------------------------------------------------
+head:
+  listen: 127.0.0.1:5110
+  operationalListen: 127.0.0.1:5111
+  # The address a collector forwarder reaches. An application never knows it.
+  endpoint: 127.0.0.1:5110
+  dataDir: ./data/head
+
+# ---------------------------------------------------------------------------
+# Tail sampling
+#
+# The head decides after a trace is complete, because one tablet already holds
+# every span of one trace. A trace holding an error or a conversion, a trace
+# with a failed span, and a slow trace are kept whatever the share says.
+# ---------------------------------------------------------------------------
+sampling:
+  tail:
+    enabled: false
+    decisionWindow: 60s
+    lateSpanGrace: 30s
+    keepPercent: 100
+    keepSlowerThan: 2s
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+dashboard:
+  # The dashboard carries the sign-in callback route and the same-origin
+  # browser carrier. It never carries telemetry: the carrier refuses every
+  # service but `TallyOwlControl`.
+  enabled: true
+  listen: 127.0.0.1:5120
+  # `./tools.sh build` writes the bundle here.
+  assets: packages/dashboard/dist
+  # The path part of `linkkeys.callbackUrl`. A sign-in returns here.
+  callbackPath: /sign-in/callback
+  # A starter campaign dashboard, written once for each project the first time
+  # the head sees it. An operator who removes it does not get it back.
+  starterDashboard: true
+  # The conversion goal it asks about. A goal is the application's own word.
+  starterConversionGoal: purchase
+
+storage:
+  # How long the head remembers a batch ID, so a repeated batch stays one
+  # logical commit. D36 pairs this with `corndogs.maxDeliveryAge`: it must be
+  # longer, or an automatic retry can outlive the head's memory and commit the
+  # batch a second time. TallyOwl refuses a configuration where it is not.
+  deduplicationWindow: 72h
+  # `local-one` is legal only for a tablet with one voter, which is what a home
+  # installation has. TallyOwl refuses the combination rather than quietly
+  # changing the policy.
+  receiptPolicy: local-one
+  tabletVoters: 1
+  coldTier:
+    enabled: false
+  reserveBytes: 1GiB
+
+# ---------------------------------------------------------------------------
+# Integrity and recovery
+# ---------------------------------------------------------------------------
+integrity:
+  # Catches damage in data a query touches, when it touches it. The cost is a
+  # checksum over bytes already in memory. `none` is a legitimate choice and the
+  # dashboard shows it.
+  mode: verify-on-read
+  scrub:
+    period: 7d
+    rateLimit: 16MiB
+
+catalog:
+  snapshots:
+    # Off. The default recovery for a lost catalog is a restore from the
+    # ordinary backup.
+    enabled: false
+    period: 1h
+    keep: 2
+
+compaction:
+  # How old a segment must be before compaction consolidates its time bucket,
+  # grouped by the end-user value, so one person's cold rows sit in few
+  # segments. Zero disables the pass. See HIGH_CARDINALITY.md.
+  coldGroupAfter: 48h
+  # The most stored source bytes one consolidation pass rewrites. The rows of
+  # a pass are held decompressed in memory, many times their stored size, so
+  # this bounds the memory of the pass; a large backlog converges over passes.
+  coldGroupBatch: 32MiB
+  # The size cold consolidation aims each rewritten segment at. A hit
+  # decompresses every candidate segment whole, so this is also the price of
+  # a cold exact lookup. See BENCHMARKS.md section 24.1.
+  coldGroupTarget: 2MiB
+  # Must outlast the longest query, or compaction can remove data that a running
+  # query still reads.
+  gcGrace: 1h
+
+# ---------------------------------------------------------------------------
+# Metric series cost
+#
+# TallyOwl supports high-cardinality metric series. When a budget is full it
+# refuses a new series in the open with `resource-exhausted` and names the
+# metric. It never folds a series into an overflow series and never drops a
+# point quietly. See D12 and DATA_MODEL.md section 3.4.
+# ---------------------------------------------------------------------------
+metrics:
+  # The head derives request, error, and duration series for each service
+  # operation from the spans it commits, at this resolution.
+  goldenSignalResolution: 60s
+  # A downsample pass rolls delta points up to this resolution. DATA_MODEL.md
+  # section 6 names one minute, then hourly.
+  downsampleResolution: 1h
+  maxSeriesForEachMetric: 100000
+  maxBytesForEachMetric: 64MiB
+  maxLabels: 32
+  maxLabelValueBytes: 1024
+  maxLabelBytes: 4096
+  # How many points in one batch the collector merges. Past this the batch
+  # travels unmerged, which costs bytes and never costs correctness.
+  maxMergePoints: 10000
+  idleSeriesExpiry: 1h
+  selfObservation:
+    # Off. Self-metrics cost ingest capacity that an installation may want for
+    # its own data.
+    enabled: false
+    period: 60s
+
+# ---------------------------------------------------------------------------
+# Retention classes
+#
+# A telemetry kind maps to a class. `rollup` must be at least as long as
+# `detailed`, because a rollup that expires first leaves a gap no query can
+# fill. See POLICY.md section 4 and D43.
+# ---------------------------------------------------------------------------
+retention:
+  # Accepted interchange CBOR. None by default; an ordinary query never needs it.
+  raw: 0s
+  detailed: 30d
+  rollup: 395d
+  audit: 2555d
+
+# ---------------------------------------------------------------------------
+# This node's identity for placement
+#
+# A home installation has one node and needs neither of these. A cell puts at
+# most one voter of a tablet in each failure domain, so one rack's loss never
+# ends a quorum.
+# ---------------------------------------------------------------------------
+node:
+  # Empty means the head assigns a name at enrollment, which is the ordinary
+  # case. Set it only when a node has to keep its name across a rebuild.
+  name: ""
+  failureDomain: default
+
+# ---------------------------------------------------------------------------
+# Placement
+#
+# The controller decides in every mode; the mode selects whether it acts. The
+# first releases use recommendation-only until tests prove safe automatic
+# control. See CELLS.md section 6.
+# ---------------------------------------------------------------------------
+placement:
+  mode: recommendation-only
+  # A cell that started every change it wanted at once would move more data than
+  # it could carry.
+  concurrentChanges: 1
+  splitAbove: 64GiB
+  # Far below half of `splitAbove` on purpose. Exactly half would let a tablet
+  # split and merge repeatedly around one size.
+  mergeBelow: 8GiB
+  slowNode:
+    # Automatic demotion during a network-wide slowdown cascades, so a slow node
+    # raises an alert and names a cause instead.
+    action: alert
+    factor: 4
+    duration: 5m
+
+# ---------------------------------------------------------------------------
+# Replication
+#
+# Node-to-node only: consensus messages, snapshot chunks, segment copies, and
+# partial aggregates. An application never reaches this address and a browser
+# never reaches it. A home installation has one node and leaves it empty.
+# ---------------------------------------------------------------------------
+replication:
+  listen: ""
+  # A cell normally learns its peers from its controller quorum. This is what a
+  # first bootstrap uses.
+  peers: ""
+  # Longer than an election, so an ordinary leader change costs a retry rather
+  # than a refusal.
+  writeTimeout: 10s
+  # What bounds a tablet's consensus log on disk. A tablet snapshot seals, and a
+  # seal makes a segment, so a smaller number here means more small segments.
+  snapshotEvery: 4096
+  keepAfterSnapshot: 512
+
+query:
+  maxRuntime: 30s
+  # How deeply a query may nest expressions. A deeper tree is refused before it
+  # is evaluated.
+  # How long a materialised identity graph is used before it is built again.
+  # Zero rebuilds it for every question.
+  # How many alert evaluations may run at once. Alerting cannot occupy more of
+  # the query path than this.
+  alertConcurrency: 1
+  identityRefresh: 5m
+  maxExpressionDepth: 16
+  # A query that needs more tablets than this is refused with a typed error that
+  # names both numbers, rather than opening a connection to every tablet.
+  maxFanOut: 256
+
+# ---------------------------------------------------------------------------
+# Compatibility receivers
+#
+# A compatibility receiver never listens by default. An operator enables it. A
+# port never appears because the binary contains the feature.
+# ---------------------------------------------------------------------------
+compatibility:
+  openTelemetry:
+    enabled: false
+    # 4318 is the OpenTelemetry Protocol over HTTP port. An exporter reaches it
+    # with OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf.
+    listen: 127.0.0.1:4318
+  # Scraping is outbound and there is no default target.
+  prometheus:
+    targets: []
+    interval: 60s
+    timeout: 5s
+
+# ---------------------------------------------------------------------------
+# Sign-in
+#
+# LinkKeys owns human authentication and TallyOwl owns the session that follows.
+# With no trusted domains there is nothing to accept, so this is off; an
+# operator issues a session with `tallyowl-head session create` instead.
+# ---------------------------------------------------------------------------
+linkkeys:
+  enabled: false
+  trustedDomains: ""
+  callbackUrl: http://127.0.0.1:5120/sign-in/callback
+  appName: TallyOwl
+  sessionLifetime: 24h
+
+log:
+  # An end-user ID appears at debug only, and a project policy can forbid even
+  # that. No secret and no personal data appears at any level.
+  level: info

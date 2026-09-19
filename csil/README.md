@@ -12,6 +12,7 @@ again.
 | `tallyowl-ingest.csil` | Telemetry envelopes and capture operations. An application includes this file. |
 | `tallyowl-collector.csil` | Durable intake, batch transfer, receipts, policy, and health. |
 | `tallyowl-control.csil` | The query algebra, alerts, and administration. |
+| `tallyowl-cluster.csil` | Replicated storage: consensus transport, snapshot and segment transfer, distributed query, node health, and topology. Node to node and operator only; no application reaches it. |
 
 ## Wire IDs
 
@@ -23,6 +24,8 @@ service. Assign a wire ID one time and never use it again for something else.
 | `TallyOwlIngest` | 1 |
 | `TallyOwlCollector` | 2 |
 | `TallyOwlControl` | 3 |
+| `TallyOwlReplication` | 4 |
+| `TallyOwlCluster` | 5 |
 
 csilgen needs a wire ID on every operation of a service or on none of them. A
 partial set is a hard error.
@@ -61,6 +64,7 @@ csilgen validate --input types/common.csil
 csilgen validate --input tallyowl-ingest.csil
 csilgen validate --input tallyowl-collector.csil
 csilgen validate --input tallyowl-control.csil
+csilgen validate --input tallyowl-cluster.csil
 ```
 
 ## Package emission

@@ -1,0 +1,31 @@
+{{- include "tallyowl-collector.validate" . -}}
+{{- if .Values.autoscaling.enabled }}
+# A collector is stateless, so it is the one TallyOwl component that scales
+# horizontally on load. The head does not: adding a storage voter is a
+# placement decision, not a scheduler's.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "tallyowl-collector.fullname" . }}
+  labels:
+    {{- include "tallyowl-collector.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "tallyowl-collector.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCpuPercent }}
+  behavior:
+    scaleDown:
+      # Draining a collector parks its claimed tasks for the sweep to return.
+      # Scale down slowly, so a burst's end does not thrash the deployment.
+      stabilizationWindowSeconds: 300
+{{- end }}

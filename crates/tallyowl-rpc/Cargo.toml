@@ -1,0 +1,27 @@
+[package]
+name = "tallyowl-rpc"
+description = "CSIL-RPC over TCP: the accept loop and the reconnecting client that generated code does not provide."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+csilgen-transport = { workspace = true }
+tallyowl-obs = { workspace = true }
+
+# Mutual TLS under the stream carrier, per DESIGN.md section 4.2 and
+# NODE_IDENTITY.md section 4. The carrier is generic over `Read + Write`, so
+# none of the generated code knows this is here.
+rustls = { workspace = true }
+rustls-pemfile = "2"
+x509-parser = { workspace = true }
+
+[dev-dependencies]
+# The mutual-TLS tests build a real authority and real node certificates, the
+# same way the store does. This crate cannot depend on the store, so it builds
+# them itself.
+rcgen = { workspace = true }

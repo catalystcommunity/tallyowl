@@ -114,6 +114,12 @@ def test_tools() -> int:
 
 def test_rust() -> int:
     say("Testing Rust")
+    # DuckDB before the suite, not an instruction after it. The Parquet export
+    # test reads `.deps/bin/duckdb` and refuses to skip when it is absent —
+    # verifying an export with the library that wrote it proves nothing (L025)
+    # — so a CI job that never fetched it fails on a missing tool rather than
+    # on TallyOwl. That is what happened on the first production run.
+    deps.fetch_duckdb()
     # The Go environment as well: `crates/tallyowl-collector/tests/go_driver.rs`
     # builds and runs the Go app driver against a real collector, so a Go cache
     # it cannot write takes the Rust suite down with it.

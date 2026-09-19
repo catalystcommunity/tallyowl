@@ -96,7 +96,13 @@ def _program(name: str, how_to_install: str) -> tuple[str, dict[str, str]]:
         deps.fetch_node()
     environment = _toolchain_environment()
     original = os.environ.get("PATH", "")
-    if environment:
+    # **`PATH` is optional in that dictionary.** It carries the Go cache
+    # settings whenever the configured cache is not writable, which is every
+    # CI job, and it carries `PATH` only when there is a toolchain directory to
+    # add. Reading it unconditionally is how `test-go` failed in production
+    # with a `KeyError` while passing on a workstation, where `.deps/node/bin`
+    # happened to exist.
+    if environment.get("PATH"):
         os.environ["PATH"] = environment["PATH"]
     try:
         found = which(name)

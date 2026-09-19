@@ -1,0 +1,58 @@
+{{- include "tallyowl.validate" . -}}
+# Two services. The headless one gives each pod a stable name, which is what
+# `replication.peers` and a StatefulSet identity need. The named one is what a
+# collector forwarder and a dashboard reader reach.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tallyowl.fullname" . }}-nodes
+  labels:
+    {{- include "tallyowl.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "tallyowl.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: ingest
+      port: {{ include "tallyowl.port" .Values.head.listen }}
+    {{- if .Values.replication.listen }}
+    - name: replication
+      port: {{ include "tallyowl.port" .Values.replication.listen }}
+    {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tallyowl.fullname" . }}
+  labels:
+    {{- include "tallyowl.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "tallyowl.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: ingest
+      port: {{ include "tallyowl.port" .Values.head.listen }}
+    - name: operational
+      port: {{ include "tallyowl.port" .Values.head.operationalListen }}
+    {{- if .Values.dashboard.enabled }}
+    - name: dashboard
+      port: {{ include "tallyowl.port" .Values.dashboard.listen }}
+    {{- end }}
+{{- if .Values.corndogsDeployment.enabled }}
+---
+# The Corndogs beside the head, for the collector release to reference through
+# `corndogs.endpoint`. It carries the delivery queue, so it is not exposed
+# beyond the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tallyowl.fullname" . }}-corndogs
+  labels:
+    {{- include "tallyowl.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "tallyowl.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: corndogs
+      port: {{ include "tallyowl.port" .Values.corndogs.endpoint }}
+{{- end }}

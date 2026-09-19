@@ -1,0 +1,23 @@
+{
+  "name": "@catalystcommunity/tallyowl-testbed-webapp",
+  "version": "0.2.0",
+  "description": "seedstore's web application. It is instrumented with the TallyOwl browser package and reaches TallyOwl only through its own backend.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test dist/testbed/webapp/test/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7",
+    "@types/node": "^22"
+  }
+}

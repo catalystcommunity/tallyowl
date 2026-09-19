@@ -1,0 +1,13 @@
+{{- include "tallyowl-collector.validate" . -}}
+# The rendered configuration is the values tree with the deployment keys
+# removed. There is one loader and one tree; the chart-parity test in
+# crates/tallyowl-config keeps this tree matching what the loader reads.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tallyowl-collector.fullname" . }}
+  labels:
+    {{- include "tallyowl-collector.labels" . | nindent 4 }}
+data:
+  tallyowl.yaml: |
+    {{- include "tallyowl-collector.settings" . | nindent 4 }}

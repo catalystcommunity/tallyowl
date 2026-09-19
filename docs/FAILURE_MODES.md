@@ -134,9 +134,13 @@ openraft cluster.
 | Minority partition | The minority accepts no write and commits nothing. No split brain. | Blocked 3 s, no commit |
 | Voter rejoins | It catches up from the leader's log | 528 ms |
 | Membership change | A learner is added and promoted without a write outage | 4 ms each |
-| Voter disk exhausted | The voter fails readiness and stops accepting appends. Quorum continues without it. | Not measured |
-| **Node alive but slow** | Section 6.1 | Not measured |
-| **Quorum lost permanently** | Section 6.2 | Not measured |
+| Voter disk exhausted | The voter fails readiness and stops accepting appends. Quorum continues without it. | Not measured. **Built and covered by a test**, Phase 7 |
+| **Node alive but slow** | Section 6.1 | Not measured. **Built and covered by tests**, Phase 7, including every cause and `unknown` |
+| **Quorum lost permanently** | Section 6.2 | Not measured. **Unsafe recovery is built and covered by tests**, Phase 7. Restore is the documented path and the command refuses; see IMPLEMENTATION_LOG.md L090 |
+
+"Not measured" and "covered by a test" are different claims and both are kept.
+A test proves the behaviour happens; a measurement would say how long it takes,
+and none of these three has one. See [PHASE7_REPORT.md](PHASE7_REPORT.md).
 
 ### 6.1 A node that is alive but slow
 
@@ -231,6 +235,7 @@ catalog holds.
 | Node certificate identity, role, and fencing state | **No** |
 | LinkKeys identity mappings, sessions, and memberships | **No** |
 | Saved dashboards, queries, cohorts, funnels, and alerts | **No** |
+| Collection policy, at every one of its five levels | **No** |
 | Backup and export snapshots and audit records | **No** |
 
 Two of those are not merely inconvenient:
@@ -239,6 +244,13 @@ Two of those are not merely inconvenient:
   had happened stops having happened;
 - **lost receipts duplicate on retry.** A collector retrying an in-flight batch
   finds no receipt and commits it a second time.
+
+**A third is worth reading as a rule rather than as a row.** Everything in this
+table that a rebuild cannot restore is something a **restart** must not lose
+either, and the rule is what put collection policy, saved analyses, and
+dashboards in this catalog rather than in the head's memory. See L112. A surface
+whose state lives only in a process is a surface that fails this table quietly:
+nothing warns, because there is nothing to rebuild from.
 
 ### Catalog snapshots
 
@@ -383,9 +395,54 @@ test bullet with no stated behavior.
 | Cold-tier cache | Evict cached copies of cold objects. A cached copy is never the only copy. |
 | Export | Fail the export. Never let an export displace live data. |
 
+**A refused append-log write stops the log for the life of the process.** The
+row above says never accept a write that cannot be made durable, and a refused
+group commit makes that a statement about every later write as well. The refusal
+leaves a gap; the recovery scanner stops at the first frame that does not check
+out, so anything written after the gap would be acknowledged and then unreadable.
+Every caller whose frame was in the refused group is told the write failed,
+including the ones that were waiting rather than committing. The log names the
+reason, the `append-log` readiness check fails with it, and a restart clears it
+because recovery truncates to the last complete frame.
+
 A reserve, configurable and non-zero by default, is held back so that the
 system can still write the metadata needed to recover. A device that reaches
 100 percent cannot always be recovered in place.
+
+**The reserve belongs to the device, and one process enforces it.** Two
+TallyOwl installations sharing a device each hold back the same bytes and each
+treats those bytes as its own, so both can spend the reserve at once and neither
+gets what it was promised.
+
+The **hard** rule is unaffected, and it is the one that protects data: a write
+is refused when the device cannot take it, and that check reads the real free
+space, so no installation ever writes past a full device however many share it.
+What cannot be enforced across processes is the **soft** promise that recovery
+will find the reserve unspent.
+
+TallyOwl does not pretend otherwise. It reports which device it is on, at
+start-up and in `tallyowl_storage_device_info`, so an operator comparing two
+installations sees one number that tells them. **Give an installation a device
+of its own when the reserve has to mean what it says.** See D10 and
+docs/IMPLEMENTATION_LOG.md L081.
+
+That rule divides every write into two kinds.
+
+**Bulk writes** are the writes that fill a device: the append log, a published
+segment, the output of a compaction, an export. A bulk write may use the free
+space above the reserve. It may never use the reserve.
+
+**Recovery writes** are the small writes that make the rest readable again: the
+catalog transaction that publishes a segment, a receipt, an erasure record. A
+recovery write may use the reserve. It is refused only when the device has
+nothing left at all.
+
+An erasure is a recovery write and not a control write. It is small, it is an
+obligation, and section 9 makes its record durable independently of the catalog.
+
+The reserve is a byte count and not a percentage. A 4 TB device at 95 percent
+has 200 GB free and a 100 GB device at 95 percent has 5 GB, and the metadata a
+recovery needs is the same size for both.
 
 ## 11. Recovery procedures
 
@@ -415,6 +472,10 @@ up from the leader's log and is promoted. **Nothing is lost.** Measured at
 **Lost: everything written after the snapshot that Corndogs no longer holds.**
 Step 5 recovers more than the snapshot alone, which is why the collector queue
 depth and the snapshot period should be chosen together.
+
+Step 3 is `tallyowl-head restore <directory>`. It writes only into an empty data
+directory, so a restore cannot mix two installations together. It verifies every
+file first and it changes nothing if one file is missing or damaged.
 
 ### Procedure 4: quorum lost permanently, unsafe recovery
 
@@ -451,6 +512,11 @@ Without snapshots:
 **Lost: receipts, so an in-flight retry may duplicate; sessions, so every
 person signs in again; saved dashboards, queries, and alerts.** Tombstones
 survive only through the erasure ledger in step 2.
+
+Steps 1 and 2 are one command, `tallyowl-head rebuild`. It prints the list above
+after it runs, so the operator does not have to find this page to know what is
+gone. Make snapshots with `tallyowl-head snapshot <directory>`. Each of these
+commands needs the data directory to itself, so stop the head first.
 
 ### Procedure 6: a segment is damaged
 

@@ -1,0 +1,89 @@
+{{/*
+Gateway API routes for the surfaces that speak HTTP.
+
+**The ingest path is not here, and that is deliberate.** Native TallyOwl
+traffic is CSIL over TLS over TCP, and an application reaches the collector
+directly; an HTTPRoute in front of it would be a generic HTTP ingest API, which
+AGENTS.md forbids. What an HTTPRoute can carry is the dashboard, which is a
+browser surface, and the operational endpoint, which an operator publishes only
+on purpose.
+
+A Gateway is not created here. It is cluster infrastructure with a listener and
+an address that belong to the platform, and a chart that created one would be
+claiming both.
+*/}}
+{{- if .Values.gateway.enabled }}
+{{- if not .Values.gateway.parentRef.name }}
+{{- fail "`gateway.enabled` is on and `gateway.parentRef.name` is empty. An HTTPRoute attaches to a Gateway, and this chart does not create one." }}
+{{- end }}
+{{- if and .Values.gateway.dashboard.enabled (not .Values.dashboard.enabled) }}
+{{- fail "`gateway.dashboard.enabled` is on and `dashboard.enabled` is off. There is nothing behind that route." }}
+{{- end }}
+{{- if .Values.gateway.dashboard.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "tallyowl.fullname" . }}-dashboard
+  labels:
+    {{- include "tallyowl.labels" . | nindent 4 }}
+  {{- with .Values.gateway.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.parentRef.name }}
+      {{- with .Values.gateway.parentRef.namespace }}
+      namespace: {{ . }}
+      {{- end }}
+      {{- with .Values.gateway.parentRef.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  {{- with .Values.gateway.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.gateway.dashboard.path | quote }}
+      backendRefs:
+        - name: {{ include "tallyowl.fullname" . }}
+          port: {{ include "tallyowl.port" .Values.dashboard.listen }}
+{{- end }}
+{{- if .Values.gateway.operational.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "tallyowl.fullname" . }}-operational
+  labels:
+    {{- include "tallyowl.labels" . | nindent 4 }}
+  {{- with .Values.gateway.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.parentRef.name }}
+      {{- with .Values.gateway.parentRef.namespace }}
+      namespace: {{ . }}
+      {{- end }}
+      {{- with .Values.gateway.parentRef.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  {{- with .Values.gateway.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.gateway.operational.path | quote }}
+      backendRefs:
+        - name: {{ include "tallyowl.fullname" . }}
+          port: {{ include "tallyowl.port" .Values.head.operationalListen }}
+{{- end }}
+{{- end }}

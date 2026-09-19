@@ -13,8 +13,9 @@ options {
     package: "tallyowl-control",
     version: "v1alpha1",
     emit_packages: ["rust", "go", "typescript"],
-    package_name: "github.com/CatalystCommunity/tallyowl/clients/tallyowl-control",
-    package_version: "0.0.0",
+    package_name: "tallyowl-control-api",
+    go_module: "github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-control-api",
+    package_version: "0.2.0",
     decimal_mapping: "csil"
 }
 
@@ -23,7 +24,90 @@ options {
 ;;
 ;; QUERY.md section 5 gives the permitted nodes. There is no user-defined
 ;; function, no regular expression, and no arbitrary code.
+;;
+;; A child node travels as `bytes` holding the encoded child, rather than as a
+;; direct reference to its own type. `TailRule.expression` in
+;; tallyowl-collector.csil already does this, for the reason stated there: the
+;; control specification owns the expression schema. This file now does it
+;; everywhere a node contains a node, so one rule covers every nesting point
+;; rather than two rules covering one each.
+;;
+;; Two properties come with the shape and both are wanted here:
+;;
+;;   - a reader can bound a subtree before it decodes one, which is what a query
+;;     budget needs (QUERY.md section 13 and D52);
+;;   - a nesting depth is a decode count rather than a type, so a hostile tree
+;;     cannot exhaust a stack during parsing.
+;;
+;; The cost is that a caller encodes and decodes one step for each level. A
+;; query tree is a handful of levels deep and a query is not a high-frequency
+;; path, so this is not on any measured hot path.
 ;; ---------------------------------------------------------------------------
+
+;;; An encoded `ExpressionNode`. The size bound is the per-node budget; a whole
+;;; tree is bounded by QueryBudget.
+ExpressionRef = bytes .size (1..1048576)
+
+;;; An encoded `QueryNodeBox`.
+QueryNodeRef = bytes .size (1..1048576)
+
+;;; The kind of expression an `ExpressionNode` holds.
+ExpressionKind = "literal"
+               / "field"
+               / "compare"
+               / "set"
+               / "text"
+               / "null"
+               / "logical"
+               / "arith"
+               / "time"
+               / "convert"
+
+;;; The record an `ExpressionRef` holds. `expression` names which field carries
+;;; the node, and exactly one of them is present.
+;;;
+;;; An earlier draft made this a choice of the ten record types. A choice
+;;; dispatches on the runtime type of its value, and in a dynamically typed
+;;; language every one of those ten is one object, so a TypeScript caller
+;;; encoded every expression as the first arm. The discriminant is explicit
+;;; here for the same reason it is explicit on `TypedValue` and on
+;;; `TelemetryItem`. See docs/IMPLEMENTATION_LOG.md L017.
+ExpressionNode = {
+    expression: ExpressionKind,
+    ? literal: TypedValue,
+    ? field: FieldRef,
+    ? compare: CompareExpr,
+    ? set_expr: SetExpr,
+    ? text_expr: TextExpr,
+    ? null_expr: NullExpr,
+    ? logical: LogicalExpr,
+    ? arith: ArithExpr,
+    ? time_expr: TimeExpr,
+    ? convert: ConvertExpr
+}
+
+;;; The kind of node a `QueryNodeBox` holds.
+QueryNodeKind = "scan"
+              / "filter"
+              / "project"
+              / "aggregate"
+              / "sort"
+              / "limit"
+              / "join"
+              / "union"
+
+;;; The record a `QueryNodeRef` holds.
+QueryNodeBox = {
+    node: QueryNodeKind,
+    ? scan: ScanNode,
+    ? filter: FilterNode,
+    ? project: ProjectNode,
+    ? aggregate: AggregateNode,
+    ? sort: SortNode,
+    ? limit: LimitNode,
+    ? join: JoinNode,
+    ? union: UnionNode
+}
 
 FieldRef = {
     name: text .size (1..128),
@@ -37,57 +121,43 @@ CompareOp = "eq" / "ne" / "lt" / "le" / "gt" / "ge"
 LogicalOp = "and" / "or" / "not"
 ArithOp   = "add" / "sub" / "mul" / "div"
 
-Expression = LiteralExpr
-           / FieldExpr
-           / CompareExpr
-           / SetExpr
-           / TextExpr
-           / NullExpr
-           / LogicalExpr
-           / ArithExpr
-           / TimeExpr
-           / ConvertExpr
-
-LiteralExpr = { literal: TypedValue }
-FieldExpr   = { field: FieldRef }
-
 CompareExpr = {
     compare: CompareOp,
-    left: Expression,
-    right: Expression
+    left: ExpressionRef,
+    right: ExpressionRef
 }
 
 SetExpr = {
     set_test: "in" / "not-in",
-    left: Expression,
+    left: ExpressionRef,
     values: [* TypedValue]
 }
 
 TextExpr = {
     text_test: "starts-with" / "ends-with" / "contains",
-    left: Expression,
+    left: ExpressionRef,
     pattern: text .size (1..256)
 }
 
 NullExpr = {
     null_test: "is-null" / "is-not-null",
-    operand: Expression
+    operand: ExpressionRef
 }
 
 LogicalExpr = {
     logical: LogicalOp,
-    operands: [* Expression]
+    operands: [* ExpressionRef]
 }
 
 ArithExpr = {
     arith: ArithOp,
-    left: Expression,
-    right: Expression
+    left: ExpressionRef,
+    right: ExpressionRef
 }
 
 TimeExpr = {
     time_fn: "truncate" / "extract" / "shift",
-    operand: Expression,
+    operand: ExpressionRef,
     ? interval: Interval,
     ? part: text .size (1..32),
     ? shift_ms: DurationMs
@@ -95,7 +165,7 @@ TimeExpr = {
 
 ConvertExpr = {
     convert_to: text .size (1..32),
-    operand: Expression
+    operand: ExpressionRef
 }
 
 ;; ---------------------------------------------------------------------------
@@ -159,15 +229,6 @@ SortKey = {
     direction: "asc" / "desc"
 }
 
-QueryNode = ScanNode
-          / FilterNode
-          / ProjectNode
-          / AggregateNode
-          / SortNode
-          / LimitNode
-          / JoinNode
-          / UnionNode
-
 ;;; A scan always has a time range. A scan without one is an error.
 ScanNode = {
     scan: Dataset,
@@ -176,32 +237,32 @@ ScanNode = {
 }
 
 FilterNode = {
-    filter: Expression,
-    input: QueryNode
+    filter: ExpressionRef,
+    input: QueryNodeRef
 }
 
 ProjectNode = {
     project_fields: [* Dimension],
-    input: QueryNode
+    input: QueryNodeRef
 }
 
 AggregateNode = {
     dimensions: [* Dimension],
     measures: [* Measure],
     ? interval: Interval,
-    input: QueryNode
+    input: QueryNodeRef
 }
 
 SortNode = {
     sort: [* SortKey],
-    input: QueryNode
+    input: QueryNodeRef
 }
 
 LimitNode = {
     limit: uint,
     ? offset: uint,
     ? cursor: bytes,
-    input: QueryNode
+    input: QueryNodeRef
 }
 
 ;;; A join is bounded and exact. It correlates on an exact-indexed ID. There is
@@ -209,12 +270,12 @@ LimitNode = {
 JoinNode = {
     join_key: FieldRef,
     max_rows_each_side: uint,
-    left: QueryNode,
-    right: QueryNode
+    left: QueryNodeRef,
+    right: QueryNodeRef
 }
 
 UnionNode = {
-    union: [* QueryNode]
+    union: [* QueryNodeRef]
 }
 
 ;; ---------------------------------------------------------------------------
@@ -223,9 +284,22 @@ UnionNode = {
 
 CorrelationBasis = "end-user" / "session" / "group"
 
+;;; Which identity a question means. DATA_MODEL.md section 3.5: "Queries can use
+;;; event-time identity or latest-known identity."
+;;;
+;;;   - `event-time` asks who a row belonged to when it happened. A row before an
+;;;     `identify` stays anonymous, which is what a cohort question wants;
+;;;   - `latest-known` asks who it belongs to now. A conversion funnel needs it,
+;;;     because the steps before a sign-in were anonymous at the time and the
+;;;     person who bought is the person who clicked.
+;;;
+;;; Absent means `latest-known`. It is the answer somebody asking about an end
+;;; user means, and it is what every operator used before this field existed.
+IdentityResolution = "event-time" / "latest-known"
+
 FunnelStep = {
     name: text .size (1..128),
-    match: Expression,
+    match: ExpressionRef,
     ? exclusion: bool
 }
 
@@ -236,27 +310,30 @@ FunnelQuery = {
     window_ms: DurationMs,
     basis: CorrelationBasis,
     ordered: bool,
-    ? breakdown: Dimension
+    ? breakdown: Dimension,
+    ? resolution: IdentityResolution
 }
 
 RetentionQuery = {
     project_id: ProjectId,
     range: TimeRange,
-    initial: Expression,
-    returning: Expression,
+    initial: ExpressionRef,
+    returning: ExpressionRef,
     period: "day" / "week" / "month",
     periods: uint,
-    first_time_only: bool
+    first_time_only: bool,
+    ? resolution: IdentityResolution
 }
 
 PathQuery = {
     project_id: ProjectId,
     range: TimeRange,
-    anchor: Expression,
+    anchor: ExpressionRef,
     direction: "previous" / "next",
     depth: uint,
     min_frequency: uint,
-    collapse_loops: bool
+    collapse_loops: bool,
+    ? resolution: IdentityResolution
 }
 
 TraceQuery = {
@@ -271,19 +348,63 @@ TimelineQuery = {
     ? session_id: SessionId,
     kinds: [* TelemetryKind],
     limit: uint,
-    ? cursor: bytes
+    ? cursor: bytes,
+    ? resolution: IdentityResolution
 }
 
-;;; The operator shape is stable. Phase 8 selects the default model values, and
-;;; an operator configures them for each project. See D40.
+;;; Which credit rule a question asks for. DATA_MODEL.md section 3.6 names the
+;;; six initial models and D40 makes their parameters configuration rather than
+;;; code.
+AttributionModel = "first-touch"
+                 / "last-touch"
+                 / "last-non-direct"
+                 / "linear"
+                 / "position"
+                 / "decay"
+
+;;; The operator shape is stable. D40 holds the shipped default values and the
+;;; reason each one holds, and an operator configures them for each project.
+;;;
+;;; `lookback_ms` is bounded by the touch retention of the project. A
+;;; lookback longer than the retained range moves credit to later touches,
+;;; because the early touches aged out, and the result looks correct and is
+;;; wrong. TallyOwl refuses that query and names both values. See D40 and
+;;; POLICY.md section 5.
+;;;
+;;; `channel` is a derived dimension. A breakdown by `campaign_channel` reads
+;;; the classification rather than a stored column, so a classifier change
+;;; recomputes rather than needing a rewrite.
 AttributionQuery = {
     project_id: ProjectId,
     range: TimeRange,
     conversion_goal: text .size (1..128),
-    model: "first-touch" / "last-touch" / "last-non-direct" / "linear" / "position" / "decay",
+    model: AttributionModel,
     lookback_ms: DurationMs,
-    ? touch_filter: Expression,
-    ? breakdown: Dimension
+    ? touch_filter: ExpressionRef,
+    ? breakdown: Dimension,
+    ? resolution: IdentityResolution
+}
+
+;;; What a campaign report holds: the touches, the people, the conversions, the
+;;; exact value, the imported cost, and the return.
+;;;
+;;; DATA_MODEL.md section 6 asks a campaign dashboard for "sessions, end users,
+;;; conversions, value, cost, and return" with a "channel, campaign, and content
+;;; breakdown". A general aggregate cannot express it, because the three come
+;;; from three datasets and the return is a ratio across two of them.
+;;;
+;;; The credited value uses the same model and the same window as `attribution`,
+;;; so a summary row and an attribution row cannot disagree.
+CampaignSummaryQuery = {
+    project_id: ProjectId,
+    range: TimeRange,
+    conversion_goal: text .size (1..128),
+    model: AttributionModel,
+    lookback_ms: DurationMs,
+    ;; Which touch dimension the rows are grouped by. Absent groups by campaign.
+    ? dimension: "campaign" / "channel" / "source" / "medium" / "content",
+    ? touch_filter: ExpressionRef,
+    ? resolution: IdentityResolution
 }
 
 ;; ---------------------------------------------------------------------------
@@ -299,6 +420,17 @@ QueryBudget = {
     ? max_rows: uint
 }
 
+;;; Which shape of query a request carries. `node` names the general algebra;
+;;; the rest name a domain operator that a general aggregate cannot express.
+QueryForm = "node"
+          / "funnel"
+          / "retention"
+          / "path"
+          / "trace"
+          / "timeline"
+          / "attribution"
+          / "campaign-summary"
+
 QueryRequest = {
     algebra_version: uint,
     consistency: Consistency,
@@ -307,13 +439,17 @@ QueryRequest = {
     ;; A caller must ask for a partial result. It is never the default.
     allow_partial: bool,
     ? comparison_range: TimeRange,
-    query: QueryNode
-      / FunnelQuery
-      / RetentionQuery
-      / PathQuery
-      / TraceQuery
-      / TimelineQuery
-      / AttributionQuery
+    form: QueryForm,
+    ;; An encoded `QueryNodeBox`, for the same reason every other node reference
+    ;; is encoded: a reader bounds a subtree before it decodes one.
+    ? node: QueryNodeRef,
+    ? funnel: FunnelQuery,
+    ? retention: RetentionQuery,
+    ? path: PathQuery,
+    ? trace: TraceQuery,
+    ? timeline: TimelineQuery,
+    ? attribution: AttributionQuery,
+    ? campaign_summary: CampaignSummaryQuery
 }
 
 Exactness = {
@@ -388,7 +524,20 @@ AlertRule = {
     ? threshold: ThresholdCondition,
     ? absence: AbsenceCondition,
     notify: [* NotificationTarget],
-    enabled: bool
+    enabled: bool,
+    ;; Notify again at this interval while a rule stays firing. Absent means
+    ;; one notification for each state change and no repeat, which is what
+    ;; ALERTS.md section 5 states.
+    ? escalate_after_ms: DurationMs,
+    ;; Set by `silence-alert`. An evaluation still runs and still records
+    ;; state; only the notification is suppressed.
+    ? silenced_until: Timestamp,
+    ? silence_reason: text .size (1..512),
+    ;; Set when TallyOwl disabled the rule itself, which it does when the rule
+    ;; repeatedly exceeds its evaluation budget. ALERTS.md section 7.
+    ? disabled_reason: text .size (1..512),
+    ? updated_at: Timestamp,
+    ? updated_by: text .size (1..128)
 }
 
 NotificationTarget = {
@@ -399,12 +548,187 @@ NotificationTarget = {
 
 AlertState = "ok" / "firing" / "no-data" / "unknown" / "silenced"
 
+;;; What one evaluation produced. ALERTS.md section 3.
+;;;
+;;; `no-data` is separate from a value because a threshold on a count never
+;;; fires when ingest stops: a dead pipeline returns no rows rather than a low
+;;; number.
+AlertOutcome = "value" / "no-data" / "error"
+
 AlertInstance = {
     rule_id: text .size (1..64),
     state: AlertState,
     since: Timestamp,
     ? observed_value: float,
+    ? reason: text .size (1..512),
+    ? outcome: AlertOutcome,
+    ? last_evaluated_at: Timestamp,
+    ;; How many notifications this state has sent, including escalations. A
+    ;; repeated evaluation in one state sends none, so this rises only on a
+    ;; change or an escalation.
+    ? notifications_sent: uint,
+    ? last_notified_at: Timestamp,
+    ;; How long the condition has held. A threshold with `sustained_ms` fires
+    ;; only once this passes it.
+    ? holding_ms: DurationMs,
+    ;; The commit watermark the value came from, so two people reading one
+    ;; alert are reading one number.
+    ? commit_watermark: uint
+}
+
+;;; Suppress notification for a period. The evaluation still runs.
+SilenceRequest = {
+    rule_id: text .size (1..64),
+    project_id: ProjectId,
+    until: Timestamp,
     ? reason: text .size (1..512)
+}
+
+;;; Put a rule back to `ok` by hand, and send the resolution.
+ResolveRequest = {
+    rule_id: text .size (1..64),
+    project_id: ProjectId,
+    ? reason: text .size (1..512)
+}
+
+DeleteAlertRuleRequest = {
+    rule_id: text .size (1..64),
+    project_id: ProjectId
+}
+
+;;; One attempt to deliver one notification.
+;;;
+;;; A failed delivery is visible in a metric and in the operator interface, and
+;;; it never changes the alert state. ALERTS.md section 6.
+NotificationDelivery = {
+    rule_id: text .size (1..64),
+    target: text .size (1..1024),
+    state: AlertState,
+    attempts: uint,
+    delivered: bool,
+    ? last_failure: text .size (1..512),
+    ? next_attempt_at: Timestamp,
+    at: Timestamp
+}
+
+NotificationDeliveryList = { deliveries: [* NotificationDelivery], ? next_cursor: bytes }
+
+;; ---------------------------------------------------------------------------
+;; Workflows
+;;
+;; Corndogs owns durable queue and workflow state, and it evaluates a task
+;; timeout only when a caller invokes `CleanUpTimedOut`. Retry, backoff, and
+;; dead-worker recovery all stop when that sweep stops, so the sweep's own
+;; health is part of what an operator reads here.
+;; ---------------------------------------------------------------------------
+
+WorkflowKind = "alert-evaluation"
+             / "notification"
+             / "projector-rebuild"
+             / "retention"
+             / "deletion"
+             / "export"
+
+;;; What an operator needs to see about one workflow: is it behind, is it
+;;; failing, and is anything stuck.
+WorkflowStatus = {
+    kind: WorkflowKind,
+    queue: text .size (1..128),
+    ;; Work waiting to be claimed.
+    pending: uint,
+    ;; Work claimed and not finished.
+    in_flight: uint,
+    ;; Work that will not be retried again and needs a person. A quarantined
+    ;; item is never silently dropped.
+    quarantined: uint,
+    ;; How long the oldest waiting item has waited. This is the lag, and it is
+    ;; the number that says whether a workflow is keeping up.
+    oldest_pending_age_ms: DurationMs,
+    failures: uint,
+    ? last_success_at: Timestamp,
+    ? last_failure: text .size (1..512)
+}
+
+WorkflowList = { workflows: [* WorkflowStatus] }
+
+;;; Start one workflow now, rather than waiting for its schedule.
+RunWorkflowRequest = {
+    kind: WorkflowKind,
+    project_id: ProjectId,
+    ;; A rebuild, a retention pass, and an export all take a range. A deletion
+    ;; takes its predicate from the erasure ledger instead.
+    ? range: TimeRange,
+    ;; Where an export writes. Absent for every other kind.
+    ? destination: text .size (1..1024)
+}
+
+RunWorkflowResponse = {
+    ;; The Corndogs task this became, so an operator can find it again.
+    task_id: text .size (1..128),
+    kind: WorkflowKind,
+    accepted: bool,
+    ? reason: text .size (1..512)
+}
+
+;; ---------------------------------------------------------------------------
+;; Sign-in
+;;
+;; LinkKeys owns human authentication. TallyOwl owns the resulting application
+;; session and its authorization. See D7 and AGENTS.md.
+;;
+;; The dashboard drives the browser round trip, because the SDK deliberately
+;; does not: "opening a browser is a UX decision outside the LinkKeys SDK". So
+;; `begin-login` returns a URL and `complete-login` takes back what the callback
+;; carried. TallyOwl holds the pending login between the two, and discards it
+;; after one completion attempt, because the SDK owns no storage and cannot
+;; enforce single use itself.
+;; ---------------------------------------------------------------------------
+
+BeginLoginRequest = {
+    ;; The LinkKeys domain the person named. An installation administrator
+    ;; selects which domains are trusted, and a domain that is not trusted
+    ;; never reaches a role.
+    user_domain: text .size (1..253),
+    ;; Where the browser comes back to. It must match what the installation is
+    ;; configured with, or a caller could redirect a login somewhere else.
+    callback_url: text .size (1..1024)
+}
+
+BeginLoginResponse = {
+    ;; Send the browser here.
+    redirect_url: text .size (1..4096),
+    ;; Give this back with the callback. It names the pending login, and it is
+    ;; not a credential: completing still needs what the callback carried.
+    login_id: text .size (1..64),
+    expires_at: Timestamp
+}
+
+CompleteLoginRequest = {
+    login_id: text .size (1..64),
+    ;; The `encrypted_token` query parameter's raw value.
+    encrypted_token: text .size (1..65536),
+    ;; The whole URL the callback actually arrived at. The SDK compares it with
+    ;; the signed payload, so a login cannot be completed against a different
+    ;; address than the one it was begun for.
+    arrived_url: text .size (1..4096)
+}
+
+CompleteLoginResponse = {
+    ;; The session token. It authenticates a person; a source key authenticates
+    ;; an application, and neither is a substitute for the other.
+    session_token: text .size (1..256),
+    ;; The account this is, as `<account-uuid>@<domain>`. LinkKeys binds every
+    ;; assertion to one account UUID, and that is the subject TallyOwl records.
+    subject: text .size (1..320),
+    expires_at: Timestamp,
+    ;; The workspaces this person may read, and the role in each. Empty is the
+    ;; ordinary first sign-in: an administrator grants membership.
+    memberships: [* Membership]
+}
+
+Membership = {
+    workspace_id: WorkspaceId,
+    role: "viewer" / "admin" / "owner"
 }
 
 ;; ---------------------------------------------------------------------------
@@ -447,13 +771,361 @@ DeletionRequest = {
 DeletionResponse = {
     request_id: text .size (1..64),
     tombstone_generation: uint,
-    accepted_at: Timestamp
+    accepted_at: Timestamp,
+    ;; How many standing predicates this erasure wrote. A person is known by
+    ;; more than one identifier — an anonymous one for each device and a known
+    ;; one, and an alias may have merged two known ones — so removing them
+    ;; writes one predicate for each. A caller that saw only "accepted" could
+    ;; not tell a whole removal from a partial one.
+    ? predicates: uint,
+    ;; Every identifier the erasure covered.
+    ? identifiers: [* text .size (1..256)]
 }
+
+;; ---------------------------------------------------------------------------
+;; Collection policy
+;;
+;; POLICY.md section 1: a policy compiles from five levels and a narrower level
+;; overrides a wider one. This is the document an operator edits. The compiled
+;; snapshot a collector applies is `CollectionPolicy` in
+;; tallyowl-collector.csil; these are the inputs that produce it.
+;; ---------------------------------------------------------------------------
+
+PolicyScope = "installation" / "workspace" / "project" / "environment" / "source"
+
+;;; How much of a campaign touch is joined to the person who made it. D30.
+;;;
+;;; Consent applies to personal data, and a campaign fact on its own is not
+;;; personal data: the campaign, the platform, the referrer, and the landing
+;;; page show that a campaign works and are tied to nobody. Consent applies at
+;;; the point where campaign data **joins an identified end user**, and a
+;;; session identifier is that point, because it is what links touches over
+;;; time.
+;;;
+;;;   - `linked` keeps the touch and its links, which is what attribution needs;
+;;;   - `unlinked` keeps the campaign facts and removes the session, end-user,
+;;;     and anonymous links. A campaign is still measured and nothing is
+;;;     attributed to a person;
+;;;   - `none` refuses the touch.
+;;;
+;;; `unlinked` exists because D30 requires it: "Keep campaign capture usable
+;;; without a session link, so an operator who turns off session-linked campaign
+;;; data still measures campaign performance."
+CampaignLinking = "linked" / "unlinked" / "none"
+
+;;; One level's settings. An absent field inherits the wider level; a refusal
+;;; accumulates and a narrower level can never undo one.
+PolicyDocument = {
+    scope: PolicyScope,
+    ;; Which workspace, project, environment, or source. Absent only at the
+    ;; installation level.
+    ? scope_id: text .size (1..64),
+    ? enabled_kinds: [* TelemetryKind],
+    ? head_sample_rate: float,
+    ? session_max_lifetime_ms: DurationMs,
+    ? max_event_bytes: uint,
+    ? max_properties: uint,
+    ;; Event names this level refuses to collect.
+    ? blocked_event_names: [* text .size (1..128)],
+    ;; Property keys this level drops before anything is stored.
+    ? blocked_property_keys: [* text .size (1..64)],
+    ;; Property keys whose value is replaced. The key stays, so a query can
+    ;; still see that the field was present.
+    ? redact_property_keys: [* text .size (1..64)],
+    ;; How much of a campaign touch is joined to the person who made it. A
+    ;; narrower level can only keep less, for the same reason it cannot unblock
+    ;; an event name.
+    ? campaign_linking: CampaignLinking,
+    ;; Whether a person who denied marketing consent takes part in attribution.
+    ;; Their events are still stored, because D30 keeps consent state with the
+    ;; event so a later policy can act on it; this decides whether attribution
+    ;; reads them.
+    ? attribution_needs_consent: bool,
+    ? kill_switch: bool
+}
+
+;;; What the five levels compiled to.
+CompiledPolicy = {
+    policy_version: uint,
+    enabled_kinds: [* TelemetryKind],
+    head_sample_rate: float,
+    session_max_lifetime_ms: DurationMs,
+    max_event_bytes: uint,
+    max_properties: uint,
+    blocked_event_names: [* text .size (1..128)],
+    blocked_property_keys: [* text .size (1..64)],
+    redact_property_keys: [* text .size (1..64)],
+    campaign_linking: CampaignLinking,
+    attribution_needs_consent: bool,
+    kill_switch: bool,
+    ;; Which levels contributed, widest first. Without it the only way to find
+    ;; out where a value came from is to change one and see what moves.
+    from_levels: [* text .size (1..128)]
+}
+
+PolicyRequest = {
+    ? workspace_id: WorkspaceId,
+    ? project_id: ProjectId,
+    ? environment: text .size (1..64),
+    ? source_id: SourceId
+}
+
+;; ---------------------------------------------------------------------------
+;; Attribution configuration
+;;
+;; D40: "Attribution is a pure function over immutable touches. A model
+;; parameter is configuration, not code, and not a schema decision." An operator
+;; sets these for each project, and a change **recomputes the result**. No
+;; touch and no conversion is rewritten by any of it.
+;;
+;; The weights are floats and the credited value is an exact decimal. A weight
+;; is a ratio and never money; the money it divides keeps its digits. See
+;; QUERY.md section 4.1.
+;; ---------------------------------------------------------------------------
+
+;;; What an operator configures for one project.
+AttributionSettings = {
+    project_id: ProjectId,
+    ;; The share the first and the last touch take in the position model. The
+    ;; rest is divided between the touches in between. A first and last that add
+    ;; up to more than 1 is refused rather than normalized, because silently
+    ;; rescaling somebody's weights answers a question they did not ask.
+    position_first_weight: float,
+    position_last_weight: float,
+    ;; A touch this far before the conversion carries half the credit of one at
+    ;; the conversion. It must be more than nothing.
+    decay_half_life_ms: DurationMs,
+    ;; The default window a question inherits when it does not carry its own.
+    lookback_ms: DurationMs,
+    ;; Which models this project answers. An empty list is refused: it would
+    ;; make every attribution question fail and read as a defect.
+    enabled_models: [+ AttributionModel],
+    ;; How long touches are retained for this project. A lookback longer than
+    ;; this is refused, and both numbers are named in the refusal.
+    touch_retention_ms: DurationMs,
+    ;; Rises on every change. A result names it, so two results computed under
+    ;; different weights can never be mistaken for one another.
+    ? settings_version: uint,
+    ? updated_at: Timestamp,
+    ? updated_by: text .size (1..128)
+}
+
+;; ---------------------------------------------------------------------------
+;; Saved analyses and dashboards
+;;
+;; QUERY.md section 20. A saved analysis stores the request and the algebra
+;; version it was written against, so a later release can answer the old
+;; request the old way or refuse it by name. A dashboard references analyses
+;; rather than embedding queries, so one definition cannot drift from another.
+;; ---------------------------------------------------------------------------
+
+SavedAnalysis = {
+    analysis_id: text .size (1..64),
+    project_id: ProjectId,
+    name: text .size (1..128),
+    form: QueryForm,
+    ;; The encoded `QueryRequest`, exactly as it would be sent.
+    request: bytes .size (1..1048576),
+    algebra_version: uint,
+    ? created_at: Timestamp,
+    ? updated_at: Timestamp,
+    ? updated_by: text .size (1..128)
+}
+
+SavedAnalysisList = { analyses: [* SavedAnalysis], ? next_cursor: bytes }
+
+;;; Where one panel sits, in a twelve-column grid.
+DashboardPanel = {
+    analysis_id: text .size (1..64),
+    ;; Absent takes the analysis's own name, so a panel cannot silently
+    ;; disagree with the thing it shows.
+    ? title: text .size (1..128),
+    column: uint,
+    row: uint,
+    width: uint,
+    height: uint
+}
+
+SavedDashboard = {
+    dashboard_id: text .size (1..64),
+    project_id: ProjectId,
+    name: text .size (1..128),
+    panels: [* DashboardPanel],
+    ? updated_at: Timestamp,
+    ? updated_by: text .size (1..128)
+}
+
+SavedDashboardList = { dashboards: [* SavedDashboard], ? next_cursor: bytes }
+
+SavedRequest = {
+    project_id: ProjectId,
+    ? id: text .size (1..64),
+    ? cursor: bytes,
+    ? limit: uint
+}
+
+;; ---------------------------------------------------------------------------
+;; Role tokens and node enrollment
+;;
+;; NODE_IDENTITY.md sections 2, 3, and 4. A role token authorizes enrollment and
+;; nothing else: it is not a source key and it is not a node certificate.
+;;
+;; Two rules from section 3 are contract rules rather than implementation
+;; details, and both are enforced by the head:
+;;
+;;   - a role token can enroll a storage process and cannot assign a tablet to
+;;     it, because the cell controller owns placement;
+;;   - a role token cannot create a controller voter, cannot create a global
+;;     directory voter, and cannot change a tablet voter set.
+;;
+;; The node generates its own private key and sends only a certificate request.
+;; No private key ever crosses this wire in either direction.
+;; ---------------------------------------------------------------------------
+
+;;; The roles a token may permit. NODE_IDENTITY.md section 3.
+;;;
+;;; `controller-voter` is deliberately absent. A voter change is started by an
+;;; administrator and committed by the applicable controller quorum, so no name
+;;; for it belongs in a token policy.
+NodeRole = "collector-intake"
+         / "collector-forwarder"
+         / "compatibility-receiver"
+         / "ingest-gateway"
+         / "query-coordinator"
+         / "projector"
+         / "workflow-worker"
+         / "read-replica"
+         / "export-replica"
+         / "storage-process"
+
+;;; What a role token permits. Every limit is optional, and an absent limit
+;;; means the installation's default rather than "no limit".
+RoleTokenPolicy = {
+    roles: [+ NodeRole],
+    ? cells: [* text .size (1..64)],
+    ? regions: [* text .size (1..64)],
+    ? workspaces: [* WorkspaceId],
+    ? projects: [* ProjectId],
+    ? expires_at: Timestamp,
+    ? max_uses: uint,
+    ? max_active_nodes: uint,
+    ? certificate_lifetime_ms: uint,
+    ? enrollments_each_hour: uint,
+    ? audit_labels: [* text .size (1..128)]
+}
+
+CreateRoleTokenRequest = {
+    label: text .size (1..128),
+    policy: RoleTokenPolicy
+}
+
+;;; The token text exists exactly once, here. TallyOwl stores a token ID and a
+;;; keyed digest and never the value, so a lost token is reissued and never
+;;; recovered.
+CreateRoleTokenResponse = {
+    token_id: text .size (1..64),
+    token: text .size (1..256),
+    policy: RoleTokenPolicy,
+    created_at: Timestamp
+}
+
+RoleTokenSummary = {
+    token_id: text .size (1..64),
+    label: text .size (1..128),
+    policy: RoleTokenPolicy,
+    created_at: Timestamp,
+    uses: uint,
+    active_nodes: uint,
+    ? last_used_at: Timestamp,
+    revoked: bool
+}
+
+RoleTokenList = { tokens: [* RoleTokenSummary], ? next_cursor: bytes }
+
+;;; Revoking a token stops new enrollment. It does not revoke certificates
+;;; already issued unless `cascade` is set. NODE_IDENTITY.md section 2.
+RevokeRoleTokenRequest = {
+    token_id: text .size (1..64),
+    ? cascade: bool
+}
+
+;;; What a node reports about itself. NODE_IDENTITY.md section 5.
+NodeCapabilities = {
+    software_version: text .size (1..64),
+    ? protocol_versions: [* uint],
+    ? segment_versions: [* uint],
+    ? compression_codecs: [* text .size (1..32)],
+    ? storage_bytes: uint,
+    ? policy_generation: uint
+}
+
+;;; Step 5 of the enrollment sequence. `certificate_request` is a PKCS#10
+;;; certificate signing request the node produced from a key it generated and
+;;; never sent.
+EnrollNodeRequest = {
+    token: text .size (1..256),
+    certificate_request: bytes .size (1..65536),
+    requested_role: NodeRole,
+    ? cell: text .size (1..64),
+    ? region: text .size (1..64),
+    ? node_id: text .size (1..64),      ;; a stateful node asking for its own identity again
+    ? capabilities: NodeCapabilities
+}
+
+;;; The controller intersects the requested scope with the token policy. It
+;;; never grants a permission the token does not hold, so the effective values
+;;; here can be narrower than the request and are never wider.
+EnrollNodeResponse = {
+    node_id: text .size (1..64),
+    certificate_chain: [+ bytes .size (1..65536)],
+    certificate_serial: text .size (1..64),
+    effective_role: NodeRole,
+    ? cell: text .size (1..64),
+    ? region: text .size (1..64),
+    issued_at: Timestamp,
+    expires_at: Timestamp,
+    ;; Renewal starts well before expiry, so a node that misses one attempt has
+    ;; more before its identity ends. NODE_IDENTITY.md section 6.
+    renew_after: Timestamp,
+    ? permitted_capabilities: NodeCapabilities
+}
+
+;;; Renewal uses the node's current identity rather than the role token, so a
+;;; deployment can drop the token after enrollment. NODE_IDENTITY.md section 6.
+RenewNodeCertificateRequest = {
+    node_id: text .size (1..64),
+    certificate_request: bytes .size (1..65536)
+}
+
+NodeSummary = {
+    node_id: text .size (1..64),
+    token_id: text .size (1..64),
+    role: NodeRole,
+    ? cell: text .size (1..64),
+    ? region: text .size (1..64),
+    certificate_serial: text .size (1..64),
+    enrolled_at: Timestamp,
+    expires_at: Timestamp,
+    revoked: bool
+}
+
+NodeList = { nodes: [* NodeSummary], ? next_cursor: bytes }
 
 ListRequest = { ? cursor: bytes, ? limit: uint }
 WorkspaceList = { workspaces: [* Workspace], ? next_cursor: bytes }
 ProjectList = { projects: [* Project], ? next_cursor: bytes }
 ApiKeyList = { keys: [* ApiKeySummary], ? next_cursor: bytes }
+;;; Every alert operation that lists is scoped to one project, because a rule
+;;; belongs to one and authorization is by project. `ListRequest` carries no
+;;; project, and these operations answered nothing before this phase built
+;;; them, so this is a shape rather than a change to one somebody uses. See
+;;; L108 for the same reasoning on `get-policy`.
+AlertListRequest = {
+    project_id: ProjectId,
+    ? cursor: bytes,
+    ? limit: uint
+}
+
 AlertRuleList = { rules: [* AlertRule], ? next_cursor: bytes }
 AlertInstanceList = { instances: [* AlertInstance], ? next_cursor: bytes }
 Empty = {}
@@ -482,18 +1154,119 @@ service TallyOwlControl {
 
     ;;; List alert rules.
     @wire-id(5)
-    list-alert-rules: ListRequest -> AlertRuleList / ServiceError,
+    list-alert-rules: AlertListRequest -> AlertRuleList / ServiceError,
 
     ;;; List current alert instances and their state.
     @wire-id(6)
-    list-alert-instances: ListRequest -> AlertInstanceList / ServiceError,
+    list-alert-instances: AlertListRequest -> AlertInstanceList / ServiceError,
 
     ;;; Start an erasure. The tombstone applies immediately and stays active
     ;;; for late arrivals until its horizon ends. See D28.
     @wire-id(7)
     request-deletion: DeletionRequest -> DeletionResponse / ServiceError,
 
-    ;;; Fetch the compiled collection policy for a project.
+    ;;; Fetch the compiled collection policy for a source.
     @wire-id(8)
-    get-policy: ListRequest -> Empty / ServiceError
+    get-policy: PolicyRequest -> CompiledPolicy / ServiceError,
+
+    ;;; Start a sign-in. Returns the URL to send the browser to.
+    @wire-id(9)
+    begin-login: BeginLoginRequest -> BeginLoginResponse / ServiceError,
+
+    ;;; Finish a sign-in with what the callback carried, and get a session.
+    @wire-id(10)
+    complete-login: CompleteLoginRequest -> CompleteLoginResponse / ServiceError,
+
+    ;;; Create a reusable role token. The token text is returned once and is
+    ;;; never recoverable afterwards.
+    @wire-id(11)
+    create-role-token: CreateRoleTokenRequest -> CreateRoleTokenResponse / ServiceError,
+
+    ;;; List role tokens and what each one has enrolled.
+    @wire-id(12)
+    list-role-tokens: ListRequest -> RoleTokenList / ServiceError,
+
+    ;;; Stop a token enrolling anything more.
+    @wire-id(13)
+    revoke-role-token: RevokeRoleTokenRequest -> Empty / ServiceError,
+
+    ;;; Enroll a node. The node generates its private key and sends only a
+    ;;; certificate request; the control plane signs and never sees the key.
+    @wire-id(14)
+    enroll-node: EnrollNodeRequest -> EnrollNodeResponse / ServiceError,
+
+    ;;; Renew a node certificate against the node's current identity.
+    @wire-id(15)
+    renew-node-certificate: RenewNodeCertificateRequest -> EnrollNodeResponse / ServiceError,
+
+    ;;; List enrolled nodes.
+    @wire-id(16)
+    list-nodes: ListRequest -> NodeList / ServiceError,
+
+    ;;; Set one level of collection policy. It compiles before it is stored,
+    ;;; because invalid policy never replaces valid policy.
+    @wire-id(17)
+    put-policy: PolicyDocument -> CompiledPolicy / ServiceError,
+
+    ;;; Save an analysis, or replace it.
+    @wire-id(18)
+    put-analysis: SavedAnalysis -> SavedAnalysis / ServiceError,
+
+    ;;; List the saved analyses of a project.
+    @wire-id(19)
+    list-analyses: SavedRequest -> SavedAnalysisList / ServiceError,
+
+    ;;; Remove a saved analysis. Refused while a dashboard shows it.
+    @wire-id(20)
+    delete-analysis: SavedRequest -> Empty / ServiceError,
+
+    ;;; Save a dashboard, or replace it.
+    @wire-id(21)
+    put-dashboard: SavedDashboard -> SavedDashboard / ServiceError,
+
+    ;;; List the dashboards of a project.
+    @wire-id(22)
+    list-dashboards: SavedRequest -> SavedDashboardList / ServiceError,
+
+    ;;; Set the attribution weights and windows of a project. A change
+    ;;; recomputes every later result and rewrites no stored fact. See D40.
+    @wire-id(23)
+    put-attribution-settings: AttributionSettings -> AttributionSettings / ServiceError,
+
+    ;;; Read the attribution settings a project answers under.
+    @wire-id(24)
+    get-attribution-settings: SavedRequest -> AttributionSettings / ServiceError,
+
+    ;;; Remove a dashboard. The analyses it showed stay, because an analysis is
+    ;;; a question somebody saved and a dashboard is only one arrangement of
+    ;;; several. Removing an analysis is `delete-analysis`, and it is refused
+    ;;; while a dashboard still shows it.
+    @wire-id(25)
+    delete-dashboard: SavedRequest -> Empty / ServiceError,
+
+    ;;; Remove an alert rule and its instance.
+    @wire-id(26)
+    delete-alert-rule: DeleteAlertRuleRequest -> Empty / ServiceError,
+
+    ;;; Suppress notification for a period. The evaluation still runs and still
+    ;;; records state, so an operator can see what happened while it was quiet.
+    @wire-id(27)
+    silence-alert: SilenceRequest -> AlertInstance / ServiceError,
+
+    ;;; Put a firing rule back to `ok` by hand and send the resolution.
+    @wire-id(28)
+    resolve-alert: ResolveRequest -> AlertInstance / ServiceError,
+
+    ;;; What every workflow is doing: its lag, its failures, and what is in
+    ;;; quarantine waiting for a person.
+    @wire-id(29)
+    list-workflows: ListRequest -> WorkflowList / ServiceError,
+
+    ;;; Start one workflow now rather than at its schedule.
+    @wire-id(30)
+    run-workflow: RunWorkflowRequest -> RunWorkflowResponse / ServiceError,
+
+    ;;; Every notification attempt, delivered or not.
+    @wire-id(31)
+    list-notifications: AlertListRequest -> NotificationDeliveryList / ServiceError
 }

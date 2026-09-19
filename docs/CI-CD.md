@@ -10,7 +10,14 @@
 - Untrusted source never controls trusted secret-bearing pipeline code.
 - Use Reactorcide secret references and masking. Do not write a secret value to
   a repository file, artifact, command line, or log.
-- CI does not stage, commit, or push source changes.
+- CI does not stage, commit, or push source changes, **except the release job**.
+
+The exception is the owner's decision of 2026-08-12, and it is narrow. The
+release job writes one version into the tree, commits that, tags it, and
+pushes. It changes nothing else, and no other job may write to the source at
+all. The reason is the one the owner gave: if CI does not do it, a person does,
+and a person writing one version into nineteen files gets one of them wrong
+eventually. See L178.
 
 ## 2. One entry point
 
@@ -34,52 +41,63 @@ Two rules that this entry point exists to enforce:
 - csilgen runs from the `csil/` directory, because an `include` resolves
   against the working directory. That rule lives in code that both paths call,
   not in prose that a person has to remember. See [../csil/README.md](../csil/README.md).
-- the tooling pins csilgen to a released version rather than a local build,
-  once csilgen publishes releases through its own Reactorcide pipeline.
+- the tooling fetches a pinned csilgen **release** for this machine's
+  architecture, and pins the TypeScript transport by its release tag. The two
+  are different pins because they name different things: the generator is a
+  binary, and the transport is a checkout that `git` has to resolve a ref for.
+
+  The pinned binary comes before anything on a developer's path, because a
+  generator somebody built by hand is a generator nobody else has, and the
+  generated code is checked in. csilgen's own `--version` reports 0.1.0 for
+  every 0.2.x release, so the version it prints cannot be the check.
+  `gen-check` is the check: it generates into a temporary directory and fails
+  on any difference from what is checked in.
 
 `uv` provisions the Python version. A developer needs `uv` and nothing else to
 run the verbs that need no cluster.
 
-## 3. Proposed layout
+## 3. Layout
+
+This section first proposed a `pipelines/` directory of standalone Python
+modules. Reactorcide's shipped, trust-safe mechanism is different, and this
+repository uses the shipped one: a **lifecycle plugin** in
+`.reactorcide/plugins/`, loaded from the trusted CI source, selected by an
+environment variable. A plain module command in a job file would be loaded
+from the application source and lose the trusted-plugin precedence rule. The
+correction is one more instance of the L146 lesson: a dependency's capability
+is a thing to read, not to remember.
 
 ```text
 .reactorcide/
-  jobs/
-    ingest.yaml
+  jobs/            one YAML for each job: image, command, timeout, environment
     validate.yaml
-    integration.yaml
-    testbed.yaml
+    gen-check.yaml
+    test-rust.yaml
+    test-go.yaml
+    test-ts.yaml
+    helm-check.yaml
+    audit.yaml
     package.yaml
     release.yaml
-  pipelines/
-    ingest.py
-    validate.py
-    integration.py
-    testbed.py
-    package.py
-    release.py
-    commands.py
+  workflows/       the graphs: which jobs, on which events, in which order
+    pr.yaml
+    main.yaml
+    release.yaml
+  plugins/
+    plugin_tallyowl_jobs.py    the trusted dispatch: one function for each job
 ```
 
-Job YAML selects triggers, runner image, resource limits, identity, timeout,
-capabilities, and a single Python module command. It does not embed chained shell
-commands.
+Every job's command is `runnerlib run --job-command true`, and
+`REACTORCIDE_TALLYOWL_JOB` selects the work. Each job function calls the same
+`tallyowl_tools` module that `tools.sh` calls, so local and CI cannot drift.
 
-Pipeline modules:
+Two facts the proposal had wrong, recorded so nobody restores it from memory:
 
-- use the runnerlib `WorkflowContext` and `workflow_context` helpers;
-- use runnerlib change detection to avoid irrelevant expensive jobs;
-- schedule independent jobs in parallel with explicit dependencies;
-- publish workflow variables and outputs rather than parsing another job's logs;
-- use `for_each` for supported language and package matrices;
-- invoke repository tools through a small typed Python helper using
-  `subprocess.run([program, arg, ...], check=True, shell=False)`;
-- write artifacts only under the Reactorcide artifact directory.
-
-`commands.py` is a process-execution helper, not a new workflow framework. It
-standardizes working directory, timeouts, safe environment allowlists, captured
-diagnostics, and secret-safe command display while leaving orchestration to
-runnerlib.
+- job YAML cannot set resource limits. CPU and memory ceilings come from the
+  organization's execution profile, not from the repository;
+- workflow variables, outputs, change detection, and `for_each` come from
+  runnerlib's `src.workflow` module inside a plugin, not from standalone
+  pipeline scripts.
 
 ## 4. Workflow graph
 
@@ -110,15 +128,30 @@ ingest
                                ▼
                            package
                                ▼
-                     release (tag only)
+                    release (merge to main)
 ```
 
 The repository trusts the ingest job pipeline code. The job examines trigger type and changed
 paths, then emits the relevant nodes. Pull requests run validation and bounded
-integration work without publish and deploy secrets. Main-branch and tag workflows
-may add package or release nodes under project policy.
+integration work without publish and deploy secrets. A merge to main runs the
+same gates and then the release job, which is the only job that holds a publish
+grant and the only job that writes to the source.
 
 ## 5. Validation jobs
+
+### Conventional commits
+
+Every commit a pull request adds must say what kind of change it is, because
+`semver-tags` computes the version from exactly that. A subject that matches
+nothing is not a style complaint: it is a release that does not happen, for a
+reason nobody sees.
+
+`./tools.sh commits check` reads the commits the branch adds and prints what
+each one would do to the version — major, minor, patch, or nothing. The types
+it accepts are semver-tags' own defaults, and a test in
+`tools/tests/test_commits.py` reads them out of the tool rather than copying
+them, so the gate and the calculator cannot drift. `norelease:` is the one
+addition: a change the author decided should move no version.
 
 ### Format and lint
 
@@ -177,26 +210,126 @@ The same job must run on one developer machine with one command.
 
 Package jobs produce immutable artifacts identified by the source commit:
 
-- collector and head container images;
+- one container image that holds the head and the collector. Each chart selects
+  its binary with `command`;
 - TallyOwl and collector Helm charts;
-- generated CSIL client packages;
-- TypeScript browser package;
+- the TypeScript browser package, built before it is packed. The package job
+  refuses a tarball that holds a manifest and no entry point, because `npm
+  pack` produces exactly that when nobody built first;
+- one archive of the two service binaries, taken **out of the image that was
+  just built**, with the license and a `SHA256SUMS` beside it. A downloaded
+  TallyOwl is therefore the same build as a deployed one;
 - software bill of materials, checksums, and provenance metadata.
 
-A separate release job publishes the artifacts. This job uses verified package
-artifacts. It does not build them again.
+The generated CSIL client packages are **not** published. An application
+includes the contract in its own CSIL build and generates its own client. See
+`docs/RELEASE_NOTES.md` and L177.
 
-Release nodes run only for approved tag events. They use narrow secret grants
-for each registry.
+`./tools.sh release package` builds all of them into `RC_ARTIFACT_DIR`, and the
+release job calls that verb. A person can therefore build the same artifacts
+and look inside them before a release runs. The publishing steps push what that
+step built and build nothing again: crane sends the saved image archive, and
+the chart and package tarballs are the files themselves.
+
+**One version everywhere.** `./tools.sh version set <version>` writes the
+version into the Rust workspace and its path dependencies, the CSIL
+specifications, both charts, the package manifests, the two app-driver
+constants, and the Go module requirements, then regenerates the clients and
+writes the new versions into `Cargo.lock`. `./tools.sh version check` fails the
+build on any disagreement, and the `validate` job runs it first: a chart that
+asks for an image tag nobody built is an installation that never starts, and a
+stale lock file is a `--locked` image build that cannot run at all.
+
+**The version is computed, not typed.** `semver-tags` reads the conventional
+commits since the last tag and says what the next version is, exactly as every
+other repository here releases. `./tools.sh release plan` prints what the next
+release would be and changes nothing. `./tools.sh release stamp` brings the
+tree up to date with main and writes that version into it, and `./tools.sh
+release tag` commits, tags, and pushes. Both refuse unless `TALLYOWL_RELEASE=1`
+says it is the release job, so running either on a workstation prints the plan
+and stops.
+
+**The order is the whole design.** A git tag cannot be taken back — the Go
+module proxy caches it — so the release job stamps, builds and verifies every
+artifact, pushes the image, and only then commits and tags. A build that fails
+leaves the repository exactly as it was. If main moved while the artifacts were
+building, the push is refused and so is the release: the version was computed
+from a commit that is no longer the head, and running again computes it from
+what main holds now. The steps after the tag — the release page, the charts
+repository, the staged package — are each repeatable, so a re-run finishes a
+release rather than starting a broken second one.
+
+### Where each artifact goes
+
+D31, decided 2026-08-12:
+
+| Artifact | Destination | Grant |
+| --- | --- | --- |
+| Container image | `containers.catalystsquad.com/public/catalystcommunity/tallyowl` | `${secret:catalystcommunity/registry:user}` and `:password` |
+| Helm charts | The `catalystcommunity/charts` repository, and the GitHub release | `${secret:catalystcommunity/ci:githubpat}` |
+| Browser package | npmjs, **staged**. A maintainer approves it with 2FA | `${secret:catalystcommunity/ci:npmpublish}` |
+| Go modules | The git tags themselves. The module proxy needs no push | none |
+| Binaries | The GitHub release page, beside the charts | `${secret:catalystcommunity/ci:githubpat}` |
+| Rust driver | **Nowhere yet.** crates.io is off by the owner's decision of 2026-08-12 until the release pages have proved themselves. A Rust application depends by Git revision | none needed |
+
+Every grant a release needs now exists: the registry pair, the git token, and
+`npmpublish`. Turning crates.io on later needs the dependency clearance and one
+more grant; nothing else is outstanding.
+
+**Why the npm publish is staged.** npm deprecated the granular token that
+bypasses 2FA in August 2026 and removes its publish capability in January 2027.
+A token that can publish outright is a token this project would rather not
+hold. The release job runs `npm stage publish`; the package waits in staging
+until a maintainer approves it with 2FA on npmjs.com or with `npm stage
+approve`. Trusted publishing with OIDC is npm's other path and it federates
+with GitHub Actions and GitLab, not with Reactorcide, so staging is the path
+that fits. See L180.
+
+**The Go tags.** A Go module in a subdirectory resolves through a tag that is
+the module directory and then the version. A release therefore creates one
+repository tag and one tag for each published Go module, all in one atomic
+push:
+
+```text
+v0.2.0
+packages/driver-go/v0.2.0
+generated/go/tallyowl-ingest-api/v0.2.0
+generated/go/tallyowl-collector-api/v0.2.0
+generated/go/tallyowl-control-api/v0.2.0
+generated/go/tallyowl-cluster-api/v0.2.0
+```
+
+**What the job image must have.** The Reactorcide runner image carries podman,
+Git, uv, Go, and Rust. It carries no Helm, no Node, no crane, no `gh`, and no
+Docker client, which was read out of the image rather than assumed.
+`./tools.sh deps` fetches each of them into `.deps/` at the versions
+`tools/tallyowl_tools/deps.py` pins, so a release job and a workstation use the
+same ones. The release job declares Reactorcide's `docker` capability, which
+gives it the daemon the image build needs; the push needs no daemon at all.
+
+The release job refuses, and names each missing grant, before it changes
+anything.
+
+**The first merge to main publishes**, by the owner's decision of 2026-08-13.
+There is no rehearsal release. Every job was run in the runner image with
+`reactorcide run-local` instead, which is what found the four defects L185
+records; the timings are there too, and `test-rust` from an empty target
+directory is 121 seconds against a 3600-second limit.
 
 If the project needs deployment, add an explicit protected node. Packaging must
 not cause deployment.
 
 ## 7. Local execution
 
-Every non-publishing job must work through Reactorcide's canonical local runner.
-The repository documentation will give `run-local` examples after job files
-exist. Local execution should:
+Every non-publishing job works through Reactorcide's canonical local runner:
+
+```sh
+reactorcide run-local --job-dir . .reactorcide/jobs/validate.yaml
+```
+
+The `publish` job carries `disable_run_local: true` and refuses this path,
+because a secret-bearing job must not resolve its references on a developer
+machine. Local execution should:
 
 - bind-mount or copy the working tree without changing ownership unexpectedly;
 - run with the same container image and user as deployed workers where useful;

@@ -1,0 +1,686 @@
+;;; TallyOwl cluster contract.
+;;;
+;;; Phase 7 adds replicated storage. Two surfaces appear here and nowhere else:
+;;;
+;;;   - `TallyOwlReplication` is what one storage node says to another. It
+;;;     carries consensus messages, snapshot chunks, segment copies, and the
+;;;     partial aggregate a query coordinator collects. It is never reached by
+;;;     an application and never by a browser.
+;;;   - `TallyOwlCluster` is what an operator and a controller say about
+;;;     topology. It carries placement, split, merge, movement, failover, and
+;;;     the two recovery paths.
+;;;
+;;; WHY A CONSENSUS PAYLOAD TRAVELS AS `bytes`.
+;;;
+;;; TallyOwl does not invent a consensus algorithm; D15 and D27 select an
+;;; existing one. Its message types are that library's contract, not TallyOwl's,
+;;; and re-declaring them here would make TallyOwl responsible for keeping two
+;;; encodings in step across a library upgrade. The envelope that routes the
+;;; message is TallyOwl's, so the group, the epoch, and the sender are declared
+;;; fields and the algorithm's own bytes ride inside a sized `bytes` field. The
+;;; delivery task already uses that shape for a batch, and a tail rule for an
+;;; expression.
+;;;
+;;; A size bound is on every one of those fields, so a reader refuses an
+;;; oversized payload before it allocates for it.
+
+include "types/common.csil"
+
+options {
+    package: "tallyowl-cluster",
+    version: "v1alpha1",
+    emit_packages: ["rust", "go", "typescript"],
+    package_name: "tallyowl-cluster-api",
+    go_module: "github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-cluster-api",
+    package_version: "0.2.0",
+    decimal_mapping: "csil"
+}
+
+;; ---------------------------------------------------------------------------
+;; Names
+;;
+;; Every one of these is controller metadata. None is ever accepted from a
+;; client. STORAGE.md section 6: "shard and tablet identity and placement are
+;; controller metadata, never accepted from clients."
+;; ---------------------------------------------------------------------------
+
+NodeName      = text .size (1..64)
+CellName      = text .size (1..64)
+RegionName    = text .size (1..64)
+TabletName    = text .size (1..64)
+DomainName    = text .size (1..64)      ;; a failure domain: a rack, a zone, a host
+
+;;; A stable routing bucket. A project has many; many map to one tablet.
+VirtualShard  = uint
+
+;;; The controller's placement generation. A gateway carries the generation it
+;;; routed with, and a leader refuses a write that carries an older one.
+Generation    = uint
+
+;;; The write-region epoch. A fenced failover raises it, so a writer from the
+;;; previous region is refused rather than accepted beside the new one.
+Epoch         = uint
+
+;; ---------------------------------------------------------------------------
+;; Groups
+;;
+;; There is no cluster-wide consensus group. A group is either the small global
+;; directory, one cell's controller quorum, or one tablet's replica set.
+;; ---------------------------------------------------------------------------
+
+GroupKind = "global-directory" / "cell-controller" / "tablet"
+
+;;; Which consensus group a message is for. A storage node holds many, so the
+;;; kind and the name together select one and the transport is shared.
+GroupRef = {
+    kind: GroupKind,
+    ;; The cell for a cell-controller group, the tablet for a tablet group, and
+    ;; absent for the global directory, which has exactly one.
+    ? name: text .size (1..64)
+}
+
+MemberRole = "voter" / "learner"
+
+;;; One member of a group. A learner never enlarges a write quorum.
+GroupMember = {
+    node: NodeName,
+    role: MemberRole,
+    address: text .size (1..256),
+    ? region: RegionName,
+    ? domain: DomainName
+}
+
+;; ---------------------------------------------------------------------------
+;; Consensus transport
+;; ---------------------------------------------------------------------------
+
+;;; One consensus message for one group.
+;;;
+;;; `payload` is the consensus library's own encoding of one of its request
+;;; types. `kind` says which, so a receiver decodes the right one without
+;;; guessing and a wrong pairing is a refusal rather than a mis-parse.
+;;;
+;;; `proposal` is the one kind a client write travels under: a voter that took
+;;; a write while a peer leads hands the proposal to the leader, one hop, and
+;;; brings the outcome back. Without it, only the leader's own head can ingest,
+;;; and which voter leads is an election's choice rather than an operator's.
+ConsensusKind = "append-entries" / "vote" / "install-snapshot" / "proposal"
+
+ConsensusMessage = {
+    group: GroupRef,
+    kind: ConsensusKind,
+    ;; Who sent it. The peer certificate is what proves it; this says which
+    ;; member of the group the sender believes it is, so a message from a node
+    ;; that is no longer a member is refused with the reason.
+    sender: NodeName,
+    ;; The placement generation the sender routed with. A message from before a
+    ;; membership change is refused and names the current generation.
+    generation: Generation,
+    payload: bytes .size (1..67108864)
+}
+
+;;; The answer, in the same shape. `payload` holds the library's response type
+;;; when the group accepted the message.
+ConsensusReply = {
+    ;; False when this node refused to hand the message to the algorithm at all,
+    ;; which is a TallyOwl-level refusal rather than a consensus-level one.
+    accepted: bool,
+    ? payload: bytes .size (1..67108864),
+    ;; Set when the refusal was a stale generation. The sender updates and
+    ;; retries rather than backing off blindly.
+    ? current_generation: Generation,
+    ? refusal: text .size (1..512)
+}
+
+;; ---------------------------------------------------------------------------
+;; Snapshot and segment transfer
+;;
+;; A new replica catches up from a snapshot and then from the log. A moved
+;; tablet copies sealed segments and verifies a checksum before placement
+;; changes. STORAGE.md section 6.
+;; ---------------------------------------------------------------------------
+
+SnapshotChunkRequest = {
+    group: GroupRef,
+    ;; Absent starts a transfer and the reply names the snapshot.
+    ? snapshot_id: text .size (1..128),
+    offset: uint,
+    max_bytes: uint
+}
+
+SnapshotChunk = {
+    snapshot_id: text .size (1..128),
+    offset: uint,
+    data: bytes .size (0..67108864),
+    total_bytes: uint,
+    last: bool,
+    ;; BLAKE3 over the whole snapshot, present on the last chunk. A receiver
+    ;; that cannot reproduce it discards the transfer rather than installing it.
+    ? whole_digest: bytes .size (32..32)
+}
+
+;;; Which sealed segments a node holds for one tablet, so a replica that is
+;;; catching up knows what to ask for.
+;;;
+;;; A replica catches up from the log for anything the log still holds, and from
+;;; a segment copy for anything behind a purged prefix. It has to be told what
+;;; exists before it can ask for it, and the source is the only party that
+;;; knows.
+SegmentListRequest = { tablet: TabletName }
+
+;;; One sealed segment, as the source describes it.
+;;;
+;;; `digest` is what the source computed. The receiver recomputes it from what
+;;; arrived and compares; a digest a sender asserted proves nothing about what a
+;;; receiver holds.
+SegmentSummary = {
+    segment_id: text .size (1..128),
+    total_bytes: uint,
+    digest: bytes .size (32..32),
+    row_count: uint,
+    occurred_start: Timestamp,
+    occurred_end: Timestamp
+}
+
+SegmentList = {
+    tablet: TabletName,
+    segments: [* SegmentSummary],
+    ;; The catalog generation this list was taken at.
+    generation: Generation,
+    ;; What the source had applied when it listed. A target that copied every
+    ;; segment in this list and then replayed the log from here holds everything
+    ;; the source held at list time.
+    applied_index: uint
+}
+
+;;; One sealed segment, moving between nodes.
+SegmentTransferRequest = {
+    tablet: TabletName,
+    segment_id: text .size (1..128),
+    offset: uint,
+    max_bytes: uint
+}
+
+SegmentTransfer = {
+    segment_id: text .size (1..128),
+    offset: uint,
+    data: bytes .size (0..67108864),
+    total_bytes: uint,
+    last: bool,
+    ? whole_digest: bytes .size (32..32)
+}
+
+;; ---------------------------------------------------------------------------
+;; Distributed query
+;;
+;; A storage node computes a partial state and the coordinator merges it. The
+;; coordinator never pulls raw rows to aggregate. QUERY.md sections 5 and 7.
+;; ---------------------------------------------------------------------------
+
+PartialKind = "count" / "trend" / "rows" / "lookup" / "aggregate"
+
+PartialQueryRequest = {
+    tablet: TabletName,
+    generation: Generation,
+    kind: PartialKind,
+    project_id: ProjectId,
+    range_start: Timestamp,
+    range_end: Timestamp,
+    basis: text .size (1..32),
+    ? bucket_ms: DurationMs,
+    ? event_name: text .size (1..128),
+    ;; An exact lookup on a high-cardinality value. The column and the value
+    ;; travel as they are; the tablet probes its own locator.
+    ? column: text .size (1..128),
+    ? value: bytes .size (1..1024),
+    ? max_rows: uint,
+    ;; The aggregate a tablet computes a partial state for, as an encoded
+    ;; QueryNodeBox from the query contract.
+    ;;
+    ;; It travels as bytes on purpose. A storage node runs the coordinator's own
+    ;; aggregation over its own rows, so there is one implementation of a sum
+    ;; rather than two, and this transport carries the plan without a second
+    ;; declaration of the algebra that would have to be kept in step with the
+    ;; first.
+    ? aggregate_plan: bytes .size (1..1048576),
+    ;; A `committed` read needs a replica at or past this watermark. A
+    ;; `bounded-stale` read states its tolerance instead.
+    ? require_watermark: uint,
+    ? max_staleness_ms: DurationMs
+}
+
+;;; One bucket of a trend partial state. Merging is addition on a shared bucket
+;;; start, which is what makes the state bounded and mergeable.
+TrendBucket = {
+    bucket_start: Timestamp,
+    count: uint
+}
+
+PartialQueryResponse = {
+    tablet: TabletName,
+    ;; The watermark this partial state applies to. The coordinator reports the
+    ;; smallest across every tablet, because a result is only as current as its
+    ;; least current part.
+    commit_watermark: uint,
+    freshness_ms: DurationMs,
+    ;; False when this tablet could not read part of its own range. It never
+    ;; becomes true again in a merge.
+    complete: bool,
+    ? missing: [* MissingRange],
+    count: uint,
+    ? buckets: [* TrendBucket],
+    ;; Encoded rows, for the forms that must move rows: an exact lookup and a
+    ;; bounded row read. A count and a trend never move a row.
+    ? rows: [* bytes .size (1..1048576)],
+    scanned_segments: uint,
+    scanned_bytes: uint,
+    ;; The partial state of every group this tablet aggregated, encoded.
+    ;;
+    ;; This is what `docs/QUERY.md` section 5 means by "the coordinator merges
+    ;; partial states and never pulls raw rows to aggregate". A sum travels as a
+    ;; sum, a distinct count travels as its values, and an average travels as a
+    ;; total and a count, because an average of averages is not an average.
+    ? aggregate_state: bytes .size (1..16777216),
+    ;; True when the range this tablet answered overlaps a range that unsafe
+    ;; recovery marked. It travels all the way to the caller's explain output.
+    ? degraded: bool
+}
+
+MissingRange = {
+    tablet_id: text .size (1..64),
+    range_start: Timestamp,
+    range_end: Timestamp
+}
+
+;; ---------------------------------------------------------------------------
+;; Node health, and the slow node
+;;
+;; FAILURE_MODES.md section 6.1. A dead node is easy. A node that answers every
+;; request slowly holds up writes while looking healthy.
+;; ---------------------------------------------------------------------------
+
+;;; The most specific cause the node could establish. `unknown` is a valid
+;;; answer and is reported as one: a guessed cause sends an operator down a
+;;; wrong path, which is worse than sending them nowhere.
+SlowCause = "storage-errors"
+          / "storage-saturated"
+          / "storage-slow"
+          / "write-volume"
+          / "compaction-pressure"
+          / "memory-pressure"
+          / "network-latency"
+          / "unknown"
+
+;;; What a node measures about itself. The controller compares each node with
+;;; the group median rather than with an absolute threshold, so a slow group is
+;;; not read as many slow nodes.
+NodeHealthReport = {
+    node: NodeName,
+    reported_at: Timestamp,
+    append_latency_us: uint,
+    fsync_latency_us: uint,
+    queue_depth: uint,
+    accepted_bytes_each_second: uint,
+    ;; The device reading behind `storage-errors` and `storage-saturated`.
+    device_errors: uint,
+    device_service_time_us: uint,
+    compaction_backlog_bytes: uint,
+    memory_reclaim_events: uint,
+    peer_round_trip_us: uint,
+    ;; What this node believes about itself. The controller decides; this is
+    ;; evidence and never a verdict.
+    ? self_cause: SlowCause,
+    ;; False when the node cannot make a write durable. A voter that fails this
+    ;; stops accepting appends and the quorum continues without it.
+    writable: bool,
+    free_bytes: uint
+}
+
+NodeState = "healthy" / "slow" / "unreachable" / "read-only" / "draining"
+
+;;; What the controller decided about one node, and the evidence for it. An
+;;; alert that says only "slow" sends an operator to look at the wrong thing.
+NodeCondition = {
+    node: NodeName,
+    state: NodeState,
+    ? cause: SlowCause,
+    ;; This node's reading beside the group median for the same measure, so an
+    ;; operator can see the comparison the controller made.
+    append_latency_us: uint,
+    group_median_append_latency_us: uint,
+    fsync_latency_us: uint,
+    group_median_fsync_latency_us: uint,
+    queue_depth: uint,
+    accepted_bytes_each_second: uint,
+    since: Timestamp,
+    ? action_taken: text .size (1..256)
+}
+
+;; ---------------------------------------------------------------------------
+;; Topology
+;; ---------------------------------------------------------------------------
+
+TabletState = "active" / "splitting" / "merging" / "moving" / "draining" / "retired"
+
+;;; One tablet: its virtual shards, its replica set, and the marks on it.
+TabletInfo = {
+    tablet: TabletName,
+    cell: CellName,
+    write_region: RegionName,
+    epoch: Epoch,
+    generation: Generation,
+    state: TabletState,
+    ;; The half-open range of virtual shards this tablet owns.
+    shard_start: VirtualShard,
+    shard_end: VirtualShard,
+    members: [+ GroupMember],
+    receipt_policy: text .size (1..32),
+    ? leader: NodeName,
+    commit_watermark: uint,
+    stored_bytes: uint,
+    ;; Set when unsafe recovery ran. It never expires on its own.
+    ? degraded_since: Timestamp,
+    ? degraded_range_start: Timestamp,
+    ? degraded_range_end: Timestamp
+}
+
+CellInfo = {
+    cell: CellName,
+    region: RegionName,
+    controllers: [+ GroupMember],
+    generation: Generation,
+    ;; True when this cell's controller quorum answers. A cell whose quorum is
+    ;; gone keeps serving data and refuses topology changes.
+    quorum_available: bool
+}
+
+;;; The global directory's whole content for one project. It maps a project to
+;;; cells and holds nothing else. It never holds tablet placement.
+ProjectPlacement = {
+    project_id: ProjectId,
+    cells: [+ CellName],
+    ;; Set while a project is moving between cells. CELLS.md section 11.
+    ? moving_to: CellName,
+    policy_generation: Generation
+}
+
+DescribeTopologyRequest = { ? cell: CellName }
+
+TopologyResponse = {
+    cells: [* CellInfo],
+    tablets: [* TabletInfo],
+    nodes: [* NodeCondition],
+    generation: Generation,
+    ;; False when the global directory could not be reached. The rest of this
+    ;; answer is the cell's own view, which is what keeps a cell working during
+    ;; a directory outage.
+    directory_available: bool
+}
+
+;; ---------------------------------------------------------------------------
+;; Placement operations
+;; ---------------------------------------------------------------------------
+
+SplitTabletRequest = {
+    tablet: TabletName,
+    ;; The controller chooses when this is absent.
+    ? at_shard: VirtualShard
+}
+
+MergeTabletsRequest = {
+    left: TabletName,
+    right: TabletName
+}
+
+MoveTabletRequest = {
+    tablet: TabletName,
+    ;; The node that leaves and the node that takes its place.
+    away_from: NodeName,
+    onto: NodeName
+}
+
+ChangeReplicaRequest = {
+    tablet: TabletName,
+    node: NodeName,
+    address: text .size (1..256),
+    role: MemberRole,
+    ? region: RegionName,
+    ? domain: DomainName
+}
+
+RemoveReplicaRequest = {
+    tablet: TabletName,
+    node: NodeName
+}
+
+SetReceiptPolicyRequest = {
+    tablet: TabletName,
+    policy: text .size (1..32)
+}
+
+;;; A fenced regional failover. It raises the epoch, so a writer in the old
+;;; region is refused rather than accepted beside the new one.
+FailOverRegionRequest = {
+    tablet: TabletName,
+    onto_region: RegionName,
+    ;; The operator states the loss they accept. A policy whose replicas are not
+    ;; current refuses without this.
+    ? accept_data_loss: bool
+}
+
+;;; Unsafe recovery. FAILURE_MODES.md section 6.2.
+;;;
+;;; It forces a single-voter membership from the surviving replica's log and it
+;;; can lose an acknowledged write. `confirm_tablet` must repeat the tablet
+;;; name, so the command cannot be run by reflex, and the result is audited and
+;;; marks the range degraded for the life of the installation or until an
+;;; operator clears it.
+UnsafeRecoverRequest = {
+    tablet: TabletName,
+    confirm_tablet: TabletName,
+    survivor: NodeName,
+    reason: text .size (1..512)
+}
+
+UnsafeRecoverResponse = {
+    tablet: TabletName,
+    ;; The audit record this wrote, in the `audit` retention class.
+    audit_id: text .size (1..64),
+    degraded_range_start: Timestamp,
+    degraded_range_end: Timestamp,
+    ;; The watermark the survivor held. Everything the lost voters committed
+    ;; past this is gone, and no component can say which writes those were.
+    survivor_watermark: uint,
+    performed_at: Timestamp
+}
+
+ClearDegradedRequest = {
+    tablet: TabletName,
+    ;; Who accepted the loss. The clear is recorded with this name.
+    accepted_by: text .size (1..128),
+    reason: text .size (1..512)
+}
+
+;;; A tablet snapshot, for backup and for restore. STORAGE.md section 13.
+ClusterSnapshotRequest = { ? tablet: TabletName }
+
+ClusterSnapshotResponse = {
+    snapshot_id: text .size (1..128),
+    tablets: [* TabletName],
+    taken_at: Timestamp,
+    total_bytes: uint,
+    whole_digest: bytes .size (32..32)
+}
+
+RestoreRequest = {
+    snapshot_id: text .size (1..128),
+    ? onto_tablet: TabletName
+}
+
+;;; Bring up a group that does not exist yet. This is the only operation that
+;;; creates a voter set, and a role token can never reach it.
+BootstrapGroupRequest = {
+    group: GroupRef,
+    members: [+ GroupMember]
+}
+
+ClusterAck = {
+    accepted: bool,
+    generation: Generation,
+    ? message: text .size (1..512)
+}
+
+AssignProjectRequest = {
+    project_id: ProjectId,
+    cells: [+ CellName]
+}
+
+DirectoryRequest = { ? project_id: ProjectId }
+
+DirectoryResponse = {
+    placements: [* ProjectPlacement],
+    generation: Generation
+}
+
+;;; Where a write for one project and affinity key belongs. A gateway caches
+;;; this and follows a fenced redirect when the generation moves.
+RouteRequest = {
+    project_id: ProjectId,
+    ;; The affinity key, already reduced to bytes by the caller: a trace ID for
+    ;; a span, a session or end-user ID for a behavior event, a series ID for a
+    ;; metric point.
+    affinity_key: bytes .size (1..256)
+}
+
+RouteResponse = {
+    cell: CellName,
+    shard: VirtualShard,
+    tablet: TabletName,
+    ? leader: NodeName,
+    ? leader_address: text .size (1..256),
+    generation: Generation,
+    epoch: Epoch,
+    receipt_policy: text .size (1..32)
+}
+
+ReplicaStatusRequest = { ? tablet: TabletName }
+
+ReplicaStatus = {
+    node: NodeName,
+    tablets: [* TabletInfo],
+    ;; The exact high-water marks a read replica reports, so a bounded-stale
+    ;; read can decide whether this replica satisfies it.
+    applied_watermark: uint,
+    ? lag_ms: DurationMs,
+    writable: bool
+}
+
+;; ---------------------------------------------------------------------------
+;; Services
+;; ---------------------------------------------------------------------------
+
+;;; Node to node. Never reached by an application, never by a browser.
+@wire-id(4)
+service TallyOwlReplication {
+    ;;; Hand one consensus message to the named group.
+    @wire-id(0)
+    deliver-consensus: ConsensusMessage -> ConsensusReply / ServiceError,
+
+    ;;; Read part of a snapshot, so a new or lagging replica can catch up.
+    @wire-id(1)
+    fetch-snapshot-chunk: SnapshotChunkRequest -> SnapshotChunk / ServiceError,
+
+    ;;; Read part of a sealed segment, for a tablet that is moving.
+    @wire-id(2)
+    fetch-segment: SegmentTransferRequest -> SegmentTransfer / ServiceError,
+
+    ;;; Compute a partial aggregate over one tablet. The coordinator merges.
+    @wire-id(3)
+    partial-aggregate: PartialQueryRequest -> PartialQueryResponse / ServiceError,
+
+    ;;; What this node holds, and how current each of it is.
+    @wire-id(4)
+    replica-status: ReplicaStatusRequest -> ReplicaStatus / ServiceError,
+
+    ;;; A node reports its own latency and device readings. The controller
+    ;;; compares; the node never decides that it is slow.
+    @wire-id(5)
+    report-health: NodeHealthReport -> ClusterAck / ServiceError,
+
+    ;;; Which sealed segments this node holds for one tablet.
+    @wire-id(6)
+    list-segments: SegmentListRequest -> SegmentList / ServiceError
+}
+
+;;; Topology and placement. An operator reaches this, and so does a gateway
+;;; asking where a write belongs.
+@wire-id(5)
+service TallyOwlCluster {
+    ;;; The whole topology, or one cell's part of it.
+    @wire-id(0)
+    describe-topology: DescribeTopologyRequest -> TopologyResponse / ServiceError,
+
+    ;;; Where a write for one project and affinity key belongs.
+    @wire-id(1)
+    route: RouteRequest -> RouteResponse / ServiceError,
+
+    ;;; Create a group. The only operation that creates a voter set.
+    @wire-id(2)
+    bootstrap-group: BootstrapGroupRequest -> ClusterAck / ServiceError,
+
+    ;;; Add a replica, voting or not. Online.
+    @wire-id(3)
+    add-replica: ChangeReplicaRequest -> ClusterAck / ServiceError,
+
+    ;;; Remove a replica. Online, and refused when it would end the quorum.
+    @wire-id(4)
+    remove-replica: RemoveReplicaRequest -> ClusterAck / ServiceError,
+
+    ;;; Split one tablet into two at a virtual-shard boundary.
+    @wire-id(5)
+    split-tablet: SplitTabletRequest -> ClusterAck / ServiceError,
+
+    ;;; Merge two adjacent tablets.
+    @wire-id(6)
+    merge-tablets: MergeTabletsRequest -> ClusterAck / ServiceError,
+
+    ;;; Move a tablet from one node to another, online and with parity checked.
+    @wire-id(7)
+    move-tablet: MoveTabletRequest -> ClusterAck / ServiceError,
+
+    ;;; Change a tablet's receipt policy. `local-one` is refused on a tablet
+    ;;; with more than one voter, and the refusal says so rather than quietly
+    ;;; selecting another policy.
+    @wire-id(8)
+    set-receipt-policy: SetReceiptPolicyRequest -> ClusterAck / ServiceError,
+
+    ;;; Move a tablet's write region behind a fence.
+    @wire-id(9)
+    fail-over-region: FailOverRegionRequest -> ClusterAck / ServiceError,
+
+    ;;; Force a single-voter membership from a survivor. It can lose an
+    ;;; acknowledged write, it is audited, and it marks the range degraded.
+    @wire-id(10)
+    unsafe-recover: UnsafeRecoverRequest -> UnsafeRecoverResponse / ServiceError,
+
+    ;;; Clear a degraded mark. It records who accepted the loss.
+    @wire-id(11)
+    clear-degraded: ClearDegradedRequest -> ClusterAck / ServiceError,
+
+    ;;; Take a cluster snapshot.
+    @wire-id(12)
+    snapshot-cluster: ClusterSnapshotRequest -> ClusterSnapshotResponse / ServiceError,
+
+    ;;; Restore from a snapshot. The default answer to a permanent quorum loss.
+    @wire-id(13)
+    restore: RestoreRequest -> ClusterAck / ServiceError,
+
+    ;;; The global directory: which cells hold a project.
+    @wire-id(14)
+    directory: DirectoryRequest -> DirectoryResponse / ServiceError,
+
+    ;;; Assign a project to cells. Refused while the directory is unreachable,
+    ;;; and existing cells keep working through that refusal.
+    @wire-id(15)
+    assign-project: AssignProjectRequest -> ClusterAck / ServiceError
+}

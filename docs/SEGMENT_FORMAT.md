@@ -142,11 +142,17 @@ A page holds:
 | 6 | 2 | Compression codec |
 | 8 | 4 | Row count |
 | 12 | 4 | Uncompressed length |
-| 16 | 8 | Page checksum. xxHash3-64 of the compressed bytes. |
+| 16 | 8 | Page checksum. xxHash3-64 of the null bitmap and the compressed bytes. |
 | 24 | n | Null bitmap, one bit for each row, LSB first |
 | 24+n | m | Encoded and compressed values |
 
 A page is independently readable. A query decodes only the pages that it needs.
+
+The checksum covers the null bitmap as well as the values. An earlier draft
+covered only the compressed bytes, which left the bitmap unprotected: one
+flipped bit there turns a value into an absent one, and a query then returns a
+wrong answer rather than a smaller one. A test found it. See
+[IMPLEMENTATION_LOG.md](IMPLEMENTATION_LOG.md) L020.
 
 ### Encodings
 
@@ -256,7 +262,7 @@ Two functions do two different jobs. See D44.
 
 | Use | Function | Reason |
 | --- | --- | --- |
-| Page and index block | xxHash3-64 | Corruption detection on the hot path |
+| Page and index block | xxHash3-64 | Corruption detection on the hot path. A page checksum covers its null bitmap as well as its values. |
 | Footer | xxHash3-64 | Corruption detection |
 | Segment content address | BLAKE3-256 | Identity across backup, restore, and cold storage |
 
@@ -267,17 +273,25 @@ store. It needs collision resistance.
 
 ## 11. Encryption
 
-A segment can encrypt its data region. The cold tier needs this, because
-erasure destroys key material instead of rewriting an object. See D28.
+A segment can encrypt its data region **and its index region**. The cold tier
+needs this, because erasure destroys key material instead of rewriting an
+object. See D28 and D61.
+
+The index region is encrypted because it holds fingerprints of end-user,
+session, request, and trace identifiers. D9 makes the end-user ID an erasure
+key, so a readable fingerprint index in an object store would let anyone with
+bucket access enumerate and correlate the exact values erasure exists to make
+unreadable.
 
 The footer holds a key reference, never key material. The catalog holds the
-keys.
+keys, wrapped by an installation root key.
 
-An encrypted segment keeps its header readable, so a reader can still prune by
-time, project, and kind without a key.
+An encrypted segment keeps its prologue, header, and footer readable, so a
+reader can still prune by time, project, and kind without a key. The tablet
+locator is local and unencrypted, so routing to a candidate segment also works
+without one.
 
-The key design is separate work and gates cold tiering for a project that
-permits erasure.
+D61 gives the key design.
 
 ## 12. Manifest
 

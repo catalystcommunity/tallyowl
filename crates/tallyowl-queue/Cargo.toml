@@ -1,0 +1,18 @@
+[package]
+name = "tallyowl-queue"
+description = "The durable task boundary: the seam every TallyOwl component uses to reach Corndogs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tallyowl_queue"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tallyowl-obs = { workspace = true }
+corndogs = { workspace = true }

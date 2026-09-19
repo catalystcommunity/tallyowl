@@ -1,0 +1,164 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tallyowl-obs",
+    "crates/tallyowl-config",
+    "crates/tallyowl-rpc",
+    "crates/tallyowl-wire",
+    "crates/tallyowl-golden",
+    "crates/tallyowl-export",
+    "crates/tallyowl-store",
+    "crates/tallyowl-compat",
+    "crates/tallyowl-cluster",
+    "crates/tallyowl-queue",
+    "crates/tallyowl-collector",
+    "crates/tallyowl-head",
+    "crates/tallyowl-driver-rust",
+    "generated/rust/tallyowl-ingest-api",
+    "generated/rust/tallyowl-collector-api",
+    "generated/rust/tallyowl-control-api",
+    "generated/rust/tallyowl-cluster-api",
+]
+
+# `prototypes/` is its own workspace on purpose. It holds decision-support
+# benchmarks, never product code, and a product build never compiles it.
+# See prototypes/README.md.
+exclude = ["prototypes"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/CatalystCommunity/tallyowl"
+
+# Deny warnings on the crates this project writes, and only those. A generated
+# crate is never hand-edited, so a lint that fails the build on one of its
+# warnings would fail on something nobody may fix. Each of our crates opts in
+# with `lints.workspace = true`; the generated crates do not, and are unaffected.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[workspace.dependencies]
+# TallyOwl crates.
+#
+# Each carries a version as well as a path. A path is what a build in this
+# checkout uses; a version is what a registry resolves, and `cargo publish`
+# refuses a dependency that has no version. `./tools.sh version set` writes
+# every one of these, so they cannot fall behind the workspace version.
+tallyowl-obs = { path = "crates/tallyowl-obs", version = "0.2.0" }
+tallyowl-config = { path = "crates/tallyowl-config", version = "0.2.0" }
+tallyowl-rpc = { path = "crates/tallyowl-rpc", version = "0.2.0" }
+tallyowl-wire = { path = "crates/tallyowl-wire", version = "0.2.0" }
+tallyowl-golden = { path = "crates/tallyowl-golden", version = "0.2.0" }
+tallyowl-export = { path = "crates/tallyowl-export", version = "0.2.0" }
+tallyowl-store = { path = "crates/tallyowl-store", version = "0.2.0" }
+tallyowl-compat = { path = "crates/tallyowl-compat", version = "0.2.0" }
+tallyowl-queue = { path = "crates/tallyowl-queue", version = "0.2.0" }
+tallyowl-cluster = { path = "crates/tallyowl-cluster", version = "0.2.0" }
+tallyowl-driver-rust = { path = "crates/tallyowl-driver-rust", version = "0.2.0" }
+
+# Generated from csil/. Never hand-edited. See csil/README.md.
+tallyowl-ingest-api = { path = "generated/rust/tallyowl-ingest-api", version = "0.2.0" }
+tallyowl-collector-api = { path = "generated/rust/tallyowl-collector-api", version = "0.2.0" }
+tallyowl-control-api = { path = "generated/rust/tallyowl-control-api", version = "0.2.0" }
+tallyowl-cluster-api = { path = "generated/rust/tallyowl-cluster-api", version = "0.2.0" }
+
+# The CSIL transport family reference implementation, from the csilgen project.
+# Pinned by revision, because csilgen does not yet publish releases for it.
+# See docs/CI-CD.md section 2.
+csilgen-transport = { git = "https://github.com/catalystcommunity/csilgen", rev = "d693a94d5b722ab4da858a50469412e6ffcbe080" }
+
+# The LinkKeys relying-party SDK. LinkKeys owns human authentication and
+# TallyOwl owns the resulting session and authorization; see D7.
+#
+# It lives in a subdirectory of its repository and path-depends on three crates
+# beside it. Cargo clones the whole repository and resolves those paths inside
+# the checkout, so a Git dependency reaches it exactly as it reaches
+# `csilgen-transport`, which is the same shape. Pinned by revision for the same
+# reason: LinkKeys does not publish it.
+linkkeys-local-rp = { git = "https://github.com/catalystcommunity/linkkeys", rev = "3b8c389f9a5b9f77cfea049fd75e6a745622f213" }
+# The SDK speaks in `DateTime<Utc>`, so the head does too at that boundary.
+# Everywhere else a time is milliseconds since the epoch, per CONVENTIONS.md.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# The IANA timezone database, compiled in. L134 says why a database is needed
+# rather than a conversion library, and why it is bundled rather than read from
+# the host: a container built from scratch carries no `/usr/share/zoneinfo`, and
+# a calendar month in a named zone is not answerable without one.
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
+
+# The Corndogs durable task queue client, generated from the Corndogs CSIL
+# contract in that project. Pinned by revision for the same reason.
+corndogs = { git = "https://github.com/catalystcommunity/corndogs", rev = "a313433b53c2df3742210d5354353fd98b6fbc18" }
+
+# The storage format. `zstd` and `xxhash-rust` are on the hot path; `blake3`
+# gives a segment its content address, which needs collision resistance and the
+# page checksum does not. See D44.
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+blake3 = "1"
+
+# Segment encryption, per D61. AES-256-GCM with a fresh random nonce for each
+# encrypted block; the algorithm travels in the footer so a later segment can
+# use another one without a major version. MIT or Apache-2.0.
+aes-gcm = "0.10"
+# The system random source, for nonces and for generating a project key.
+getrandom = "0.3"
+
+# The embedded transactional catalog. D3 measured it and accepted it: a
+# deduplication lookup costs 0.91 microseconds and a durable commit is bounded
+# by the device rather than by the engine.
+redb = "3"
+
+# Node identity, per NODE_IDENTITY.md. `rcgen` signs a certificate request and
+# `rustls` carries mutual TLS under the CSIL stream carrier; `x509-parser` reads
+# the request a node sends. Each node generates its own private key, so no
+# private key ever crosses the wire and none of these ever sees one but its
+# owner's. All are Apache-2.0 or MIT.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+rustls-pemfile = "2"
+# Public trust roots, for the one outbound connection TallyOwl makes to
+# something it does not own: an alert webhook. Every other TLS hop verifies
+# against the installation's own authority and must not use these. The system
+# store comes first so that an operator with a private CA can add a root the
+# ordinary way, and the bundled set is the fallback for a container built from
+# scratch. See L142.
+rustls-native-certs = "0.8"
+webpki-roots = "1"
+x509-parser = "0.16"
+# `rcgen` states a certificate's validity as an `OffsetDateTime`. That is the one
+# boundary where a time is not milliseconds since the epoch; CONVENTIONS.md
+# holds everywhere else.
+time = { version = "0.3", default-features = false, features = ["std"] }
+
+# Consensus, per D15 and D27. openraft 0.9 was measured against election,
+# partition, rejoin, membership change, snapshot, large batches, and the
+# multi-group case that was TallyOwl's own risk: 600 instances cost 21 MiB.
+# The 0.10 line is at alpha with breaking changes, so this stays on 0.9.
+# MIT or Apache-2.0. See BENCHMARKS.md section 10.
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+# openraft needs an async runtime, and `tallyowl-cluster` is the only crate that
+# has one. Every other crate stays on threads.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# Serde CBOR, for the raft log, the snapshots, and the replicated commands.
+# Every other durable TallyOwl structure is CBOR, so this is one format rather
+# than a second one.
+ciborium = "0.2"
+
+# `statvfs`, so the store can refuse a write it cannot make durable.
+# FAILURE_MODES.md section 10 needs a free-space reading and the standard
+# library has none.
+libc = "0.2"
+
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

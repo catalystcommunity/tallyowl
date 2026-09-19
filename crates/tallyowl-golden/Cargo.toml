@@ -1,0 +1,17 @@
+[package]
+name = "tallyowl-golden"
+description = "The golden CBOR vectors, and the Rust half of the cross-language agreement they prove."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tallyowl-ingest-api.workspace = true
+tallyowl-collector-api.workspace = true
+tallyowl-control-api.workspace = true
+tallyowl-wire.workspace = true

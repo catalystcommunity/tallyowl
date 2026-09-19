@@ -1,0 +1,36 @@
+[package]
+name = "tallyowl-cluster"
+description = "Replicated storage: controller quorum, cells, tablets, and the multiplexed tablet consensus groups. See docs/PLAN.md Phase 7."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tallyowl-obs = { workspace = true }
+tallyowl-store = { workspace = true }
+tallyowl-rpc = { workspace = true }
+tallyowl-config = { workspace = true }
+tallyowl-cluster-api = { workspace = true }
+
+# The consensus algorithm. D15 says use an existing implementation and never
+# invent one; D27 measured openraft against every criterion D15 listed and
+# selected it. See docs/BENCHMARKS.md section 10.
+openraft = { workspace = true }
+# openraft needs an async runtime. It is confined to this crate: every other
+# TallyOwl crate stays on threads, and `groups.rs` is the one place that crosses
+# between the two.
+tokio = { workspace = true }
+serde = { workspace = true }
+# The raft log and the snapshots are stored as CBOR, which is what every other
+# durable TallyOwl structure uses.
+ciborium = { workspace = true }
+blake3 = { workspace = true }
+redb = { workspace = true }
+# A consensus log entry is compressed on disk. L095 and L096: the log is a
+# second full copy of every batch, and the delivery queue already compresses a
+# batch with the same codec for the same reason.
+zstd = { workspace = true }

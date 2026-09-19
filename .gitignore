@@ -1,7 +1,18 @@
 # Build output
 /target
 /prototypes/target
-/generated
+# A test that runs inside a crate directory leaves a target there as well.
+/crates/*/target
+
+# Release artifacts. `./tools.sh release package` writes the charts, the client
+# tarballs, and the saved service image here when Reactorcide names no
+# artifact directory of its own.
+/dist/
+
+# Generated CSIL output is committed. CI-CD.md section 5 compares a fresh
+# generation with the checked-in output, so the checked-in output must exist.
+# The comparison workspace is temporary and never tracked.
+/.gen-check/
 
 # Local development configuration. Never commit one person's workstation.
 # The committed example beside each of these holds no secret.
@@ -18,8 +29,19 @@
 # Go prototype binaries built in place
 /prototypes/delivery-bench/delivery-bench
 
+# Fetched dependencies. `.deps/csilgen` is a checkout of the pinned csilgen
+# revision, because npm cannot depend on a subdirectory of a Git repository.
+# `./tools.sh setup` puts it there. Never edit it.
+/.deps/
+
+# Node.js
+node_modules/
+/packages/*/dist/
+
 # Python tooling
 .venv/
+/tools/.venv/
+
 __pycache__/
 *.pyc
 

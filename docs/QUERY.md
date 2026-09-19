@@ -154,6 +154,25 @@ Each partial state has a bounded size.
 | `top_k_approx` | named sketch | approximate, with an error bound |
 | `rate`, `increase` | per-series values and reset marks | exact |
 
+**A storage node runs the coordinator's own aggregation.** The plan travels as
+an encoded query node and the partial states travel as bytes, so a sum is
+implemented once. A second implementation of a measure is a second answer to one
+question, and the two go out of step without anybody changing either one.
+
+**Which measures this release pushes down.** `count`, `sum`, `min`, `max`,
+`avg`, and `count_distinct`. A measure whose partial state is not one of those —
+`rate`, `increase`, `quantile`, and `histogram_merge` — is not pushed down: the
+storage node says it has no partial state, and the coordinator reads its own rows
+instead. A refusal to push down is never a wrong answer, only a slower one.
+
+**An aggregate over a filter is pushed down too.** The predicate travels
+inside the plan bytes the contract already carries opaquely, and each storage
+node evaluates it with the coordinator's own expression code — the same rule
+that keeps a sum implemented once keeps a predicate implemented once. The
+store contract itself is unchanged: it still takes bytes and returns bytes,
+which is what D25 protects. The owner approved lifting the earlier exclusion
+at the Phase 11 review; see L162.
+
 An exact measure that reaches its cap fails with a typed error. The error names
 the cap and names the approximate measure that the caller can select.
 
@@ -174,7 +193,14 @@ A caller supplies a timezone for interval truncation. TallyOwl uses
 Coordinated Universal Time when the caller supplies none.
 
 An interval is a fixed duration or a calendar interval. A calendar interval
-uses the supplied timezone.
+uses the supplied timezone. TallyOwl carries the IANA timezone database, so an
+hour, a day, a week, and a month are all calendar units: an hour bucket is a
+wall-clock hour, a day starts at local midnight, a week starts on Monday, and a
+month is the month it is.
+
+**A fixed duration never reads the timezone.** It is arithmetic on an instant,
+and 86,400,000 milliseconds is the same span everywhere. A caller who wants "the
+day the reader means" asks for a calendar day.
 
 A comparison window repeats the same tree over a second time range. The result
 carries both ranges. TallyOwl does not align two ranges of different lengths.
@@ -232,8 +258,9 @@ The coordinator evaluates:
 - the comparison window;
 - the domain operator finalization.
 
-The coordinator never pulls raw rows to compute an aggregate. It pulls raw rows
-only for a detail query, a trace assembly, or an exact lookup.
+The coordinator never pulls raw rows to compute an aggregate it can push down.
+It pulls raw rows only for a detail query, a trace assembly, an exact lookup, or
+an aggregate section 7 says it cannot push down.
 
 Fan-out has a configurable maximum. A query that needs more tablets than the
 maximum fails with a typed error.
@@ -253,6 +280,21 @@ estimated cost, and the budget can refuse it.
 
 A property is a dimension whatever its origin. A query can also filter on the
 origin itself. See D38.
+
+## 11.1 Which identity a question means
+
+`DATA_MODEL.md` section 3.5 keeps two identities and a query selects one:
+
+- **event time** asks who a row belonged to when it happened. A row before an
+  `identify` stays anonymous;
+- **latest known** asks who it belongs to now.
+
+Every domain operator carries an optional resolution. **Absent is latest
+known**, which is the answer somebody asking about an end user means and the one
+a conversion funnel needs: the steps before a sign-in were anonymous at the
+time, and the person who bought is the person who clicked.
+
+A cohort question wants event time, and asks for it.
 
 ## 12. Domain operators
 
@@ -282,7 +324,20 @@ a number of periods.
 - the cohort key is the first period in which the initial event occurred;
 - first-time and recurring semantics are explicit in the request.
 
-Result: a matrix of cohort by period, with counts and rates.
+**A period is a calendar period and never a fixed span.** A month is the month
+it is: 28, 29, 30, or 31 days. A day starts at local midnight in the supplied
+timezone, so a day across a daylight-saving boundary is 23 or 25 hours long. A
+week starts on Monday.
+
+**Data stays in UTC.** The timezone is read where a UTC comparison cannot answer
+the question, which is a calendar boundary and nothing else. A fixed interval is
+arithmetic on an instant and a timezone does not change it.
+
+**An unknown timezone is refused by name.** Answering it in UTC would answer a
+different question and say nothing about having done so. Use an IANA zone name.
+
+Result: a matrix of cohort by period, with counts and rates. The result names the
+period it used.
 
 ### 12.3 path
 
@@ -314,15 +369,76 @@ Result: the merged envelopes in event-time order, with bounded pagination.
 ### 12.6 attribution
 
 Input: a conversion definition, a model name, a lookback window, and a
-touchpoint filter.
+touch filter.
 
-Result: credited value for each touchpoint dimension.
+Result: credited value for each touch dimension.
 
-The operator shape is stable. The model weights are Phase 9 work. The result
-always names the model and its version, because a model change recomputes from
-immutable facts.
+The result always names the model, the model version, and the settings version.
+A model change recomputes from immutable facts. It does not change a touch
+and it does not change a conversion.
 
-### 12.7 metric operators
+**The request names a model. It never names a weight.** D40 makes a weight the
+operator's configuration for that project. A caller that could send weights
+could make one campaign outrank another by the way it asked.
+
+Rules:
+
+- a touch is a `campaign-touch` record, or a page view that carries
+  campaign parameters. A referrer alone is not a touch, because a browser
+  sends a referrer for a link inside the application;
+- the correlation is latest-known identity. A person who selects a campaign
+  before they sign in is the person who buys after they sign in;
+- a touch after the conversion never earns it;
+- a touch before the start of the window never earns it. The conversion is
+  counted and no campaign is credited with it. The result says how many
+  conversions this applies to and what they are worth;
+- a conversion that carries an order identifier is idempotent. One goal and one
+  order give one conversion, and the earliest record wins;
+- the credited values add up to the conversion value, exactly. The service
+  divides the value into whole units at a working scale and gives the units that
+  do not divide to the largest remainders;
+- the service refuses a window longer than the touch retention of that
+  project. The refusal names both values. See D40 and
+  [POLICY.md](POLICY.md) section 5.
+
+The models:
+
+| Model | Credit |
+| --- | --- |
+| `first-touch` | All of it to the first touch |
+| `last-touch` | All of it to the last touch |
+| `last-non-direct` | All of it to the last touch that is not direct. A journey that is direct from end to end falls back to the last touch |
+| `linear` | An equal share to each touch |
+| `position` | The configured share to the first and the last touch, and the rest divided equally between the touches between them |
+| `decay` | A share that halves for each configured half-life before the conversion |
+
+### 12.7 campaign summary
+
+Input: a conversion definition, a model name, a lookback window, a touch
+dimension, and a touch filter.
+
+Result: one row for each value of the dimension, with the touches, the end
+users, the sessions, the credited conversions, the **assists**, the credited
+value, the imported cost, and the return.
+
+An assist is a touch that was inside the window and took no credit under the
+model that was applied. It is what a single-touch model hides: under
+`first-touch`, every touch but the first assisted. An assist is counted from the
+weight rather than from the credited value, because a share that rounds away to
+nothing is not the same as no share at all.
+
+The credited value uses the same model, the same window, and the same settings
+as `attribution`. A summary row and an attribution row cannot disagree.
+
+Two rules:
+
+- a campaign that has an imported cost and no credited value is still a row.
+  Without it the report says that every campaign paid for itself;
+- an imported cost names a campaign and a period. It does not say how the spend
+  divided between the channels that the campaign reached. A report grouped by a
+  dimension other than the campaign therefore shows no cost and no return.
+
+### 12.8 metric operators
 
 - `rate` and `increase` handle a counter reset. A reset is a decrease in a
   cumulative series.
@@ -391,8 +507,8 @@ result.
 - Never change the meaning of an existing operator.
 - A reader that meets an unknown required operator refuses the query. It does
   not ignore the operator.
-- The head accepts the current and the previous algebra version once the
-  project reaches a release candidate. See D31.
+- The head accepts the current and the previous algebra version. This holds
+  from the first release candidate, 0.1.0-rc.1. See D31.
 
 ## 17. Adapters
 
@@ -466,6 +582,18 @@ operator, so the current version gives the same answer.
 
 Golden query tests replay saved trees across versions and require identical
 results. See D51.
+
+**Built, from Phase 8.** A saved analysis is stored in the control catalog under
+`control/analysis/<project-id>/<analysis-id>` and holds its request, its form,
+and the algebra version it was written for. One written for a **newer** version
+than the installation speaks is refused with both numbers rather than run with
+the parts this build understands, because half a query is a different query.
+
+A dashboard is `control/dashboard/<project-id>/<dashboard-id>`: an ordered list
+of panels in a twelve-column grid, each naming a saved analysis of the same
+project. It **references** analyses rather than embedding queries, so two panels
+cannot drift from the analysis they were made from. Removing an analysis a
+dashboard shows is refused, with the dashboards named.
 
 ## 21. Open items
 

@@ -17,8 +17,9 @@ options {
     package: "tallyowl-ingest",
     version: "v1alpha1",
     emit_packages: ["rust", "go", "typescript"],
-    package_name: "github.com/CatalystCommunity/tallyowl/clients/tallyowl-ingest",
-    package_version: "0.0.0",
+    package_name: "tallyowl-ingest-api",
+    go_module: "github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-ingest-api",
+    package_version: "0.2.0",
     decimal_mapping: "csil"
 }
 
@@ -85,11 +86,24 @@ GroupPayload = {
 }
 
 ;;; A conversion carries an exact decimal value. It never uses a float.
+;;;
+;;; `order_id` is what makes a conversion idempotent. A checkout that retried,
+;;; a webhook that arrived twice, and a person who refreshed the receipt page
+;;; all produce the same order. TallyOwl counts one conversion and one value for
+;;; one `goal` and `order_id` pair, and keeps the earliest. A conversion without
+;;; an order identifier is its own event and is never folded into another.
+;;;
+;;; `campaign` and `touch_event_id` are the optional links DATA_MODEL.md
+;;; section 3.6 describes. An application that already knows which touch earned
+;;; a conversion says so; attribution uses the link and does not have to find
+;;; the touch again.
 ConversionPayload = {
     goal: text .size (1..128),
     ? value: decimal,
     ? currency: text .size (3..3),
-    ? order_id: text .size (1..128)
+    ? order_id: text .size (1..128),
+    ? campaign: CampaignParameters,
+    ? touch_event_id: EventId
 }
 
 ;; ---------------------------------------------------------------------------
@@ -178,8 +192,22 @@ MetricPointPayload = {
 ;; Campaigns
 ;; ---------------------------------------------------------------------------
 
+;;; One touch. DATA_MODEL.md section 3.6 lists what it records, and every
+;;; field here is one of them. Two are absent on purpose:
+;;;
+;;;   - the **channel classification and its classifier version** are derived
+;;;     from `campaign` and `referrer_domain` rather than sent. A producer that
+;;;     could name its own channel could put paid traffic in the organic column;
+;;;   - **first and last touch position** is a property of the set of touches a
+;;;     conversion looked back over, not of one touch. It is decided when the
+;;;     question is asked.
+;;;
+;;; `referrer` is the whole referring address and `referrer_domain` is the host
+;;; from it. Both travel because a classifier reads the host and a person
+;;; reading one touch wants the address.
 CampaignTouchPayload = {
     campaign: CampaignParameters,
+    ? referrer: text .size (1..1024),
     ? referrer_domain: text .size (1..256),
     ? landing_route: text .size (1..512)
 }
@@ -196,29 +224,40 @@ CampaignCostPayload = {
 ;; ---------------------------------------------------------------------------
 ;; The telemetry item
 ;;
-;; One envelope, one typed payload. The `kind` field on the envelope selects
-;; the payload arm.
+;; One envelope, one typed payload. `envelope.kind` selects the payload field,
+;; and exactly one payload field is present.
+;;
+;; An earlier draft made the payload a choice of the fifteen record types. A
+;; choice dispatches on the runtime type of the value, and every one of those
+;; fifteen is one JavaScript object, so a TypeScript client encoded a page view,
+;; an error, and a span all as the first arm. The whole browser package was
+;; unable to send anything but an event.
+;;
+;; The envelope already carried the discriminant. This shape uses it, instead of
+;; asking an encoder to recover it from a shape that does not carry one. See
+;; docs/IMPLEMENTATION_LOG.md L017.
+;;
+;; `session-heartbeat` has no payload field, because a heartbeat carries no data
+;; beyond its envelope.
 ;; ---------------------------------------------------------------------------
-
-Payload = EventPayload
-        / PageViewPayload
-        / SessionStartPayload
-        / SessionEndPayload
-        / InteractionPayload
-        / FeatureExposurePayload
-        / IdentifyPayload
-        / AliasPayload
-        / GroupPayload
-        / ConversionPayload
-        / ErrorPayload
-        / SpanPayload
-        / MetricPointPayload
-        / CampaignTouchPayload
-        / CampaignCostPayload
 
 TelemetryItem = {
     envelope: Envelope,
-    payload: Payload
+    ? event: EventPayload,
+    ? page_view: PageViewPayload,
+    ? session_start: SessionStartPayload,
+    ? session_end: SessionEndPayload,
+    ? interaction: InteractionPayload,
+    ? feature_exposure: FeatureExposurePayload,
+    ? identify: IdentifyPayload,
+    ? alias: AliasPayload,
+    ? group: GroupPayload,
+    ? conversion: ConversionPayload,
+    ? error: ErrorPayload,
+    ? span: SpanPayload,
+    ? metric_point: MetricPointPayload,
+    ? campaign_touch: CampaignTouchPayload,
+    ? campaign_cost: CampaignCostPayload
 }
 
 ;; ---------------------------------------------------------------------------

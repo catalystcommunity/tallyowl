@@ -41,12 +41,17 @@ The following words are TallyOwl technical nouns:
 
 - end-user ID
 - app driver
+- assist
+- attribution model
 - batch
 - browser package
+- campaign
 - cell
+- channel
 - cold tier
 - collector
 - controller
+- conversion
 - durable copy
 - envelope
 - environment
@@ -72,6 +77,7 @@ The following words are TallyOwl technical nouns:
 - source
 - tablet
 - tombstone
+- touch
 - virtual shard
 - warm tier
 - watermark
@@ -98,6 +104,7 @@ Terms that this project does not use:
 | actor, actor ID | end user, end-user ID |
 | storage cell | cell |
 | tag, app tag, operator tag, attribute | property |
+| touchpoint | touch |
 | SDK, client library | app driver or browser package |
 
 Use "regional cell" where the region matters. Use "cell" everywhere else.
@@ -111,6 +118,19 @@ is not prose.
 An **end user** is a person or account that a customer's application
 identifies. An **operator** or a **member** is a person who signs in to
 TallyOwl. The two never mean the same thing.
+
+The campaign terms have one meaning each:
+
+| Term | Meaning |
+| --- | --- |
+| **campaign** | A named marketing effort. A published link carries the name, so TallyOwl can tell which effort brought a person |
+| **touch** | One arrival from outside: somebody followed a link, or opened the address directly. One record |
+| **channel** | The kind of traffic a touch was: paid search, organic search, social, paid social, email, display, affiliate, referral, direct, or other. TallyOwl derives it. A producer cannot send one |
+| **conversion** | The outcome a customer measures: a purchase, a sign-up. It carries an exact decimal value |
+| **attribution model** | A rule that decides which touches earned a conversion and how much of its value each one gets |
+| **assist** | A touch that was inside the window and took no credit under the model that was applied |
+
+Use **touch** and never "touchpoint". The two named one thing.
 
 Every message that reaches a person uses plain language. See
 [CONVENTIONS.md](CONVENTIONS.md) section 1.

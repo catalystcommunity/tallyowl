@@ -1053,6 +1053,77 @@ The locator runs are real and built at full cardinality. These are not:
   count for a project;
 - write amplification from user-grouped compaction.
 
+## 12c. D10: the ingest half, measured against a running installation
+
+> **Superseded by section 16**, which re-ran this on 2026-08-04 against a build
+> where both drivers pipeline and the append log is reclaimed. Two conclusions
+> below did not survive: the disk explanation in point 3, and the reading of the
+> sustained rate as the system's ceiling rather than the collector's. The
+> measurements themselves stand; the run is kept because it is what the
+> comparison is against.
+
+**Measured, 2026-08-03.** This closes the half of D10 that no prototype could
+answer: the earlier numbers came from component benchmarks, and this one comes
+from the whole product with the reference application's driver in front of it.
+
+**Hardware.** AMD Ryzen 7 5800X, 8 cores and 16 threads, 125 GiB of memory.
+**Filesystem.** ext4 on NVMe, `/dev/nvme1n1p2`. Not tmpfs; see section 2.
+**Build.** `--release`. **Profile.** `home`, all on one machine.
+**Harness.** `testbed/cmd/load`, seed 20260803, through the Go app driver.
+
+| Measure | Result |
+| --- | --- |
+| Sustained events each second | **36,525**, and 38,927 achieved at a 40,000 target with nothing refused |
+| One synchronous producer | **5,405** each second |
+| Bytes for each sealed row, in segments | **32.0** |
+| Bytes for each event, whole data directory | **223.3** |
+| Point lookup, p50 and p99 | 51.8 and 54.0 milliseconds over 387,177 events |
+| Aggregate, p50 and p99 | 51.0 and 53.6 milliseconds |
+| Behaviour at the ceiling | Refusal. 238 batches offered with the durable store gone, 238 refused, 0 accepted |
+| Recovery after `kill -9` under load | **462 milliseconds**, watermark and row count identical |
+| Candidate segments for a high-cardinality lookup | 1, over 2 sealed segments. **Not usefully measured**; see 12b |
+
+**The derived envelope held.** Section 12 said one app driver connection would
+reach roughly 26,000 to 38,000 events each second on this hardware, and eight
+concurrent producers reached 36,525. That is the first estimate in this file
+that a whole-system measurement confirmed rather than overturned.
+
+**32.0 bytes for each sealed row beats the 39.75 of section 12a**, and on harder
+rows: every event here carried a unique `request_id`, which is the
+high-cardinality column that dominates a segment.
+
+Three findings, and the first is the useful one:
+
+1. **One synchronous producer reaches 5,405 events each second, and that is
+   what most applications get.** A driver flush waits for its durable
+   acknowledgement, a batch seals at 256 items, and the round trip is about 47
+   milliseconds. Eight producers reach 36,525 because eight round trips
+   overlap. DELIVERY.md section 3 already permits pipelining and neither
+   maintained driver does it. **The ceiling in this table is a property of
+   concurrency, not of one connection.**
+
+2. **The burst multiplier could not be measured**, for the same reason. The
+   harness offers four times the sustained rate and the system took all of it
+   without refusing any, so the harness could not offer faster than the system
+   took. A real burst measurement needs a producer that does not block on its
+   own acknowledgements.
+
+3. **The whole data directory costs seven times what the segments do**, because
+   this run never reached a steady state: the append log is the durable record
+   until a segment replaces it and nothing reclaims a log range, and the catalog
+   had just taken 273,257 unique request IDs into the locator. An operator
+   sizing a device today uses 223 bytes for each event, not 32.
+
+   **This explanation was wrong.** Reclamation exists now and the whole-directory
+   figure barely moved, from 223 to 216. The cost is the tablet locator, which no
+   pass reclaims, and not the append log. See section 16.
+
+**A point lookup and an aggregate cost the same**, because the query executor
+materialises the rows in a range and then filters them. `lookup_correlated` uses
+the tablet locator and does not scan; the executor does not use it.
+
+Reproduce with the commands in `docs/ALPHA_REPORT.md` section 9.
+
 ## 13. WAL group commit: the answer to the fsync ceiling
 
 Section 3 measured the ceiling. STORAGE.md section 3.1 answers it with bounded
@@ -1167,3 +1238,917 @@ The catalog and segment benchmarks write to `~/.cache/tallyowl-bench` by
 default. `TALLYOWL_BENCH_DIR` selects another directory, and the catalog
 benchmark takes one as its second argument. That directory must be on real
 storage. Both refuse a memory-backed path. See section 2.
+
+## 16. Measured, 2026-08-04 — the ingest half, re-run
+
+`testbed/cmd/load` against the `home` profile on this build. Hardware: AMD
+Ryzen 7 5800X, 8 cores and 16 threads, 125 GiB of memory. Filesystem: ext4 on
+`/dev/nvme1n1p2`, an NVMe device. **Not tmpfs.** Build: `--release`. Seed
+20260803. The harness sends through the maintained Go app driver, and it now
+uses the driver's pipelined `submit` rather than `flush`.
+
+| Measure | 2026-08-04 | 2026-08-03 |
+| --- | --- | --- |
+| Sustained events each second, collector acceptance | **67,624** | 36,525 |
+| One synchronous producer | **19,534** | 5,405 |
+| Head commits to final storage | **17 batches each second**, about 3,600 events | Not measured |
+| Bytes for each event, whole data directory | **215.8** | 223.3 |
+| Bytes for each event, catalog alone | **157.2** | 111.8 |
+| Bytes for each event, append log alone | **25.8** | 88.8 |
+| Query p50, point lookup and aggregate | **103.0** and **102.0** ms | 51.8 and 51.0 |
+| Events sent, accepted, and committed | 543,994 / 543,994 / **543,994** | 387,177 |
+
+**Three findings, and two of them contradict what this document said.**
+
+**One producer moved 3.6 times.** L055 gave both drivers a pipelined `submit`
+and gave a connection the ability to serve correlated requests at the same time.
+This is the number D10 cared about, because an application with one telemetry
+worker gets it.
+
+**The published ingest ceiling has always been the collector's, not the
+system's.** A collector acknowledges when Corndogs is durable; the head drains
+afterwards, at a flat 60 milliseconds for each batch. 67,624 events each second
+holds while the queue has room. The steady-state rate is the head's 3,600, and
+the cost is one durable catalog transaction for each batch, which grows with the
+catalog. Section 12's derivation was for the collector path and remains correct
+for it.
+
+**Section 12a's disk explanation was wrong.** The gap between 32 bytes for a
+sealed row and 223 for the directory was attributed to a missing reclamation
+pass. The pass exists now, the append log fell from 88.8 bytes to 25.8, and the
+directory figure barely moved. The cost is the tablet locator: one entry for
+each value and segment pair, and every event in this run carries a unique
+`request_id`. That is the price of the exact high-cardinality lookup `AGENTS.md`
+requires, and no pass reclaims it.
+
+**A regression this run introduced and fixed.** The first re-run measured 37,135
+because the reclamation copied the whole append-log tail for each seal, which is
+quadratic in the backlog. Reclaiming only when the prefix is half the file makes
+it amortised. See L060.
+
+## 17. Measured, 2026-08-04 — Phase 6 on the same path
+
+> **Section 18 supersedes this one.** Six defects were found after it, four of
+> them in the foundation, and four of the runs below inherited a delivery queue
+> that outlived every reset (section 17.4). This section is kept because how
+> each number was wrong is worth as much as the number: read 17.4 and 17.6
+> before using anything here.
+
+`testbed/cmd/load` against the `home` profile on the Phase 6 build. Hardware:
+AMD Ryzen 7 5800X, 8 cores and 16 threads, 125 GiB of memory. Filesystem: ext4
+on `/dev/nvme1n1p2`, an NVMe device. **Not tmpfs.** Build: `--release`. Seed
+20260803.
+
+**Read section 17.4 before any number here.** The first four runs in this
+section inherited a Corndogs queue that outlived thirteen hours of resets, so
+their sustained figures and their disk figures describe a system that was being
+handed work nobody offered it. The final run started from a Corndogs this
+session started, and it is the one to use.
+
+**The sustained figure is still not one number.** Four runs of the same harness
+on the same machine produced 77,382, 49,776, 80,000, and **37,874** events each
+second. Section 16 said the published ceiling was the collector's rather than
+the system's; this shows what that costs in practice. The collector's rate is
+bounded by **how much room the Corndogs queue has**, and the queue's room is
+bounded by how far behind the head is. A run against a drained head reaches the
+top of the ramp; a run that starts behind reaches a third of it. The inherited
+queue was one more way to start behind.
+
+The clean run, from an empty `data/` and a Corndogs this session started:
+
+| Measure | Phase 6, clean | Phase 5 |
+| --- | --- | --- |
+| Sustained events each second, collector acceptance | **37,874** | 67,624 |
+| One synchronous producer | **19,566** | 19,534 |
+| Head commits to final storage | **17 batches each second**, unchanged | 17 |
+| Batches accepted, delivered | **2,624 and 2,624** | Not correlated |
+| Items accepted, events committed | **438,866 and 438,866**, a ratio of **1.0000** | 543,994 and 543,994 |
+| Query p50, point lookup and aggregate | **98.0** and **97.0** ms | 103.0 and 102.0 |
+| Query p99, point lookup and aggregate | **115.1** and **115.2** ms | Not separated |
+| Bytes for each accepted event, whole data directory | **243.9**, and see below | 215.8 |
+| Recovery after an abrupt kill under load | **314 milliseconds**, no loss and no refusal | 462 ms |
+| Burst multiplier absorbed without loss | **1.03**, still not the real answer | 0.71 |
+
+**Accepted equals committed exactly.** That is the number the first four runs
+could not produce, and it is the one that says the durable path neither loses
+nor duplicates.
+
+### 17.1 One synchronous producer did not move, and that is the finding
+
+19,518 to 19,578 across three runs, against 19,534 before Phase 6. **Phase 6
+added a series ledger and a merge pass to the same intake path and neither is
+measurable here.** The ledger charges only metric points, the merge returns
+immediately for a batch with one metric point or none, and this harness sends
+events. An installation that sends no metrics pays nothing for the feature.
+
+### 17.2 Query latency doubled again, and the range is wider than the middle
+
+211 milliseconds at p50 against 103. But the second run of the same query
+against the same store measured **42** milliseconds at p50 and **357** at p99.
+The p50 moves by five times depending on whether the head is committing, and the
+p99 moves the other way. Reporting one number for query latency has been wrong
+in both directions now.
+
+The cause is the one L045 named and section 3.5 of the alpha report measured:
+the executor materialises the rows in the range rather than using the locator.
+Everything else — the backlog, the catalog size, the page cache — moves the
+number around that.
+
+`LOAD_QUERIES_ONLY=1` now measures the query half on its own, so the next run can
+separate the two rather than reporting three causes as one.
+
+### 17.3 The disk cost is 243.9 bytes for each event, and the append log is most
+of it while the backlog is unsealed
+
+After 438,866 accepted events, fully drained, the data directory held
+107,019,010 bytes:
+
+| Part | Bytes | For each accepted event |
+| --- | --- | --- |
+| Catalog, mostly the tablet locator | 26,521,600 | 60.4 |
+| Segments | 7,435,580 | 16.9 |
+| Append log | 73,061,830 | **166.5** |
+| The whole data directory | 107,019,010 | **243.9** |
+
+**Only 196,946 of the 438,866 rows had been sealed into segments**, which is 45
+percent, and a sealed row costs **37.8 bytes**. The rest are still in the append
+log, which is why the log dominates. So 243.9 is a snapshot of a store that is
+behind on sealing rather than a steady state, and the honest reading is that
+**this project has never measured a steady state**: every run has stopped while
+the head was still catching up.
+
+That is the measurement to design next. A run that offers load and then waits
+for sealing and compaction to settle would give the number an operator actually
+needs, and no run so far has.
+
+### 17.4 The forwarder delivered more batches than intake accepted, and it was
+the measurement rather than the system
+
+The first Phase 6 run reported 7,925 batches accepted, 9,998 delivered, and 1.61
+rows in the store for each accepted event. **It was a defect in the development
+loop, not in TallyOwl.** The system behaved correctly throughout, and the
+finding is recorded here because the way it was found is worth keeping.
+
+`./tools.sh dev up` starts Corndogs as `go run main.go run` when there is no
+binary on the path. `go run` compiles to a temporary executable and runs it as a
+**child**, so `dev.py` recorded the wrapper's process identifier and `dev down`
+stopped the wrapper. **The server survived every stop.** Its open file was
+
+```
+data/corndogs/corndogs.bolt (deleted)
+```
+
+so every `rm -rf data/` unlinked the path while the process kept the inode. One
+Corndogs held the delivery queue for **13 hours and 15 minutes** across four
+supposed resets.
+
+So the queue handed each new collector tasks that an *earlier* collector had
+accepted. This collector never accepted them, which is why they were missing
+from its count; the forwarder delivered each exactly once, which is why no batch
+identifier repeated; and the freshly wiped head committed them as new, which is
+why nothing deduplicated. Every component was right.
+
+**How it was found**, because the method transfers:
+
+| Step | What it ruled out |
+| --- | --- |
+| Counted every distinct message in the collector log | Showed 3,979 delivery failures in one 35-second window, all "connection refused" — the deliberate kill |
+| Correlated batch identifiers between the acceptance and delivery lines | 9,998 distinct, each delivered exactly **once**. No redelivery, no duplicate commit. The head was exonerated here |
+| Ran a short ramp with no kill | 408 accepted, 408 delivered. Clean |
+| Ran a short ramp **with** a kill | 472 accepted, 472 delivered. Clean, so a kill alone does not do it |
+| Ran the full ramp | 3,292 accepted, all correlated, and the metric matched the log line count exactly. Clean |
+| Read `run/processes.json` against `ss -lptn` | The recorded Corndogs identifier was dead and a **different** process held the port |
+
+The gap never reproduced because every controlled cycle started from a Corndogs
+this session had started. The first run inherited one that nothing had stopped
+since morning.
+
+**Two things were changed as a result.** `dev up` now starts each service in its
+own process group and `dev down` stops the group, so the wrapper's child cannot
+outlive it; and `dev down` checks each service address afterwards and names any
+process still holding one. That check reports the exact identifier in one line.
+
+**The batch identifier was missing from the acceptance log line**, so the two
+halves of the path could not be correlated at all until it was added. It is
+there now, with the producer that enqueued the batch, because `Intake::submit`
+has two callers and only one of them logged.
+
+### 17.4a The settled store, and the page guard that was hiding it
+
+Everything above was measured on a store that was still catching up. The first
+measurement of a **settled** store — every batch delivered, every row sealed,
+nothing in flight — needed a defect fixed first, and then said something the
+project had not seen.
+
+`LOAD_QUERIES_ONLY=1` against the drained store answered `incomplete-result`
+every time. The reason, once the refusal was made to name it:
+
+> A stored page claims to expand far more than real data does. We did not
+> expand it.
+
+**The page was intact.** It had already passed its checksum; a decompression
+ratio limit rejected it. A page where every row holds the same release or
+service name compresses to almost nothing, so a high ratio is what telemetry
+looks like rather than what an attack looks like. The limit had already been
+raised once for the same reason, and 438,866 events passed the raised one too.
+It is removed; see L077.
+
+With every page readable, the settled store answers:
+
+| Measure | Settled store, 438,866 events |
+| --- | --- |
+| Point lookup, p50 and p99 | **1,063** and **1,775** ms |
+| Aggregate, p50 | **1,057** ms |
+| Stable across runs | Yes: 1,066 then 1,063 at p50 |
+
+**That is ten times the last published p50, and it is the honest number.** Every
+query figure this project has published was taken against a store that was
+either mid-backlog or about to refuse a page. A point lookup on a unique
+`request_id` should touch one segment through the locator and instead costs a
+second, which is exactly what L045 predicted and nothing had yet measured with
+the other variables removed.
+
+### 17.5 An abrupt kill under load lost nothing and refused nothing
+
+The head was killed with `SIGKILL` twelve seconds into a run. The producers kept
+going and **not one batch was refused**, because the collector's durability
+boundary is Corndogs and not the head: 610,423 offered, 610,423 accepted, zero
+refused. The head restarted and answered `Ready.` in **314 milliseconds**,
+opening a store that held eight more rows than the last reading before the kill.
+
+This is the durability claim working exactly as `docs/DELIVERY.md` section 3
+states it, and it is the second time it has been measured under real load.
+
+### 17.6 A damaged segment is now named
+
+A store that had accumulated several overlapping load runs reached a state where
+`segment.rows()` failed for at least one segment, and every query over its range
+then answered `incomplete-result` for the rest of the process's life. The
+refusal was correct and unactionable: nothing said **which** segment.
+
+`SegmentedStore::unreadable()` now reports the reasons, the head logs them at
+start-up, and a lookup that finds damage records the reason rather than only
+setting the flag. FAILURE_MODES.md procedure 6 requires the naming and it was
+missing.
+
+### 17.7 Reproducing
+
+```sh
+./tools.sh dev up
+cd testbed && go run ./cmd/load 127.0.0.1:5100 127.0.0.1:5110 \
+    "$(cat ../data/collector.key)" "$(cat ../data/operator.session)"
+
+# the query half alone, against a store that already holds data
+LOAD_QUERIES_ONLY=1 go run ./cmd/load 127.0.0.1:5100 127.0.0.1:5110 \
+    "$(cat ../data/collector.key)" "$(cat ../data/operator.session)"
+```
+
+**Start from an empty `data/`.** Two of the three runs above did not, and the
+spread between them is most of what section 17 reports.
+
+
+## 18. Measured, 2026-08-04 — after the six fixes
+
+Everything section 17 could not answer, answered. Same machine, same
+filesystem, same seed, `--release`, from an empty `data/` with a Corndogs this
+session started.
+
+**Six things changed between section 17 and this**, and four of them were
+defects rather than tuning: the decompression ratio limit (L077), the missing
+background segmenter (L078), the locator pushdown (L079), retention expiry
+(L080), the burst measurement pacing itself (L082), and the ramp aborting on
+scheduler jitter (L082).
+
+| Measure | Section 18 | Section 17 | Section 16 |
+| --- | --- | --- | --- |
+| Sustained events each second | **37,464** | 37,874 | 67,624 |
+| One synchronous producer | **19,547** | 19,566 | 19,534 |
+| **Burst offered, unpaced** | **39,714 each second, 0 refused** | Never offered | Never offered |
+| Burst multiplier | **1.06, and the harness is still the slower half** | 1.03, paced | 0.71, paced |
+| Point lookup, p50 and p99 | **41.0** and **42.0** ms | 1,063 and 1,775 | 103.0 |
+| Aggregate, p50 and p99 | **104.0** and **120.3** ms | 1,057 | 102.0 |
+| Items accepted against events committed | **440,522 and 440,522** | 438,866 and 438,866 | 543,994 |
+
+### 18.1 The point lookup is 26 times faster and the aggregate is not
+
+**1,063 milliseconds to 41.** The executor now asks the locator which segments
+can hold an exact value instead of materialising the whole range. See L079.
+
+The aggregate did not move and should not have: 104 milliseconds against 1,057
+is the same work done on a store that is no longer fighting a backlog, and an
+aggregate over a whole range genuinely reads the range.
+
+**The finding this project carried since its first benchmark is gone.** Every
+report until now said "a point lookup and an aggregate are the same latency,
+because the executor scans the range either way". They are now 41 against 104,
+and they were only ever the same for the wrong reason.
+
+### 18.2 The burst multiplier, finally offered rather than paced
+
+Eight unpaced producers offered **39,714 events each second and the system
+refused none of them**. Three reports called this "not measured" and one called
+it 0.71; all three measured a harness that was pacing itself. See L082.
+
+**The multiplier is 1.06 and the honest reading is that the harness is still the
+slower half**, but now the ceiling is known: 39,714 each second is what eight
+unpaced Go producers generate on this machine, and TallyOwl absorbed all of it
+with nothing refused. A number above the sustained rate with zero refusals is
+the answer D10 asked for, and the next step for a larger one is more producer
+machines rather than a different harness mode.
+
+### 18.3 The steady state, measured for the first time
+
+Every previous disk figure in this document described a store that had stopped
+sealing when the load stopped, because nothing sealed an idle head. With the
+background segmenter running, the store settled completely: **440,522 rows
+accepted, 440,522 committed, 440,522 sealed, and 8 bytes left in the append
+log.**
+
+| Part | Bytes | For each event |
+| --- | --- | --- |
+| Catalog, mostly the tablet locator | 60,076,032 | **136.4** |
+| Segments | 17,566,021 | **39.9** |
+| Append log | 8 | 0.0 |
+| The whole data directory | 77,642,061 | **176.3** |
+
+**A sealed row costs 39.9 bytes, against the 39.75 the capacity envelope
+predicted in section 12.** The segment format hits its design target almost
+exactly, and it has now been measured end to end on a settled store rather than
+derived.
+
+**The catalog is 3.4 times the size of the data it indexes**, and that is the
+number to work on. 48.6 of those bytes are the tablet locator, which holds one
+entry for each value and segment pair while every event in this run carries a
+unique `request_id`. Section 18.4 shows that user-grouped compaction takes the
+locator down by an order of magnitude. The rest is receipts and manifests, and
+receipts expire on the deduplication window.
+
+**Against 243.9 in section 17.3**, which was the same workload measured while 45
+percent of its rows were still in a 73 MiB append log. The difference is not a
+saving; it is the difference between a settled store and one that had stopped
+working.
+
+### 18.4 Candidate segments for a high-cardinality lookup
+
+`prototypes/locator-bench`, run at target scale. This is the row three reports
+have carried as "not usefully measured", and it was measurable the whole time in
+the prototype written for it.
+
+| Layout | Density | Bytes for each pair | Locator size | Candidate segments, 30 days |
+| --- | --- | --- | --- | --- |
+| Scattered | 3,000 | 1.031 | 28.81 GiB | **3,000** |
+| Sharded by user, 64 shards | 69.8 | 1.298 | 864.7 MiB | **70** |
+| Sharded by user, 1,024 shards | 30.0 | 1.679 | 480.4 MiB | **30** |
+| Hot 2 days scattered, cold 28 days user-grouped | — | — | 2.44 GiB | **228** |
+
+**The last row is the one to build.** Grouping rows by end user during
+compaction, which already rewrites cold segments, takes the locator from 28.81
+GiB to 2.44 and the candidates from 3,000 to 228, and it needs no change to
+ingest routing — so it does not trade away the trace locality that sharding by
+end user would.
+
+A 32-bit fingerprint would send every lookup to more than a million extra
+segments at 100 million values; 48-bit expects 18 collisions and 64-bit expects
+none. A collision costs one wasted segment open and never costs correctness,
+because the segment index verifies the full value.
+
+## 19. Measured, 2026-08-05 — what replication costs
+
+Phase 7 put a consensus group in front of the head's write path. This is what
+that costs, measured rather than argued.
+
+**Method.** The same machine, the same filesystem, the same harness, the same
+seed, `--release`, each run from an empty `data/` with a Corndogs the run
+started. **One voter**, because that is what one machine can hold honestly: the
+group elects, appends, fsyncs, commits, and applies exactly as a three-voter
+group does, and it does not pay a network round trip. **A three-voter number is
+therefore not in this section**, and nothing here should be read as one.
+
+**Hardware.** AMD Ryzen 7 5800X, 8 cores and 16 threads, 125 GiB of memory.
+**Filesystem.** ext4 on an NVMe device, `/dev/nvme1n1p2`. Not tmpfs.
+
+### 19.1 The collector accept path does not move, and should not
+
+| Measure | Not replicated | Replicated |
+| --- | --- | --- |
+| Sustained events each second | 45,485 | 49,248 |
+| One synchronous producer | 19,516 | 18,013 |
+| Burst offered, unpaced | 52,347, none refused | 58,436, none refused |
+| Point lookup, p50 and p99 | 41.0 and 42.0 ms | 41.0 and 42.0 ms |
+| Aggregate, p50 and p99 | 105.0 and 126.1 ms | 95.0 and 128.0 ms |
+| Items accepted against events committed | 479,230 and 479,230 | 488,464 and 488,464 |
+
+**Both runs reached the ceiling of the ramp without failing**, so neither
+sustained number is a saturation point and the difference between them is not a
+result. What the table shows is that replication is behind the collector and the
+collector does not feel it, which is the design: a collector acknowledges a
+durable Corndogs write and knows nothing about a tablet.
+
+**The point lookup is identical to a tenth of a millisecond.** A read is
+answered from the local replica and never asks consensus anything.
+
+### 19.2 The disk cost, which is the finding
+
+**The first measurement said sixteen times, and part of that was a defect.**
+L096 found it: serde encodes a `Vec<u8>` as a sequence, so a derived
+`Serialize` wrote one CBOR integer for each byte of every batch — and a batch
+travels inside two such fields, the batch inside the command and the command
+inside the log entry, so it was doubled twice. The fix is a byte string.
+
+Both runs below are the full load harness, the same seed, `--release`, from an
+empty `data/`, one voter, drained to completion before the directory was
+measured.
+
+| Measure | Not replicated | Replicated, before L096 | Replicated, after L096 |
+| --- | --- | --- | --- |
+| Events | 479,230 | 488,464 | 524,797 |
+| Batches | 2,785 | 2,817 | 2,963 |
+| Whole `data/head`, bytes for each event | **214.6** | 3,577.2 | **1,034.2** |
+| Of which the consensus log | none | 3,341.4 | **798.3** |
+| Of which the store | 214.6 | 235.8 | **235.9** |
+| Consensus log, bytes for each batch | none | 579,388 | **141,389** |
+
+**The log is 4.2 times smaller and the store did not move**, 235.8 against
+235.9, which is what says the change was in the encoding and nowhere near the
+data.
+
+**A replicated tablet still needs about five times the disk of an unreplicated
+one**, 1,034.2 against 214.6, and the excess is still the log rather than the
+data. What remains is not a defect:
+
+- **a raft entry is the whole batch.** It has to be, until a lagging replica can
+  catch up some other way;
+- **nothing purged it.** A raft log is purged behind a snapshot, TallyOwl's
+  tablet snapshot deliberately carries the marks and not the rows, and the copy
+  that would replace it — a sealed-segment transfer — is built as an interface
+  and is not driven by anything. The run never reached the 8,192-entry snapshot
+  threshold either, at 2,963 entries;
+- **redb amplifies.** `crates/tallyowl-cluster/tests/amp.rs` decomposes it: the
+  consensus directory is 2.7 times the commands it was given, from a
+  copy-on-write B-tree, a durable commit for every append and every apply, and a
+  file that grows and does not shrink.
+
+L095 holds the three possible answers and why none is taken yet. Compression is
+the next lever and it is not measured on real telemetry: on the deliberately
+uniform fixture in `amp.rs` one batch compresses 36.8 times at zstd level 1,
+**which is an upper bound and not a prediction**.
+
+### 19.3 The head commits about a fifth fewer batches each second
+
+The number that says what consensus costs the write path is the head's
+steady-state commit rate while a backlog drains. It is sampled from
+`tallyowl_commits_total{outcome="committed"}` over a 90-second window.
+
+**The first attempt did not resolve it**, and that is recorded rather than
+hidden: two baseline samples taken while the machine was also running the Rust
+test suite came back at 16.75 and 12.29 batches each second, which disagree with
+each other by more than either disagreed with the replicated run. The pair below
+was then taken on an otherwise idle machine, one run after the other, each from
+an empty `data/`.
+
+| Run | Batches each second | Events each second | Events for each batch |
+| --- | --- | --- | --- |
+| Not replicated | **16.19** | 2,403 | 148.4 |
+| Replicated, one voter | **13.30** | 1,478 | 111.1 |
+
+**About a fifth fewer batches each second: 13.30 against 16.19, which is 18
+percent.** A second replicated sample taken earlier on a quiet machine gave
+13.22, so the two replicated samples agree to within 0.6 percent, and the two
+uncontended baseline samples — 16.19 and 16.75 — agree to within 3.5 percent.
+The difference between the conditions is larger than the spread inside either
+one, which is what makes it a result rather than noise.
+
+**Read the batch rate and not the event rate.** Section 18.3 established that
+the head's cost is one durable catalog transaction for each batch, so batches
+each second is the measure that tracks the bottleneck. The two runs happened to
+carry different numbers of events in each batch — 148.4 against 111.1 — so the
+event rate moves further than the underlying cost does and would overstate what
+replication costs.
+
+**What the 18 percent is.** One extra durable append and fsync for each batch,
+in the consensus log, before the store's own durable commit. At one voter there
+is no network round trip in it at all, so **a three-voter number will be worse
+than this and is not measured here**.
+
+### 19.4 Reproducing
+
+```sh
+cargo build --release --workspace
+rm -rf data run && ./tools.sh dev up          # not replicated
+# or, replicated:
+rm -rf data run && TALLYOWL_REPLICATION__LISTEN=127.0.0.1:5299 ./tools.sh dev up
+
+cd testbed && go run ./cmd/load 127.0.0.1:5100 127.0.0.1:5110 \
+    "$(cat ../data/collector.key)" "$(cat ../data/operator.session)"
+
+# wait for the forwarder to drain, then
+du -sb ../data/head ../data/head/consensus
+```
+
+The head's steady-state commit rate is sampled from
+`tallyowl_commits_total{outcome="committed"}` and
+`tallyowl_events_committed_total` on `127.0.0.1:5111/metrics`, over a 60-second
+window while the backlog is draining.
+
+## 20. Measured, 2026-08-05 — what bounding and compressing the log gave
+
+Section 19 measured a replicated tablet at about five times the disk of an
+unreplicated one and named the cause: the consensus log was a second full copy
+of every batch, and **nothing reclaimed it**. L087 built the sealed-segment copy
+that lets a lagging replica catch up another way, which made a purge safe; L099
+then bounded the log and compressed each entry. This is what that gave.
+
+**Method.** The same machine, the same filesystem, the same harness, the same
+seed, `--release`, each run from an empty `data/` with a Corndogs the run
+started, and each drained to completion before the directory was measured. **One
+voter**, for the same reason section 19 gives: it is what one machine can hold
+honestly, and it pays no network round trip. **A three-voter number is therefore
+not in this section.**
+
+**Hardware.** AMD Ryzen 7 5800X, 8 cores and 16 threads, 125 GiB of memory.
+**Filesystem.** ext4 on an NVMe device. Not tmpfs.
+
+### 20.1 The consensus log, which is what changed
+
+| Measure | Replicated, section 19 | Replicated, now |
+| --- | --- | --- |
+| Events | 524,797 | 524,805 |
+| Batches | 2,963 | 2,964 |
+| Consensus log, bytes for each event | **798.3** | **36.6** |
+| Consensus log, bytes for each batch | **141,389** | **6,480** |
+| Whole `data/head`, bytes for each event | **1,034.2** | **259.2** |
+
+**The log is 21.8 times smaller, and the whole data directory is 4.0 times
+smaller.** A replicated tablet needed about five times the disk of an
+unreplicated one; it now needs **1.27 times**, 259.2 against the 204.1 the
+unreplicated run of the same harness measured on the same day.
+
+### 20.2 What this run measures, and what it does not
+
+**This is compression. The purge is not exercised by this run**, and saying so
+matters more than the number does.
+
+A group snapshots every 4,096 committed entries and keeps 512 after it, so a
+tablet's log is bounded at about 4,608 entries however long the installation
+runs. **This run reached 2,964 batches**, which is below the threshold, so no
+snapshot was taken and nothing was purged. Every byte of the 21.8 times above
+came from compressing the entry.
+
+The bound is what changes the *shape* of the problem, and it is proved by a test
+rather than by this run: `a_snapshot_seals_first_so_everything_it_covers_can_be_copied`
+asserts that a snapshot seals the store first, which is the sentence that makes
+a purge safe. Before it, a purge would have taken the only copy of entries a
+lagging replica still needed.
+
+**What that means for an operator.** A short-lived installation gets the
+compression. A long-lived one gets the compression *and* stops the log growing
+with its history, which is the larger of the two and is the one this measurement
+cannot show.
+
+### 20.3 The store did not change, and the two runs' sealing states differ
+
+| Measure, bytes for each event | Not replicated | Replicated |
+| --- | --- | --- |
+| Whole `data/head` | 204.1 | 259.2 |
+| Of which the consensus log | none | 36.6 |
+| Of which the catalog | 164.8 | 114.5 |
+| Of which the segments | 31.0 | 25.7 |
+| Of which the append log | 8.3 | 82.4 |
+
+**Do not read the last three rows as a difference replication caused.** The two
+runs were stopped at different points in their sealing cycle: the replicated one
+still held 82.4 bytes for each event in the append log against 8.3, and the
+catalog and segment figures move against it because a sealed row moves from one
+to the others. The sum of the three is 204.1 against 222.6, an 8 percent
+difference that is sealing state rather than a cost.
+
+**The row that is a result is the consensus log**, because it is the one that
+exists in one run and not the other, and 36.6 bytes for each event is what
+replication now costs in disk.
+
+### 20.4 The rest of the load run, unchanged
+
+Neither the collector accept path nor the point lookup moved, which is what
+section 19.1 established and what this confirms.
+
+| Measure | Not replicated | Replicated |
+| --- | --- | --- |
+| Sustained events each second | 58,899 | 58,397 |
+| One synchronous producer | 19,497 | 19,508 |
+| Burst offered, unpaced | 48,157, none refused | 56,754, none refused |
+| Point lookup, p50 and p99 | 40.99 and 42.01 ms | 40.99 and 42.03 ms |
+| Aggregate, p50 and p99 | 104.0 and 120.2 ms | 167.0 and 185.0 ms |
+| Items accepted against events committed | 519,182 and 519,182 | 524,805 and 524,805 |
+
+**Both runs reached the ceiling of the ramp without failing**, so neither
+sustained number is a saturation point and the difference between them is not a
+result. **The point lookup is identical to a hundredth of a millisecond**: a read
+is answered from the local replica and asks consensus nothing.
+
+**The aggregate is 60 percent slower and that is the sealing state again.** An
+aggregate reads its range, the replicated run held ten times as much of that
+range in the append log rather than in segments, and an append-log read is the
+least compact form the store has. Section 18.1 established the same thing from
+the other direction. It is not a replication cost and it should not be read as
+one.
+
+**Nothing was lost and nothing was duplicated in either run**: 519,182 accepted
+against 519,182 committed, and 524,805 against 524,805.
+
+## 21. Measured, 2026-08-08 — what a busy append log reclaims
+
+This is not a throughput number. It is the answer to one question: **does the
+append log shrink while the installation is taking writes?** Before this run the
+answer was no, and nothing measured it, because every earlier run measured a
+settled store.
+
+**Method.** `cargo run --release -p tallyowl-store --example wal_reclaim_measure
+-- <seconds> <callers> <linger-us>`. Callers append a 192-byte payload in a tight
+loop with no pause. One thread asks the log to reclaim everything it covers, in a
+loop, which is what a seal does. `min_reclaim_bytes` is zero, so the amortisation
+floor is out of the way and this measures the handover alone.
+
+**Hardware.** AMD Ryzen 7 5800X, 8 cores and 16 threads, 125 GiB of memory.
+**Filesystem.** ext4 on an NVMe device. Not tmpfs. The driver prints the
+filesystem it ran on.
+
+| Callers | Reclamations | Bytes taken | Still in the log |
+| --- | --- | --- | --- |
+| 6, before | **0** | 768,288 | 768,296 — **100 percent** |
+| 6, after | 415 | 449,440 | 432 — **0.1 percent** |
+| 12, after | 513 | 1,036,256 | 1,492 — **0.1 percent** |
+
+**Zero is the result, not a rounding.** A reclamation stepped aside whenever a
+group commit was in flight, and a committer keeps that role for as long as
+callers keep arriving. On a log that never goes quiet there was no moment at
+which a reclamation could run, so the file kept every byte the installation had
+ever written, for as long as it stayed busy. Section 20 measured the consensus
+log doing the same thing for a different reason and called it the whole question;
+this is the same failure one layer down.
+
+**What changed.** A reclamation says it is waiting instead of giving up, a
+committer stands down as soon as its own frame is durable, and a new caller waits
+rather than taking the role. See L132 and STORAGE.md section 5.
+
+**The throughput column is deliberately absent.** This driver runs a reclaimer in
+a tight loop with the amortisation floor removed, so it rewrites the whole file
+hundreds of times in a run and the append rate it reports is a property of the
+driver rather than of the store. A seal reclaims once for each segment it
+publishes. Section 18 holds the numbers that mean something.
+
+**What is still not measured.** How much of this reached the numbers in sections
+18 and 20. Both ran against a head committing about 17 batches each second, which
+leaves the log quiet often enough that reclamation got in, so the effect there is
+somewhere between none and small. A long soak at the collector's rate would say,
+and nothing has run one.
+
+## 22. Measured, 2026-08-09 — Phase 11: the replicated path end to end, and alert scale
+
+Hardware and filesystem: the same development machine as sections 18 to 21,
+ext4 on real storage, with every process of the soak topology — one Corndogs,
+three head voters, two collectors, and the driver — sharing one device. That
+sharing is the caveat on every number here: a real cell spreads the fsync load
+these numbers pay in one place.
+
+The topology is the cross-cluster soak from `./tools.sh soak up`: three voters
+under `local-quorum`, collectors delivering to the first head, and the
+proposal forward from L149 carrying writes from whichever voter takes them to
+whichever voter leads.
+
+| Measure | Measured | What it means |
+| --- | --- | --- |
+| Replicated end-to-end delivery | **about 7 batches each second** | Collector claim, forward to the leader, a quorum commit, and the task completed. Measured from the delivery counters over a minute while the queue was level. One machine's number; see the caveat above |
+| Sustained soak rate | **500 events each second, queue depth level at 2 to 4** | With the driver's linger at two seconds, so a paced producer fills real batches. The same rate under the default 100 ms linger produced about 80 small batches each second and the queue grew without bound: the ceiling is batches, not events |
+| Alert evaluation, one permit, under the soak's load | **0.6 evaluations each second** (80 in 132 s) | Each evaluation is a whole trend query, about 1.6 seconds under this load. A thousand one-minute rules ask for 16.7 each second, so one permit sustains about thirty-six such rules. L154 |
+| Ingest while alerting was saturated | **unchanged**: 500 events each second, delivery depth 4 | The L144 pool bounding what alerting takes, observed from the other side |
+| Snapshot of a settled 6,000-event store | **0.03 s** | `./tools.sh drill dr`, release build, verified run |
+| Restore, plus head start to ready | **0.2 s + 0.1 s** | The same drill. The store held everything acknowledged before the snapshot, the queue replayed 340 of the post-snapshot events, and the 1,280 lost are exactly procedure 3's documented loss |
+
+**A correction to sections 17 and 18.** The point-lookup latencies there were
+measured against a harness that sent `request_id` as a client property, and a
+field reference on that name reads the envelope's request column — which those
+events left empty. The 41 ms p50 is therefore the cost of a locator miss, not
+a hit. The harness now writes the envelope column (L153); the lookup numbers
+need re-measuring before anything cites them.
+
+**What the soak adds that a table cannot.** The numbers above are its first
+hours. The thing it exists for is days at this concurrency against L131, with
+a journal, an outage schedule, and per-window reconciliation; its report is
+`./tools.sh soak report`.
+
+**The overload run** (`./tools.sh drill overload`, home profile, same
+machine): four unpaced producers offered about 43,000 events each second for
+sixty seconds — 2.57 million events — and intake absorbed every one. Peak
+resident memory across the head and the collector: 284 MB. Disk for the run:
+115 MB. The backlog peaked at 9,409 batches on the queue's disk and drained
+at about fifteen batches each second once the offer stopped. No refusal was
+reachable: intake outruns four local producers, so the drill's verdict is the
+absence of silent loss rather than the presence of a refusal. L159.
+
+## 23. Measured, 2026-08-10 — the locator merge, against a soak-aged catalog
+
+**Filesystem: ext4 on NVMe, the same device the soak writes.** The subject is
+a byte-identical copy of head-3's catalog, taken while the soak's own outage
+schedule held that voter down, after 24 hours of three-voter load at 500
+events each second. The copy holds **1,455 stored locator runs, 86,264,831
+entries, 2.76 GB** across two day buckets. The probe is
+`measure_locator_against_an_aged_catalog` in `crates/tallyowl-store`; run it
+with `AGED_CATALOG_DIR` pointing at such a copy.
+
+| Measurement | Result |
+| --- | --- |
+| Decode every stored run | 5.3 s |
+| **Combine, sealing once per bucket** (`Locator::from_all_runs`, L168) | **14.2 s** |
+| Combine, one merge per run (what every build before L168 did) | **251 of 1,455 runs at the 180 s cap** |
+| The old combine, extrapolated to completion | quadratic in runs: roughly **1.7 to 2.8 hours** |
+| `Catalog::locator_bytes()`, the sampler's new read | 1.25 s, cold cache |
+
+The extrapolation matches what the soak observed directly: watcher threads
+and exact lookups wedged inside `Catalog::locator()` for hours on all three
+heads at once (L164, L165), because every caller re-ran the quadratic
+combine from scratch. After L168 a call costs one 14-second combine, the
+store caches the result per manifest generation so repeated lookups pay
+nothing, and the metrics sampler no longer combines at all.
+
+**What this does not measure.** The 14.2 s is still the price of a cache
+miss on a catalog this size, paid by the first lookup after a generation
+change; cold consolidation shrinks the entry count itself and its effect at
+this scale is not yet measured. The 1.25 s sampler read repeats every ten
+seconds; if that duty cycle matters on smaller machines, a slower cadence
+for this one gauge is the obvious lever.
+
+### 23.1 Measured, 2026-08-12 — the same catalog after consolidation, and the pass that had to be bounded first
+
+The "after" column, without waiting for wall-clock age: a lab copy of this
+section's exact subject — the aged-catalog before-image plus hard links of
+the sealed segments it names — consolidated in place by the
+`consolidation_probe` in `crates/tallyowl-store`, with the age threshold at
+12 h because the copy's rows were 19 to 43 hours old. The threshold decides
+when the pass is due, never what it does.
+
+**The first attempt took the machine down, and that is the most important
+measurement in this section.** The pass budget (`cold_group_batch_bytes`)
+broke only *between* bucket groups, and a soak-aged day is one group: the
+probe loaded it whole, reached **69.6 GB** of resident memory, and the
+kernel's OOM killer ended it — and, through the session unit that also held
+the running soak's processes, ended the 38.9-hour soak with it. The live
+heads would have run the same unbounded load themselves at hour 48. The
+budget now bounds what a pass takes from inside a group — smallest segments
+first, converging over maintenance intervals — and a regression test holds
+it. L171 carries the full account.
+
+Bounded, the probe converged in about twenty minutes of passes:
+
+| Measurement | Before (section 23) | After consolidation |
+| --- | --- | --- |
+| Stored locator runs | 1,455 | **2** (one per day bucket) |
+| Locator entries | 86,264,831 | 84,998,630 |
+| Segments | 999 | **168** at the 8 MiB target, 1.3 GB |
+| **Combine** (`Locator::from_all_runs`) | **14.2 s** | **1.55 s** |
+| Combine, one merge per run (pre-L168) | 251 of 1,455 runs at the 180 s cap | completes in 3.0 s |
+| `Catalog::locator_bytes()`, cold cache | 1.25 s (warm) | 7.1 s (cold) |
+
+**What the numbers say.** The combine — the cost that starved every
+observer in L165 — fell another ninefold, because two sealed runs merge in
+one pass of already-sorted data. The entry count barely moved, and honestly
+so: the soak's rows carry a unique `request_id` each, and 29.2 million
+unique values cannot merge; what consolidation removes is the repeated
+(value, segment) pairs of the reused session values, about 1.3 million. The
+grouped rewrite also compressed better than the scattered originals — the
+same rows in 1.3 GB instead of their share of 2.1 GB. The `locator_bytes`
+row is not a regression: it reads the stored run values end to end, 2.7 GB
+either way, and the before-number was taken against a warm page cache.
+
+**The trade this section leaves standing.** Section 24.1 measures the other
+side: fewer, larger segments make a cold exact hit cost the target-size
+read. `compaction.coldGroupTarget` and `compaction.coldGroupBatch` are
+configuration now, so an operator tunes the locator's win against the
+lookup's price. The owner set the defaults on 2026-08-12 from these two
+sections together: a 2 MiB target, so a cold hit costs a 2 MiB read instead
+of an 8 MiB one, and a 32 MiB pass budget, because a 64 MiB bite measured
+12 to 22 GB resident. Section 24.2 re-measures the lookups at the 2 MiB
+target.
+
+## 24. Measured, 2026-08-10 — the point lookups, re-measured as hits
+
+This is the re-measurement L153 and section 22 required before anyone cites
+the alpha point-lookup latencies again. Same machine and filesystem as
+sections 18 to 23, home profile, release binaries with the L168 locator
+program, from an empty `data/`. One caveat: the soak — three head voters at
+500 events each second — ran on the same device throughout.
+
+The harness now writes the correlation value through the envelope column
+(`WithRequest`, L153), and it reports
+`point_lookups_that_found_nothing`, so a lookup that finds no rows can never
+again pose as a fast one. Two probe controls select what a lookup targets:
+`LOAD_LOOKUP_OFFSET` moves the probe past the counters every ramp step
+reuses, and `LOAD_LOOKUP_WORKER` pins it to the one producer whose counter
+tail was written exactly once.
+
+The store under measurement: one full ramp, 286,658 events accepted, six
+sealed segments, settled — `LOAD_QUERIES_ONLY=1`, run after the head's
+commit log went quiet.
+
+| Lookup target | p50 | p99 | Found nothing |
+| --- | --- | --- | --- |
+| A value stored **once** (offset 25,000, worker 0) — the shape the measure is for | **93.0 ms** | **103.0 ms** | 0 of 50 |
+| A value stored in **about ten segments** (no offset; every ramp step reuses low counters) | 503 to 719 ms | 744 to 833 ms | 0 of 50 |
+| A value stored **nowhere** (offset 90,000) — what the alpha report actually timed | 55.0 ms | 59.0 ms | 50 of 50 |
+
+**What the numbers say.** The alpha report's 41 ms was a miss on an idle
+machine; the same miss costs about 55 ms beside a running soak. A real
+point lookup on one exact value costs about **93 ms** at p50 on this store.
+And the cost of a hit grows with the number of segments that hold the
+value — about ten segments cost about ten times what one does — which is
+the per-lookup restatement of what user-grouped cold consolidation exists
+to bound (L168): the locator names the candidate segments cheaply now, and
+the segment reads are what remain.
+
+The settled aggregate — a count by minute over the whole range — measured
+734 to 863 ms at p50 over the same store. The 85 ms the same query answered
+directly after the ramp is not a contradiction: most of the 287,000 rows
+were still in the delivery queue, so the early query counted a store that
+was mostly not there yet. A query taken before the store settles measures
+the backlog, which is exactly why `LOAD_QUERIES_ONLY` exists (section 16).
+
+### 24.1 Measured, 2026-08-11 — the same lookups, after cold consolidation
+
+This is the "after" column L169's revisit asked for: the same table, the
+same store, the same seed and harness, release binaries carrying the L169
+maintenance-log fix, beside the same running soak. The store's segments
+were about fifteen hours old, so `compaction.coldGroupAfter` was lowered
+from its 48 h default to 12 h for this run. The threshold decides only when
+the pass becomes due, never what it does. One pass ran at head start-up and
+logged `consolidated_sources: 4, consolidated_outputs: 2` — the first
+observed cold consolidation, and the first proof the L169 log line fires.
+Six segments became two: 9.3 MB and 0.9 MB, against the 8 MiB
+`cold_group_target_bytes` target.
+
+| Lookup target | Before, p50 (section 24) | After, p50 | After, p99 | Found nothing |
+| --- | --- | --- | --- | --- |
+| A value stored **once** | 93.0 ms | **976 to 985 ms** | 1,325 to 1,382 ms | 0 of 50 |
+| A value stored in **about ten segments** | 503 to 719 ms | **1,021 ms** | 1,452 ms | 0 of 50 |
+| A value stored **nowhere** | 55.0 ms | 66 ms | 79 ms | 50 of 50 |
+
+**What the numbers say.** Consolidation made the hit costs converge —
+upward. A miss costs what it did, so the fixed overhead did not move. Both
+hit shapes now cost about one second, which is the price of reading the one
+9.3 MB segment nearly every row now lives in. Section 24 measured a hit at
+roughly 90 ms per roughly-1 MB segment read; the per-hit cost is linear in
+the **bytes** of the segments a lookup reads, not only in how many segments
+there are. Consolidating to the 8 MiB target therefore traded the
+ten-segment lookup's 503 to 719 ms for about one second, and raised the
+stored-once lookup tenfold. The settled aggregate moved from 734 to 863 ms
+to about 1,151 ms; the miss and the aggregate drifted upward together,
+which is the ambient cost of the post-roll soak beside the measurement, and
+neither drift approaches the tenfold hit change.
+
+**What this means for L168's argument.** The locator shrink is real and
+section 23 measures it; the combine time and the entry count fall with the
+segment count. But per lookup, consolidation helps only if the read path
+can read less than a whole segment. Today it cannot: a hit decompresses
+every candidate segment end to end, so fewer, larger segments cost a hit
+more, not less. Until reads gain sub-segment granularity — or the target
+shrinks — `compaction.coldGroupAfter`'s default should be judged by both
+sides of this trade, not by the locator alone. L170 carries the open item.
+
+### 24.2 Measured, 2026-08-12 — the lookups at the 2 MiB target, and the store that refused to consolidate
+
+The owner set `compaction.coldGroupTarget` to 2 MiB and
+`compaction.coldGroupBatch` to 32 MiB on 2026-08-12 (L172). The re-measure
+ran against a fresh full ramp on the new defaults: 462,830 events, five
+segments of 1.7 to 7.8 MB holding 15.7 MB, settled, with nothing else on
+the machine — the soak retired the same morning, so this run is quieter
+than sections 24 and 24.1 were.
+
+**The store never consolidated, and that is the design working.** Its
+15.7 MB need eight segments at the 2 MiB target and it holds five, so the
+bucket is not due; the pass merges scatter and never splits an oversized
+segment. A smaller target therefore also makes consolidation rarer: an
+ordinarily-sealed store already sits at what its bytes need, and only a
+genuinely scattered cold bucket — the soak's day of one-megabyte segments —
+is ever rewritten.
+
+| Lookup target | p50 | p99 | Found nothing |
+| --- | --- | --- | --- |
+| A value stored **once** (offset 35,000, worker 0) | **215 ms** | 232 ms | 0 of 50 |
+| A value stored in **every segment** (no offset) | 1,207 ms | 1,270 ms | 0 of 50 |
+| A value stored **nowhere** (offset 45,000) | 63 to 70 ms | 74 ms | 50 of 50 |
+
+**One probe control aged out, and the empty count could not catch it.**
+Section 24's once-stored offset, 25,000, measured 1,199 ms here — because
+this ramp ran without a soak throttling it, its steps reused counters far
+past 25,000, and that value now sits in most segments. The
+`point_lookups_that_found_nothing` guard catches a probe that finds
+nothing; it cannot catch one that finds too much. The once-stored band on
+any store is a fact of its write history: here it is the prelude's
+counters above every ramp step's reach (about 30,000 to 40,000), verified
+by the misses starting at 45,000.
+
+**The model, across every measurement so far.** A hit costs the bytes of
+the segments it reads: 93 ms at about 1 MB (section 24), 215 ms at about
+2.5 MB (here), about 980 ms at 9.3 MB (section 24.1), and about 1.2 s
+reading all 15.7 MB (here) — 80 to 105 ms per megabyte throughout. The
+2 MiB target prices a cold once-stored hit at roughly 200 to 250 ms,
+which is the trade the owner chose; sub-segment read granularity remains
+the lever if that ever needs to fall further.

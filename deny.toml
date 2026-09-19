@@ -1,0 +1,91 @@
+# cargo-deny: licenses, duplicate versions, and where code may come from.
+#
+# The repository license is Apache-2.0, and AGENTS.md requires every dependency
+# to be compatible with it. This is the check that keeps that true after the
+# next dependency bump rather than at the next review.
+
+[graph]
+all-features = false
+
+[advisories]
+# `cargo audit` owns advisories, with its own ignore file beside it. Running
+# both would report every finding twice under two names.
+version = 2
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+
+# First-party crates whose Cargo.toml carries no `license` field. Each
+# repository is Apache-2.0; the field is missing from the metadata, not from
+# the project. The generated `tallyowl-*-api` crates are csilgen's output and
+# are never hand-edited, so the statement lives here rather than in a generated
+# file that the drift check would refuse.
+
+[[licenses.clarify]]
+crate = "corndogs"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "liblinkkeys"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "linkkeys-local-rp"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "linkkeys-rpc-client"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "tallyowl-ingest-api"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "tallyowl-collector-api"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "tallyowl-control-api"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "tallyowl-cluster-api"
+expression = "Apache-2.0"
+license-files = []
+
+[bans]
+# A duplicate version costs compile time and binary size and is usually an
+# accident, and a warning is the right volume for an accident.
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The catalystcommunity dependencies that come from git rather than a
+# registry, each pinned to a revision in Cargo.toml.
+allow-git = [
+    "https://github.com/catalystcommunity/corndogs",
+    "https://github.com/catalystcommunity/csilgen",
+    "https://github.com/catalystcommunity/linkkeys",
+]

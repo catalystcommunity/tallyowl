@@ -1,0 +1,47 @@
+import { type Cbor, decode, encode } from "./cbor.ts";
+export declare const VERSION = 1;
+export declare const TAG_ENCODED_CBOR = 24;
+export declare const CONTROL_SERVICE_ORD = 0;
+export declare const MAX_FRAME_DEFAULT: number;
+export declare const MAX_FRAME_LIMIT = 2147483647;
+export declare function validateMaxFrame(maxFrame: number): number;
+export declare const Status: {
+    readonly Ok: 0;
+    readonly MalformedEnvelope: 1;
+    readonly UnknownServiceOrOp: 2;
+    readonly Unauthenticated: 3;
+    readonly Forbidden: 4;
+    readonly VersionUnsupported: 5;
+    readonly Internal: 6;
+    readonly Unavailable: 7;
+    readonly DeadlineExceeded: 8;
+};
+export declare function statusName(code: number): string;
+export declare function statusIsOk(code: number): boolean;
+export type TransportErrorKind = "encode" | "decode" | "malformed" | "frame-too-large" | "invalid-max-frame" | "unsupported-version" | "status" | "carrier";
+export declare class TransportError extends Error {
+    readonly kind: TransportErrorKind;
+    readonly code?: number;
+    constructor(kind: TransportErrorKind, message: string, code?: number);
+    static malformed(message: string): TransportError;
+    static frameTooLarge(got: number, max: number): TransportError;
+    static invalidMaxFrame(got: number, limit: number): TransportError;
+    static unsupportedVersion(v: number): TransportError;
+    static status(code: number, message?: string): TransportError;
+    static carrier(message: string): TransportError;
+}
+export declare function tag24(payload: Uint8Array): Cbor;
+export declare function untag24(value: Cbor): Uint8Array;
+export { decode as decodeValue, encode as encodeValue };
+export declare function canonMap(entries: ReadonlyArray<readonly [string, Cbor]>): Cbor;
+export declare function intValue(n: number): Cbor;
+export declare function textValue(s: string): Cbor;
+export declare function mapGet(value: Cbor, key: string): Cbor | undefined;
+export declare function getUint(value: Cbor, key: string): number;
+export declare function getInt(value: Cbor, key: string): number;
+export declare function getText(value: Cbor, key: string): string;
+export declare function getTextOpt(value: Cbor, key: string): string | undefined;
+export declare function getUintOpt(value: Cbor, key: string): number | undefined;
+export declare function checkVersion(v: number): void;
+export declare function bytesToHex(b: Uint8Array): string;
+export declare function hexToBytes(hex: string): Uint8Array;

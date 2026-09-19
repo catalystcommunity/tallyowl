@@ -1,0 +1,26 @@
+# What the service image build must not carry.
+#
+# The build context is the whole repository, and everything below is either a
+# build output, a working directory, or somebody's local state. The first build
+# of this image sent 103.9 GB to the daemon, because a working tree holds a
+# root `target`, one `target` for each crate a test ran in, a `data` directory,
+# and a soak `run` directory. Every pattern here is `**`-prefixed where the
+# thing appears at more than one depth: a bare `target` matches the root one
+# and nothing else.
+
+**/target
+**/node_modules
+**/dist
+**/__pycache__
+**/.venv
+**/.pytest_cache
+
+data
+run
+.git
+.deps
+# ...except the transport the dashboard imports by relative path. It is a
+# checkout of a pinned release, not somebody's local state.
+!.deps/csilgen/transports/typescript
+tallyowl.local.yaml
+*.local.env

@@ -1,0 +1,14 @@
+name: tallyowl-package
+description: "Build the release artifacts: two Helm charts, five client packages, and the service image."
+job:
+  image: containers.catalystsquad.com/public/reactorcide/runnerbase:latest
+  command: "runnerlib run --job-command true"
+  # The image compiles the Rust workspace from source inside the build, which
+  # is the longest step here by a wide margin.
+  timeout: 5400
+  priority: 15
+  working_dir: /job
+environment:
+  REACTORCIDE_TALLYOWL_JOB: package
+run_local:
+  user: host

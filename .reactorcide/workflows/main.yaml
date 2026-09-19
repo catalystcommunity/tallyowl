@@ -1,0 +1,38 @@
+# The ID is this workflow's security identity, and a secret grant
+# matches on the workflow node name inside it. Keep both stable.
+id: tallyowl-main
+name: TallyOwl Main
+description: "The pull-request validation again on the merged result. The release workflow publishes."
+
+on:
+  events:
+    - push
+  branches:
+    - main
+
+jobs:
+  tallyowl-validate:
+    job_file: validate.yaml
+
+  tallyowl-gen-check:
+    job_file: gen-check.yaml
+
+  tallyowl-test-rust:
+    job_file: test-rust.yaml
+
+  tallyowl-test-go:
+    job_file: test-go.yaml
+
+  tallyowl-test-ts:
+    job_file: test-ts.yaml
+
+  tallyowl-helm-check:
+    job_file: helm-check.yaml
+
+  tallyowl-audit:
+    job_file: audit.yaml
+
+# Nothing is packaged here. A merge through a pull request starts the release
+# workflow, which runs these same gates and then cuts, builds, and publishes
+# the version the commits ask for. This workflow covers a direct push to main,
+# which no release follows.

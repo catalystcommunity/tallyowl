@@ -1,0 +1,32 @@
+name: tallyowl-release
+description: "Cut the next version from the conventional commits, build the artifacts, and publish them."
+job:
+  image: containers.catalystsquad.com/public/reactorcide/runnerbase:latest
+  command: "runnerlib run --job-command true"
+  # The image compiles the Rust workspace from source, which is the longest
+  # step here by a wide margin.
+  timeout: 7200
+  priority: 20
+  working_dir: /job
+  capabilities:
+    # A daemon to build the service image against. The push needs none: crane
+    # sends the archive the package step saved.
+    - docker
+  # A secret-bearing job must not run on a developer machine, where a secret
+  # reference would resolve against whatever is lying around.
+  disable_run_local: true
+environment:
+  REACTORCIDE_TALLYOWL_JOB: release
+  # D31, decided 2026-08-12. The image goes to the registry every other
+  # service here uses, on the grant that already exists. The charts go into the
+  # charts repository that serves them. The browser package is staged on npmjs
+  # and a maintainer approves it with 2FA, because npm is removing the
+  # 2FA-bypass token (L180). The Rust driver waits on the crates.io dependency
+  # clearance and this job publishes none of it.
+  REGISTRY: "containers.catalystsquad.com"
+  IMAGE_PATH: "public/catalystcommunity/tallyowl"
+  CHARTS_REPO: "catalystcommunity/charts"
+  REGISTRY_USER: "${secret:catalystcommunity/registry:user}"
+  REGISTRY_PASSWORD: "${secret:catalystcommunity/registry:password}"
+  GITHUB_PAT: "${secret:catalystcommunity/ci:githubpat}"
+  NPM_TOKEN: "${secret:catalystcommunity/ci:npmpublish}"

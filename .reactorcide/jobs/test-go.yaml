@@ -1,0 +1,12 @@
+name: tallyowl-test-go
+description: "Run the TallyOwl test-go job through the runnerlib lifecycle."
+job:
+  image: containers.catalystsquad.com/public/reactorcide/runnerbase:latest
+  command: "runnerlib run --job-command true"
+  timeout: 3600
+  priority: 10
+  working_dir: /job
+environment:
+  REACTORCIDE_TALLYOWL_JOB: test-go
+run_local:
+  user: host

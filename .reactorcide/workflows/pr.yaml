@@ -1,0 +1,39 @@
+# The ID is this workflow's security identity, and a secret grant
+# matches on the workflow node name inside it. Keep both stable.
+id: tallyowl-pr
+name: TallyOwl PR
+description: "Validate the contract, the formatting, and every test suite for a pull request."
+
+on:
+  events:
+    - pull_request_opened
+    - pull_request_updated
+  branches:
+    - main
+
+# The graph from docs/CI-CD.md section 4: independent validation runs in
+# parallel, and nothing here needs a publish or deploy secret.
+jobs:
+  tallyowl-conventional-commits:
+    job_file: conventional-commits.yaml
+
+  tallyowl-validate:
+    job_file: validate.yaml
+
+  tallyowl-gen-check:
+    job_file: gen-check.yaml
+
+  tallyowl-test-rust:
+    job_file: test-rust.yaml
+
+  tallyowl-test-go:
+    job_file: test-go.yaml
+
+  tallyowl-test-ts:
+    job_file: test-ts.yaml
+
+  tallyowl-helm-check:
+    job_file: helm-check.yaml
+
+  tallyowl-audit:
+    job_file: audit.yaml

@@ -1,0 +1,54 @@
+# The ID is this workflow's security identity, and a secret grant
+# matches on the workflow node name inside it. Keep both stable.
+id: tallyowl-release
+name: TallyOwl Release
+description: "On a merge to main: run every gate, then cut and publish the version the commits ask for."
+
+on:
+  events:
+    - pull_request_merged
+  branches:
+    - main
+
+# The release job is the one place where CI touches the source tree. The owner
+# decided that on 2026-08-12: a version that a person writes by hand into
+# nineteen files is a version that is wrong in one of them eventually. See
+# docs/CI-CD.md section 1 and L178.
+#
+# Every gate runs first. Nothing is tagged, and nothing is published, until
+# each one passes.
+jobs:
+  tallyowl-conventional-commits:
+    job_file: conventional-commits.yaml
+
+  tallyowl-validate:
+    job_file: validate.yaml
+
+  tallyowl-gen-check:
+    job_file: gen-check.yaml
+
+  tallyowl-test-rust:
+    job_file: test-rust.yaml
+
+  tallyowl-test-go:
+    job_file: test-go.yaml
+
+  tallyowl-test-ts:
+    job_file: test-ts.yaml
+
+  tallyowl-helm-check:
+    job_file: helm-check.yaml
+
+  tallyowl-audit:
+    job_file: audit.yaml
+
+  tallyowl-release:
+    job_file: release.yaml
+    depends_on:
+      - tallyowl-validate
+      - tallyowl-gen-check
+      - tallyowl-test-rust
+      - tallyowl-test-go
+      - tallyowl-test-ts
+      - tallyowl-helm-check
+      - tallyowl-audit

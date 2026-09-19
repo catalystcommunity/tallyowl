@@ -1,0 +1,12 @@
+name: tallyowl-conventional-commits
+description: "Refuse a pull request whose commits do not say what kind of change they are."
+job:
+  image: containers.catalystsquad.com/public/reactorcide/runnerbase:latest
+  command: "runnerlib run --job-command true"
+  timeout: 600
+  priority: 5
+  working_dir: /job
+environment:
+  REACTORCIDE_TALLYOWL_JOB: conventional-commits
+run_local:
+  user: host

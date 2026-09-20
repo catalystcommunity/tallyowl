@@ -6,6 +6,15 @@ job:
   timeout: 3600
   priority: 10
   working_dir: /job
+  # This one regenerates every client and compares, so it is the heaviest of
+  # the quick gates. The eight gates run at the same time, so the requests
+  # here stay small and the limits carry the work.
+  resources:
+    cpu:
+      request: "2"
+      limit: "4"
+    memory:
+      limit: "8Gi"
 environment:
   REACTORCIDE_TALLYOWL_JOB: validate
 run_local:

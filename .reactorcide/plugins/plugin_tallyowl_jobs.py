@@ -16,6 +16,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from pathlib import Path
 from typing import Callable, Dict, List
@@ -212,7 +213,14 @@ def release(code_dir: Path) -> None:
             f"{'there' if archive.is_file() else 'missing'}. Nothing is tagged."
         )
 
-    # 3. The image. crane pushes a saved archive with no daemon and no build.
+    # 3. Every credential is written, and every publisher is asked to prove it
+    #    works. This costs seconds and it is why the step exists: release
+    #    0.2.0 pushed the image, cut six tags, made the release page and
+    #    committed the charts, then stopped on `npm stage publish` — a
+    #    subcommand the pinned npm was three minors too old to have. None of
+    #    those four steps could be taken back. A publisher that cannot publish
+    #    must be found before the first one that cannot be undone, not after
+    #    the fourth.
     registry, image_path = values["REGISTRY"], values["IMAGE_PATH"]
     reference = f"{registry}/{image_path}:{version}"
     docker_config = Path.home() / ".docker"
@@ -224,17 +232,44 @@ def release(code_dir: Path) -> None:
     config.write_text(json.dumps({"auths": {registry: {"auth": auth}}}))
     config.chmod(0o600)
 
+    npmrc = Path.home() / ".npmrc"
+    npmrc.write_text(f"//registry.npmjs.org/:_authToken={values['NPM_TOKEN']}\n")
+    npmrc.chmod(0o600)
+
     crane = _program(code_dir, "crane")
+    gh = _program(code_dir, "gh")
+    npm = _program(code_dir, "npm")
+    node_environment = _node_environment(code_dir)
+    gh_environment = {"GH_TOKEN": values["GITHUB_PAT"]}
+
+    # Each probe names one thing that must be true: the binary is there, the
+    # credential is accepted, and the subcommand exists with the arguments this
+    # job gives it. `npm stage list` reads the staging endpoint, so it proves
+    # the subcommand and the token together — it is the probe that would have
+    # answered `Unknown command: "stage"` while nothing was public. `--dry-run`
+    # then does everything a staged publish does except upload.
+    _run([crane, "version"], cwd=code_dir)
+    _run([gh, "auth", "status"], cwd=code_dir, env=gh_environment)
+    _run([npm, "stage", "list"], cwd=code_dir, env=node_environment)
+    _refuse_unpublished_packages(npm, tarballs, code_dir, node_environment)
+    for tarball in tarballs:
+        _run(
+            [npm, "stage", "publish", str(tarball), "--access", "public", "--dry-run"],
+            cwd=code_dir,
+            env=node_environment,
+        )
+    log_stdout("Every publisher answered. Nothing is public yet.")
+
+    # 4. The image. crane pushes a saved archive with no daemon and no build.
     _run([crane, "push", str(archive), reference], cwd=code_dir)
     log_stdout(f"Pushed {reference}.")
 
-    # 4. Now, and only now, the version becomes public in git.
+    # 5. Now, and only now, the version becomes public in git.
     _tools(code_dir, "release", "tag")
 
-    # 5. Publish what the tag names. Each of these is repeatable if it fails:
-    #    the release page takes an upload, the charts repository takes another
-    #    commit, and a staged npm version can be staged again.
-    gh = _program(code_dir, "gh")
+    # 6. Publish what the tag names. Each of these is repeatable if it fails:
+    #    the release page takes an upload, and the charts repository takes
+    #    another commit.
     repository = os.environ.get("REACTORCIDE_REPO", "CatalystCommunity/tallyowl")
     assets = [str(asset) for asset in [*binaries, *checksums, *charts]]
     made = _run(
@@ -246,7 +281,7 @@ def release(code_dir: Path) -> None:
             *assets,
         ],
         cwd=code_dir,
-        env={"GH_TOKEN": values["GITHUB_PAT"]},
+        env=gh_environment,
         check=False,
     )
     if not made:
@@ -254,7 +289,7 @@ def release(code_dir: Path) -> None:
         _run(
             [gh, "release", "upload", tag, "--repo", repository, "--clobber", *assets],
             cwd=code_dir,
-            env={"GH_TOKEN": values["GITHUB_PAT"]},
+            env=gh_environment,
         )
 
     charts_repo = values["CHARTS_REPO"]
@@ -280,16 +315,15 @@ def release(code_dir: Path) -> None:
 
     # npm, staged. The token cannot publish outright and should not be able to:
     # a maintainer approves the staged version with 2FA on npmjs.com or with
-    # `npm stage approve`. See L180.
-    npmrc = Path.home() / ".npmrc"
-    npmrc.write_text(f"//registry.npmjs.org/:_authToken={values['NPM_TOKEN']}\n")
-    npmrc.chmod(0o600)
-    npm = _program(code_dir, "npm")
+    # `npm stage approve <stage-id>`. `npm stage list` says what is waiting.
+    #
+    # This needs npm 11.16 or newer, which is why `deps.NODE_VERSION` is pinned
+    # to a Node that carries one. See L180 and L190.
     for tarball in tarballs:
         _run(
             [npm, "stage", "publish", str(tarball), "--access", "public"],
             cwd=code_dir,
-            env=_node_environment(code_dir),
+            env=node_environment,
         )
     log_stdout(
         f"Staged {len(tarballs)} package(s) on npmjs. A maintainer approves each "
@@ -304,6 +338,65 @@ def release(code_dir: Path) -> None:
         "pages have proved themselves; `./tools.sh release crates-plan` says "
         "what turning it on would publish."
     )
+
+
+def _npm_package_name(tarball: Path) -> str:
+    """The package name inside a packed npm tarball.
+
+    `npm pack` writes the name into the file name with the scope flattened, so
+    `@catalystcommunity/tallyowl-browser` becomes
+    `catalystcommunity-tallyowl-browser-0.2.0.tgz` and the scope cannot be read
+    back out of it. The manifest inside carries the real name.
+    """
+    with tarfile.open(tarball, "r:gz") as archive:
+        member = archive.extractfile("package/package.json")
+        if member is None:
+            raise RuntimeError(f"{tarball.name} holds no package/package.json.")
+        return json.loads(member.read())["name"]
+
+
+def _refuse_unpublished_packages(
+    npm: str, tarballs: List[Path], code_dir: Path, environment: Dict[str, str]
+) -> None:
+    """Refuse a release that would stage a version of a package npm does not have.
+
+    **Staging cannot create a package.** `npm stage publish` defers the 2FA on
+    a new *version*; the staging endpoint answers `404 Package "<name>" not
+    found` when the package itself has never been published. The first publish
+    of each package is a person with `npm publish`, once.
+
+    Without this, that 404 arrives at the end of the release, after the image,
+    the tags, the release page and the charts are all public. With it, the
+    release refuses while nothing has been published and says what to run.
+    """
+    missing = []
+    for tarball in tarballs:
+        name = _npm_package_name(tarball)
+        found = _run(
+            [npm, "view", name, "version"],
+            cwd=code_dir,
+            env=environment,
+            check=False,
+        )
+        if not found:
+            missing.append((name, tarball))
+
+    if not missing:
+        return
+
+    lines = [
+        "These packages are not on npmjs, and `npm stage publish` cannot create",
+        "one — it defers the 2FA on a new version of a package that already",
+        "exists. A maintainer publishes each of these once, by hand, with 2FA:",
+        "",
+    ]
+    lines += [f"  npm publish {tarball} --access public" for _, tarball in missing]
+    lines += [
+        "",
+        "Every release after that stages through this job. Nothing is published",
+        "and nothing is tagged.",
+    ]
+    raise RuntimeError("\n".join(lines))
 
 
 def _node_environment(code_dir: Path) -> Dict[str, str]:

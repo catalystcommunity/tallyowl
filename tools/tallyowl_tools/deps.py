@@ -277,14 +277,29 @@ def fetch_duckdb(force: bool = False) -> Path:
 HELM_VERSION = "3.16.4"
 HELM_PATH = DEPENDENCY_DIR / "bin" / "helm"
 
-#: The Node version the client packages are packed and published with.
+#: The first npm with `npm stage publish`, to the minor.
 #:
-#: Node 26 carries npm 11, and npm 11 is the first with `npm stage publish`.
 #: npm deprecated the 2FA-bypass granular token in August 2026 and removes its
-#: publish capability in January 2027, so a release token can stage a publish
-#: and a person approves it with 2FA. A token that can publish outright is a
-#: token this project would rather not hold. See L180.
-NODE_VERSION = "26.1.0"
+#: publish capability in January 2027, so a release token stages a publish and
+#: a person approves it with 2FA. A token that can publish outright is a token
+#: this project would rather not hold. See L180.
+#:
+#: **The major is not enough.** `npm stage` arrived in 11.16.0, not in 11.0.
+#: Release 0.2.0 shipped `npm stage publish` against the npm 11.13.0 that Node
+#: 26.1.0 carries, and npm answered `Unknown command: "stage"` after four
+#: publishers had already made the release public. See L190.
+NPM_STAGE_MINIMUM = "11.16.0"
+
+#: The Node version the client packages are packed and published with, and the
+#: npm it carries. Both are written down because the second is the one that
+#: matters and neither is visible in the other. `tools/tests/test_deps.py`
+#: refuses a Node whose npm is older than `NPM_STAGE_MINIMUM`.
+#:
+#: Node 26.9.0 carries npm 11.19.1. Check
+#: https://nodejs.org/dist/index.json before changing this: the `npm` field of
+#: the release is the figure to copy here.
+NODE_VERSION = "26.9.0"
+NODE_NPM_VERSION = "11.19.1"
 NODE_DIR = DEPENDENCY_DIR / "node"
 
 #: The version calculator every repository here releases with. It reads the

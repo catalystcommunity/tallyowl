@@ -6,6 +6,14 @@ job:
   timeout: 3600
   priority: 10
   working_dir: /job
+  # About 1,200 tests from an empty target directory. The compile is the bulk
+  # of it and `cargo` scales with the cores it is given.
+  resources:
+    cpu:
+      request: "4"
+      limit: "8"
+    memory:
+      limit: "12Gi"
 environment:
   REACTORCIDE_TALLYOWL_JOB: test-rust
 run_local:

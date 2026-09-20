@@ -259,6 +259,19 @@ what main holds now. The steps after the tag — the release page, the charts
 repository, the staged package — are each repeatable, so a re-run finishes a
 release rather than starting a broken second one.
 
+**Every publisher is probed before the first one runs.** After the artifacts
+exist and before the image is pushed, the job asks each publisher to prove
+itself: `crane version`, `gh auth status`, `npm stage list`, and `npm stage
+publish --dry-run` on each tarball. `npm stage list` reads the staging
+endpoint, so it proves the subcommand and the token together; the dry run does
+everything a staged publish does except upload. A subcommand this npm does not
+have, a tarball that will be refused, or a credential that has expired is
+found while nothing is public.
+
+This step is not decoration. Release 0.2.0 pushed the image, cut six tags, made
+the release page and committed the charts, and then failed on the fifth
+publisher. None of those four steps could be taken back. See L190.
+
 ### Where each artifact goes
 
 D31, decided 2026-08-12:
@@ -280,10 +293,21 @@ more grant; nothing else is outstanding.
 bypasses 2FA in August 2026 and removes its publish capability in January 2027.
 A token that can publish outright is a token this project would rather not
 hold. The release job runs `npm stage publish`; the package waits in staging
-until a maintainer approves it with 2FA on npmjs.com or with `npm stage
-approve`. Trusted publishing with OIDC is npm's other path and it federates
-with GitHub Actions and GitLab, not with Reactorcide, so staging is the path
-that fits. See L180.
+until a maintainer approves it with 2FA on npmjs.com or with `npm stage approve
+<stage-id>`. `npm stage list` says what is waiting. Trusted publishing with
+OIDC is npm's other path, and `npm trust` federates with GitHub Actions, GitLab
+CI, and CircleCI, not with Reactorcide, so staging is the path that fits.
+See L180.
+
+**`npm stage` needs npm 11.16 or newer.** It is not in npm 11.0, and the major
+on its own does not settle it. `deps.NODE_VERSION` therefore pins a Node that
+carries a new enough npm, and `deps.NODE_NPM_VERSION` records which npm that
+is, so the two can be compared. `tools/tests/test_deps.py` compares them and
+fails the build when a Node bump carries npm backwards.
+
+Release 0.2.0 is why. It ran `npm stage publish` against the npm 11.13.0 that
+Node 26.1.0 carries, and npm answered `Unknown command: "stage"` after four
+publishers had already made the release public. See L190.
 
 **The Go tags.** A Go module in a subdirectory resolves through a tag that is
 the module directory and then the version. A release therefore creates one

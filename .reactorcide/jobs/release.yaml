@@ -12,6 +12,17 @@ job:
     # A daemon to build the service image against. The push needs none: crane
     # sends the archive the package step saved.
     - docker
+  # This job compiles the Rust workspace inside the image build, which is where
+  # almost all of its ten minutes go. `cargo` uses every core it is given. The
+  # request stays at 4 because that is the figure this cluster schedules
+  # reliably for linkkeys; the limit is what the compile actually takes when
+  # the node has it spare.
+  resources:
+    cpu:
+      request: "4"
+      limit: "8"
+    memory:
+      limit: "12Gi"
   # A secret-bearing job must not run on a developer machine, where a secret
   # reference would resolve against whatever is lying around.
   disable_run_local: true
@@ -19,10 +30,12 @@ environment:
   REACTORCIDE_TALLYOWL_JOB: release
   # D31, decided 2026-08-12. The image goes to the registry every other
   # service here uses, on the grant that already exists. The charts go into the
-  # charts repository that serves them. The browser package is staged on npmjs
-  # and a maintainer approves it with 2FA, because npm is removing the
-  # 2FA-bypass token (L180). The Rust driver waits on the crates.io dependency
-  # clearance and this job publishes none of it.
+  # charts repository that serves them. The browser package goes to npmjs with
+  # `npm publish`; whether it is live at once or waits for a person is decided
+  # by the token and the organisation's 2FA setting, because npm publishes no
+  # CLI for staging and offers OIDC to three CI providers, none of them this
+  # one (L190). The Rust driver waits on the crates.io dependency clearance and
+  # this job publishes none of it.
   REGISTRY: "containers.catalystsquad.com"
   IMAGE_PATH: "public/catalystcommunity/tallyowl"
   CHARTS_REPO: "catalystcommunity/charts"

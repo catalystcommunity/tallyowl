@@ -131,9 +131,10 @@ Debian 12 has. A build for another platform is not in this release.
 
 **The browser package arrives staged.** npm is removing the token that
 bypasses two-factor authentication, so the release pipeline stages the publish
-and a maintainer approves it. The package becomes installable when that
-approval happens, which is minutes after the release rather than at the same
-moment.
+and a maintainer approves it. `@catalystcommunity/tallyowl-browser` becomes
+installable when that approval happens, which is minutes after the release
+rather than at the same moment. Everything else — the image, the charts, the
+binaries, and the Go modules — is available as soon as the tag is.
 
 ### The compatibility window
 

@@ -6,6 +6,12 @@ job:
   timeout: 3600
   priority: 10
   working_dir: /job
+  resources:
+    cpu:
+      request: "1"
+      limit: "4"
+    memory:
+      limit: "6Gi"
 environment:
   REACTORCIDE_TALLYOWL_JOB: test-ts
 run_local:

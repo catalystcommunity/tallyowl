@@ -5887,6 +5887,11 @@ arrives in npm 11 and the previous pin carried npm 10. The release notes tell
 an installer that the package appears minutes after the release rather than
 with it.
 
+> **Corrected by L190.** "`npm stage` arrives in npm 11" is wrong to the minor:
+> it arrives in **11.16.0**, and Node 26.1.0 carries npm 11.13.0. This pin
+> could not stage anything, and the first release found that out after it had
+> published four things it could not take back. The pin is now Node 26.9.0.
+
 **Cost to change:** cheap; one command in the release job.
 **Revisit:** **yes**, if npm ever federates with Reactorcide. Trusted
 publishing with a stage-only grant would then be better than a stored token.
@@ -6303,6 +6308,106 @@ in: artifacts first, tags last. The failure happened five steps before the
 first tag, so there is no `0.2.0` tag, no image, no chart, no release, and no
 staged package to take back. A release that fails early is a release that costs
 nothing.
+
+**Cost to change:** cheap.
+**Revisit:** no.
+
+
+## L190. 0.2.0 is published, and four things that cannot be taken back went out before a three-minor version gap stopped the fifth
+
+**Phase:** first release
+**Decision:** the release job ran on 2026-09-20 and did almost all of it. The
+image is at `containers.catalystsquad.com/public/catalystcommunity/tallyowl:0.2.0`.
+Six tags are pushed. The release page carries the binary, the checksums, and
+both charts. `catalystcommunity/charts` holds `tallyowl-0.2.0.tgz` and
+`tallyowl-collector-0.2.0.tgz`. Then:
+
+```
+Running: npm stage publish .../catalystcommunity-tallyowl-browser-0.2.0.tgz --access public
+Unknown command: "stage"
+```
+
+**The command was right and the npm was three minors too old.** `npm stage`
+exists, with exactly the semantics L180 wanted: `publish`, `list`, `view`,
+`approve`, `reject`, `download`, described by npm as "deferring
+proof-of-presence (2FA) to a later point in time". It arrived in **npm
+11.16.0**. The pin here said Node 26.1.0, which carries npm **11.13.0**, and
+the comment beside it said "npm 11 is the first with `npm stage publish`" —
+right about the major, wrong about the minor, and nothing ever compared the
+two figures.
+
+| | |
+| --- | --- |
+| First npm with `npm stage` | 11.16.0 |
+| npm that Node 26.1.0 carries | 11.13.0 |
+| npm that Node 26.9.0 carries | 11.19.1 |
+
+The pin is now Node 26.9.0, and `deps.NODE_NPM_VERSION` records the npm that
+Node carries beside `deps.NPM_STAGE_MINIMUM`, which is the figure that matters.
+`tools/tests/test_deps.py` compares them, so a Node bump that carries npm
+backwards fails a gate rather than a release. That is the arithmetic test L172
+asks for: the version comparison is decidable offline and needed no release to
+find out.
+
+**The order was right and it was not enough.** L184 put the tag last because a
+tag cannot be taken back. That protected the tag from a failed *build*. It did
+not protect anything from a failed *publisher*, because the publishers run
+after the tag by design: a release page needs a tag to hang on. So a publisher
+that could never work took the whole release with it, after four irreversible
+steps.
+
+**Every publisher is now probed before the first one runs.** Between packaging
+and the image push: `crane version`, `gh auth status`, `npm stage list`, and
+`npm stage publish --dry-run` on each tarball. `npm stage list` reads the
+`/-/stage` endpoint, so one command proves the subcommand exists and the token
+authenticates. The dry run then does everything a staged publish does except
+upload — it reports "Staging to … (dry-run)" and "(staged)" — so a refused
+tarball is found while nothing is public. Both were run by hand against the
+real 0.2.0 tarball before this was written.
+
+**What the first claim here got wrong.** The first reading of this failure
+recorded that `npm stage publish` was not a command at all, on the evidence of
+`npm help` in 11.13.0 and a changelog that names staged publishing without
+naming a CLI. That was one version of npm away from the answer. The lesson is
+narrower and more useful than "the feature does not exist": **a missing
+subcommand is a version question, and the version to check is the tool's, not
+the language runtime's.** Node 26 was new. Its npm was not new enough.
+
+**0.2.0 stays 0.2.0**, and it is now complete: the image, six tags, the release
+page, both charts, and `@catalystcommunity/tallyowl-browser@0.2.0` on npmjs,
+byte-identical to the tarball this repository packs (`220d1c4d…`).
+
+**Staging cannot create a package.** Staging 0.2.0 by hand was refused:
+
+```
+POST /-/stage/package/@catalystcommunity%2ftallyowl-browser
+404 — Package "@catalystcommunity/tallyowl-browser" not found
+```
+
+`npm stage publish` defers the 2FA on a new *version*. The package itself must
+already exist, so the **first** publish of each npm package is a person running
+`npm publish` once, with 2FA, and every release after that stages. The owner
+published 0.2.0 that way.
+
+The release job now refuses this rather than discovering it at the end: the
+preflight reads each packed tarball's own `package/package.json` for the real
+scoped name — `npm pack` flattens the scope into the file name and it cannot be
+read back — asks npm for each, and names the `npm publish` command a maintainer
+must run. Nothing is published and nothing is tagged when it refuses.
+
+**A negative answer from the public registry is not proof.** Checking
+`https://registry.npmjs.org/@scope%2fname` before the publish cached a 404 on
+npm's public CDN, and afterwards the anonymous check kept serving that cached
+404 while the package was there and public. An authenticated read bypasses the
+cache and answered correctly. Verify a publish with the token, not anonymously,
+and do not probe the public URL beforehand.
+
+**Resource requests, while the job was open.** Nothing here asked for CPU or
+memory, so every job took the cluster default. The three that compile —
+`test-rust`, `package`, `release` — now request 4 cores and limit at 8, with
+12 GiB; `validate` takes 2 and 4; the quick gates take 1 and 4. The requests
+stay small on purpose: eight gates run at the same time, and a request the
+cluster cannot satisfy is a job that does not start at all.
 
 **Cost to change:** cheap.
 **Revisit:** no.

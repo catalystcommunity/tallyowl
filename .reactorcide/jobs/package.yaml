@@ -8,6 +8,12 @@ job:
   timeout: 5400
   priority: 15
   working_dir: /job
+  resources:
+    cpu:
+      request: "4"
+      limit: "8"
+    memory:
+      limit: "12Gi"
 environment:
   REACTORCIDE_TALLYOWL_JOB: package
 run_local:

@@ -990,6 +990,15 @@ def package(root: Path = REPOSITORY_ROOT) -> int:
     for chart in CHARTS:
         run([helm, "package", str(root / chart), "--destination", str(charts)], cwd=root)
 
+    # The CSIL transport, before anything TypeScript runs. Four packages reach
+    # it at `.deps/csilgen/transports/typescript/src` by relative path, the
+    # compiler puts it under each package's `dist`, and the image build copies
+    # the same directory out of the build context. The test job fetches it and
+    # this one did not, so the first real release stopped here: `tsc` could not
+    # find the module and `npm run build` failed on a machine where every test
+    # had passed.
+    deps.fetch_csilgen()
+
     # `npm pack` produces the same tarball `npm publish` would send, so the
     # publish job ships an artifact somebody could have inspected. It packs
     # what is on disk and builds nothing, so the build happens first.

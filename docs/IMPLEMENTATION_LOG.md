@@ -6262,3 +6262,47 @@ in the protobuf reader. Both are now written the way the newer compiler asks.
 
 **Cost to change:** cheap.
 **Revisit:** no.
+
+## L189. The first real release stopped at the one input the test job supplies and the package job did not
+
+**Phase:** first release
+**Decision:** the merge of pull request 1 started `TallyOwl Release` on
+2026-09-20. All eight gates passed. `release stamp` computed **0.2.0** — one
+`feat:` commit, one bump — rebased onto main, wrote all nineteen version sites,
+regenerated the clients, and repacked `Cargo.lock`. Both charts packed. Then
+`npm run build` in `packages/browser` failed:
+
+```
+test/transport.ts(7,15): error TS2307: Cannot find module
+'../../../.deps/csilgen/transports/typescript/src/index.ts'
+```
+
+**The transport is an input to packaging, not only to testing.** Four
+TypeScript packages reach `.deps/csilgen/transports/typescript/src` by relative
+path, `tsc` copies it under each package's `dist` because `rootDir` is the
+repository root, and the image build copies the same directory out of the build
+context — `.dockerignore` excludes `.deps` and names that one path back in.
+`packages.typescript_test` and `packages.typescript_install` both call
+`deps.fetch_csilgen()` first. `release.package` did not. So the directory
+existed on every machine that had run the tests, and on no machine that had
+not.
+
+**A green TypeScript suite is the one signal that cannot catch this**, because
+the suite is what leaves the transport on disk. Running every job in the runner
+image (L185) did not catch it either: the jobs ran in one workspace, in order,
+and `test-ts` went first.
+
+**The fix is one call and one test.** `release.package` now fetches the
+transport before anything TypeScript runs. `tools/tests/test_release_package.py`
+records the order of the calls and refuses a build that starts before the
+transport is asked for. The test fails against the code that shipped, which is
+the only proof that it tests anything.
+
+**Nothing was published.** The order this job runs in is the one L184 put it
+in: artifacts first, tags last. The failure happened five steps before the
+first tag, so there is no `0.2.0` tag, no image, no chart, no release, and no
+staged package to take back. A release that fails early is a release that costs
+nothing.
+
+**Cost to change:** cheap.
+**Revisit:** no.

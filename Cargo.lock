@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-cluster"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "ciborium",
@@ -2510,11 +2510,11 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-cluster-api"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "tallyowl-collector"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "corndogs",
  "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=d693a94d5b722ab4da858a50469412e6ffcbe080)",
@@ -2536,11 +2536,11 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-collector-api"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "tallyowl-compat"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "getrandom 0.3.4",
  "tallyowl-collector-api",
@@ -2550,18 +2550,18 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-config"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde_yaml",
 ]
 
 [[package]]
 name = "tallyowl-control-api"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "tallyowl-driver-rust"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "getrandom 0.3.4",
  "tallyowl-collector-api",
@@ -2574,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-export"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-golden"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tallyowl-collector-api",
  "tallyowl-control-api",
@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-head"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -2626,11 +2626,11 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-ingest-api"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "tallyowl-obs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-queue"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "corndogs",
  "tallyowl-obs",
@@ -2646,7 +2646,7 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-rpc"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=d693a94d5b722ab4da858a50469412e6ffcbe080)",
  "rcgen",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "blake3",
@@ -2676,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "tallyowl-wire"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tallyowl-collector-api",
  "tallyowl-control-api",

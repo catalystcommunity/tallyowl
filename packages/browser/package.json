@@ -1,6 +1,6 @@
 {
   "name": "@catalystcommunity/tallyowl-browser",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The TallyOwl browser package. It rides the host application's existing connection and never opens one of its own.",
   "license": "Apache-2.0",
   "type": "module",

@@ -26,7 +26,7 @@ members = [
 exclude = ["prototypes"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/CatalystCommunity/tallyowl"
@@ -48,23 +48,23 @@ all = { level = "deny", priority = -1 }
 # checkout uses; a version is what a registry resolves, and `cargo publish`
 # refuses a dependency that has no version. `./tools.sh version set` writes
 # every one of these, so they cannot fall behind the workspace version.
-tallyowl-obs = { path = "crates/tallyowl-obs", version = "0.2.0" }
-tallyowl-config = { path = "crates/tallyowl-config", version = "0.2.0" }
-tallyowl-rpc = { path = "crates/tallyowl-rpc", version = "0.2.0" }
-tallyowl-wire = { path = "crates/tallyowl-wire", version = "0.2.0" }
-tallyowl-golden = { path = "crates/tallyowl-golden", version = "0.2.0" }
-tallyowl-export = { path = "crates/tallyowl-export", version = "0.2.0" }
-tallyowl-store = { path = "crates/tallyowl-store", version = "0.2.0" }
-tallyowl-compat = { path = "crates/tallyowl-compat", version = "0.2.0" }
-tallyowl-queue = { path = "crates/tallyowl-queue", version = "0.2.0" }
-tallyowl-cluster = { path = "crates/tallyowl-cluster", version = "0.2.0" }
-tallyowl-driver-rust = { path = "crates/tallyowl-driver-rust", version = "0.2.0" }
+tallyowl-obs = { path = "crates/tallyowl-obs", version = "0.2.1" }
+tallyowl-config = { path = "crates/tallyowl-config", version = "0.2.1" }
+tallyowl-rpc = { path = "crates/tallyowl-rpc", version = "0.2.1" }
+tallyowl-wire = { path = "crates/tallyowl-wire", version = "0.2.1" }
+tallyowl-golden = { path = "crates/tallyowl-golden", version = "0.2.1" }
+tallyowl-export = { path = "crates/tallyowl-export", version = "0.2.1" }
+tallyowl-store = { path = "crates/tallyowl-store", version = "0.2.1" }
+tallyowl-compat = { path = "crates/tallyowl-compat", version = "0.2.1" }
+tallyowl-queue = { path = "crates/tallyowl-queue", version = "0.2.1" }
+tallyowl-cluster = { path = "crates/tallyowl-cluster", version = "0.2.1" }
+tallyowl-driver-rust = { path = "crates/tallyowl-driver-rust", version = "0.2.1" }
 
 # Generated from csil/. Never hand-edited. See csil/README.md.
-tallyowl-ingest-api = { path = "generated/rust/tallyowl-ingest-api", version = "0.2.0" }
-tallyowl-collector-api = { path = "generated/rust/tallyowl-collector-api", version = "0.2.0" }
-tallyowl-control-api = { path = "generated/rust/tallyowl-control-api", version = "0.2.0" }
-tallyowl-cluster-api = { path = "generated/rust/tallyowl-cluster-api", version = "0.2.0" }
+tallyowl-ingest-api = { path = "generated/rust/tallyowl-ingest-api", version = "0.2.1" }
+tallyowl-collector-api = { path = "generated/rust/tallyowl-collector-api", version = "0.2.1" }
+tallyowl-control-api = { path = "generated/rust/tallyowl-control-api", version = "0.2.1" }
+tallyowl-cluster-api = { path = "generated/rust/tallyowl-cluster-api", version = "0.2.1" }
 
 # The CSIL transport family reference implementation, from the csilgen project.
 # Pinned by revision, because csilgen does not yet publish releases for it.

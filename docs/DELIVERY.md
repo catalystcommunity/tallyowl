@@ -180,10 +180,29 @@ Nothing happens without that call. Therefore:
 - a stopped sweep stops retry, backoff, and dead-worker recovery at the same
   time, so the health metric for the sweep is a required indicator.
 
-The sweep cost is backend-specific. The file backend examines every live task.
-Its cost grows with queue depth, and queue depth grows during a head outage.
-Measure the sweep at the outage-buffer depth that the capacity work selects.
-See D33.
+The sweep cost follows the number of expired tasks. It does not follow the
+number of live tasks. The file backend keeps a deadline index. The sweep starts
+at the first expired entry and stops at the first live entry. The measured cost
+is 2.3 milliseconds at 1,000 live tasks and at 5,000 live tasks. See D4 and
+D33.
+
+The queue depth count is a different call. From Corndogs release 0.7.6, the
+file backend keeps a count for each queue and state, and each task write
+updates it. A count then costs about 2 microseconds at 300,000 live tasks.
+Before, it read every live task, and its cost grew with the queue during a head
+outage. The forwarder still counts on a separate thread, so a slow answer never
+delays the sweep or changes the sweep age. The default interval is 2 seconds
+(`corndogs.depthInterval`).
+
+The forwarder also sets its own pace when the destination fails. If the head or
+Corndogs does not answer, the delivery loop waits. It then sends one batch as a
+probe. The wait starts at one second and doubles to a maximum of 30 seconds.
+The first success removes the wait. All other batches stay queued during the
+wait. A probe that fails does not write the batch payload again.
+
+Forwarder readiness also fails when the delivery loop stops. A watchdog thread
+reads the age of the sweep and the age of the delivery loop. The delivery loop
+does not examine itself.
 
 A forwarder may coalesce compatible tasks into one final-storage batch. The
 final batch ID is stable for that attempt and every source event ID remains
@@ -332,7 +351,11 @@ never silently become best effort and never return success for discarded data.
 - App drivers stop accepting, drain bounded queues until deadline, then report
   unsent counts.
 - Collectors stop intake, finish or release claimed tasks, flush receipts, and
-  leave queued data durable.
+  leave queued data durable. A collector starts this sequence on `SIGTERM` or
+  `SIGINT`. Readiness fails first. The intake listener then stops, and the
+  requests in progress get `collector.shutdownGrace` to finish. The delivery
+  loop finishes its current batch. A batch that is still claimed when the
+  process exits returns to the queue when its claim expires.
 - Head ingest stops readiness before draining in-flight commits.
 - Rolling upgrades support adjacent protocol versions and mixed projector
   versions.

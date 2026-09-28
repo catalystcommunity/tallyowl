@@ -663,6 +663,8 @@ fn a_webhook_that_fails_is_retried_and_the_alert_state_does_not_move() {
     // could fix.
     let runner = NotificationRunner {
         alerts: Arc::clone(&bed.alerts),
+        // The fake receivers in these tests listen on the loopback address.
+        egress: tallyowl_head::notify::Egress::any(),
         store: Arc::clone(&bed.store),
         metrics: Arc::clone(&bed.metrics),
         timeout: std::time::Duration::from_millis(200),
@@ -801,6 +803,8 @@ fn a_notification_for_a_state_that_has_since_changed_is_dropped() {
 
     let runner = NotificationRunner {
         alerts: Arc::clone(&bed.alerts),
+        // The fake receivers in these tests listen on the loopback address.
+        egress: tallyowl_head::notify::Egress::any(),
         store: Arc::clone(&bed.store),
         metrics: Arc::clone(&bed.metrics),
         timeout: std::time::Duration::from_millis(200),
@@ -888,8 +892,10 @@ fn an_export_pass_writes_a_file_a_person_can_take_away() {
         tallyowl_head::workflows::Outcome::Done,
         "the export failed"
     );
-    let written: Vec<_> = std::fs::read_dir(&into)
-        .expect("the export directory")
+    // Under the export directory of its own project, and nowhere else.
+    let own = into.join(tallyowl_store::row::hex(&PROJECT));
+    let written: Vec<_> = std::fs::read_dir(&own)
+        .expect("the project's export directory")
         .flatten()
         .map(|entry| entry.path())
         .collect();
@@ -899,6 +905,84 @@ fn an_export_pass_writes_a_file_a_person_can_take_away() {
             .any(|path| path.extension().is_some_and(|e| e == "parquet")),
         "no Parquet file was written: {written:?}"
     );
+}
+
+#[test]
+fn an_export_writes_only_a_plain_file_name_under_its_own_project() {
+    // The destination used to be a path the caller chose, and the head created
+    // it with truncation. A project admin could name the open catalog, a stored
+    // file, or another project's export.
+    let bed = bed(
+        "export-confined",
+        (1..=4)
+            .map(|n| row(n, "checkout", BASE + n as i64))
+            .collect(),
+    );
+    let into = directory("export-confined-out");
+    let victim = into.join("catalog.redb");
+    std::fs::create_dir_all(&into).expect("a directory");
+    std::fs::write(&victim, b"the live catalog").expect("a file");
+    let pass = ProjectorRunner {
+        store: Arc::clone(&bed.store),
+        identity: Arc::clone(&bed.query.identity),
+        logger: logger(),
+        raw_retention_ms: 0,
+        receipt_window_ms: 3_600_000,
+        reserve_bytes: 0,
+        export_root: into.clone(),
+    };
+    let export = |destination: &str, range_end: i64| {
+        let mut work = Work::new(Kind::Export, PROJECT);
+        work.range_start = BASE - 1;
+        work.range_end = range_end;
+        work.destination = destination.to_string();
+        pass.run(&work)
+    };
+
+    for hostile in [
+        victim.to_str().expect("text"),
+        "../catalog.redb",
+        "..",
+        "sub/orders.parquet",
+        "sub\\orders.parquet",
+        ".hidden.parquet",
+        "c:orders.parquet",
+    ] {
+        assert!(
+            matches!(
+                export(hostile, BASE + 1_000),
+                tallyowl_head::workflows::Outcome::Quarantine(_)
+            ),
+            "`{hostile}` was accepted as an export destination"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&victim).expect("still there"),
+        b"the live catalog",
+        "an export wrote over a file it was pointed at"
+    );
+
+    // A plain name lands under the project, and a second export of that name
+    // is refused and leaves the first alone.
+    assert_eq!(
+        export("orders.parquet", BASE + 1_000),
+        tallyowl_head::workflows::Outcome::Done
+    );
+    let landed = into
+        .join(tallyowl_store::row::hex(&PROJECT))
+        .join("orders.parquet");
+    let first = std::fs::read(&landed).expect("the export");
+    assert!(matches!(
+        export("orders.parquet", BASE + 1_000),
+        tallyowl_head::workflows::Outcome::Quarantine(_)
+    ));
+    assert_eq!(std::fs::read(&landed).expect("the export"), first);
+
+    // A request with no range used to write an empty file and report success.
+    assert!(matches!(
+        export("empty.parquet", BASE - 1),
+        tallyowl_head::workflows::Outcome::Quarantine(_)
+    ));
 }
 
 #[test]
@@ -1147,8 +1231,8 @@ fn bed_with_callbacks(name: &str, rows: Vec<EventRow>) -> Bed {
 fn a_native_callback_reaches_a_service_that_answers_it() {
     // **The native channel, end to end over a real socket.** A service that
     // already speaks CSIL-RPC declares one operation and takes the same
-    // notification a webhook receives, without an HTTP endpoint, a signature
-    // check, and a JSON parser.
+    // notification a webhook receives, signed with the target's secret. The
+    // receiver here verifies with the Rust app driver's own helper.
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Receiver {
@@ -1160,9 +1244,18 @@ fn a_native_callback_reaches_a_service_that_answers_it() {
             if request.op != tallyowl_head::notify::CALLBACK_OPERATION {
                 return tallyowl_rpc::unknown_operation(&request.service, &request.op);
             }
+            let decoded =
+                tallyowl_collector_api::codec::decode_alert_notify_request(&request.payload)
+                    .expect("a signed callback request");
+            let body = tallyowl_driver_rust::verify_alert_callback(
+                "callback-secret",
+                &decoded,
+                tallyowl_obs::time::now_ms(),
+            )
+            .expect("the head's signature verifies with the app driver");
             self.taken.fetch_add(1, Ordering::Relaxed);
-            *self.body.lock().unwrap() = request.payload.clone();
-            tallyowl_rpc::reply("Empty", Vec::new())
+            *self.body.lock().unwrap() = body.to_vec();
+            tallyowl_rpc::reply("AlertNotifyResponse", Vec::new())
         }
     }
 
@@ -1188,17 +1281,19 @@ fn a_native_callback_reaches_a_service_that_answers_it() {
     rule.notify = vec![NotificationTarget {
         kind: TargetKind::CsilCallback,
         url: Some(server.local_address().to_string()),
-        secret_ref: None,
+        secret_ref: Some("alerts".into()),
     }];
     let rule = bed.alerts.put_rule(&rule, "test").expect("stored");
     assert_eq!(evaluate_once(&bed, &rule), 1);
 
     let runner = NotificationRunner {
         alerts: Arc::clone(&bed.alerts),
+        // The fake receivers in these tests listen on the loopback address.
+        egress: tallyowl_head::notify::Egress::any(),
         store: Arc::clone(&bed.store),
         metrics: Arc::clone(&bed.metrics),
         timeout: std::time::Duration::from_secs(5),
-        secrets: Arc::new(|_| None),
+        secrets: Arc::new(|name: &str| (name == "alerts").then(|| "callback-secret".to_string())),
         callbacks: Some(Arc::new(tallyowl_head::notify::RpcCallbacks {
             max_frame_bytes: 1024 * 1024,
         })),
@@ -1240,17 +1335,19 @@ fn a_callback_to_a_service_that_does_not_answer_is_recorded_and_retried() {
         kind: TargetKind::CsilCallback,
         // Nothing is listening here.
         url: Some("127.0.0.1:1".to_string()),
-        secret_ref: None,
+        secret_ref: Some("alerts".into()),
     }];
     let rule = bed.alerts.put_rule(&rule, "test").expect("stored");
     evaluate_once(&bed, &rule);
 
     let runner = NotificationRunner {
         alerts: Arc::clone(&bed.alerts),
+        // The fake receivers in these tests listen on the loopback address.
+        egress: tallyowl_head::notify::Egress::any(),
         store: Arc::clone(&bed.store),
         metrics: Arc::clone(&bed.metrics),
         timeout: std::time::Duration::from_millis(200),
-        secrets: Arc::new(|_| None),
+        secrets: Arc::new(|_| Some("callback-secret".to_string())),
         callbacks: Some(Arc::new(tallyowl_head::notify::RpcCallbacks {
             max_frame_bytes: 1024 * 1024,
         })),
@@ -1270,6 +1367,98 @@ fn a_callback_to_a_service_that_does_not_answer_is_recorded_and_retried() {
 }
 
 #[test]
+fn a_native_callback_with_no_secret_is_refused_when_the_rule_is_written() {
+    // An unsigned callback would teach a receiver to accept one.
+    let bed = bed_with_callbacks("callback-no-secret", Vec::new());
+    let mut rule = counting_rule("busy", 1.0);
+    rule.notify = vec![NotificationTarget {
+        kind: TargetKind::CsilCallback,
+        url: Some("127.0.0.1:5300".into()),
+        secret_ref: None,
+    }];
+    let failure = bed.alerts.put_rule(&rule, "test").expect_err("refused");
+    assert_eq!(failure.code, tallyowl_obs::ErrorCode::InvalidArgument);
+    assert!(
+        failure.message.contains("secret_ref"),
+        "{}",
+        failure.message
+    );
+}
+
+#[test]
+fn a_receiver_that_refuses_the_signature_is_recorded_and_not_retried() {
+    // A refusal arrives as a typed error on a call that itself worked. Reading
+    // only the call result counted it as delivered.
+    struct Refuser;
+    impl tallyowl_rpc::Dispatcher for Refuser {
+        fn dispatch(&self, _request: &tallyowl_rpc::Request) -> tallyowl_rpc::Outcome {
+            tallyowl_rpc::error_outcome(tallyowl_collector_api::codec::encode_service_error(
+                &tallyowl_collector_api::types::ServiceError {
+                    code: tallyowl_collector_api::types::ErrorCode::Unauthenticated,
+                    message:
+                        "This alert callback is not signed with the secret this receiver holds."
+                            .into(),
+                    retryable: false,
+                    detail: None,
+                },
+            ))
+        }
+    }
+    let server = tallyowl_rpc::serve(
+        "127.0.0.1:0",
+        Arc::new(Refuser) as Arc<dyn tallyowl_rpc::Dispatcher>,
+        1024 * 1024,
+    )
+    .expect("the receiver listens");
+    let bed = bed_with_callbacks(
+        "callback-refused",
+        (1..=3)
+            .map(|n| row(n, "checkout", BASE + n as i64))
+            .collect(),
+    );
+    let mut rule = counting_rule("busy", 1.0);
+    rule.notify = vec![NotificationTarget {
+        kind: TargetKind::CsilCallback,
+        url: Some(server.local_address().to_string()),
+        secret_ref: Some("alerts".into()),
+    }];
+    let rule = bed.alerts.put_rule(&rule, "test").expect("stored");
+    evaluate_once(&bed, &rule);
+    let runner = NotificationRunner {
+        alerts: Arc::clone(&bed.alerts),
+        egress: tallyowl_head::notify::Egress::any(),
+        store: Arc::clone(&bed.store),
+        metrics: Arc::clone(&bed.metrics),
+        timeout: std::time::Duration::from_secs(5),
+        secrets: Arc::new(|_| Some("a secret the receiver does not hold".to_string())),
+        callbacks: Some(Arc::new(tallyowl_head::notify::RpcCallbacks {
+            max_frame_bytes: 1024 * 1024,
+        })),
+    };
+    bed.workflows
+        .run_one(tallyowl_head::workflows::NOTIFICATION_QUEUE, &runner)
+        .expect("it runs");
+
+    let attempts = bed.store.catalog().notifications().expect("attempts");
+    assert_eq!(attempts.len(), 1);
+    assert!(
+        !attempts[0].delivered,
+        "a refused callback was recorded as delivered"
+    );
+    assert!(
+        attempts[0]
+            .last_error
+            .contains("not signed with the secret"),
+        "{}",
+        attempts[0].last_error
+    );
+    assert_eq!(
+        attempts[0].next_attempt_at, 0,
+        "a refusal that says it is final is not tried again"
+    );
+}
+
+#[test]
 fn a_rule_that_this_installation_could_never_deliver_is_refused_when_it_is_written() {
     // A `csil-callback` target on an installation with no callback transport
     // is a rule an operator saves, watches fire, and never hears about — and
@@ -1281,7 +1470,7 @@ fn a_rule_that_this_installation_could_never_deliver_is_refused_when_it_is_writt
     rule.notify = vec![NotificationTarget {
         kind: TargetKind::CsilCallback,
         url: Some("127.0.0.1:5300".into()),
-        secret_ref: None,
+        secret_ref: Some("alerts".into()),
     }];
     let failure = bed.alerts.put_rule(&rule, "test").expect_err("refused");
     assert_eq!(failure.code, tallyowl_obs::ErrorCode::FailedPrecondition);

@@ -21,6 +21,7 @@ import {
   fromQueryRequestCbor,
   toBeginLoginResponseCbor,
   toCompleteLoginResponseCbor,
+  toProjectListCbor,
   toQueryResponseCbor,
   toServiceErrorCbor,
   type QueryRequest,
@@ -34,6 +35,7 @@ import {
   metricNames,
   metricRate,
 } from "../src/queries.ts";
+import { callbackPath, render } from "../src/index.ts";
 import { Control, ControlError, TransportFailure } from "../src/transport.ts";
 import * as signIn from "../src/sign-in.ts";
 import * as view from "../src/view.ts";
@@ -57,6 +59,10 @@ interface ShimElement {
   textContent: string;
   children: ShimElement[];
   append(...nodes: ShimElement[]): void;
+  replaceChildren(...nodes: ShimElement[]): void;
+  addEventListener(kind: string, listener: (event: { preventDefault(): void }) => void): void;
+  /// Run the listeners of one kind, the way a person pressing the button does.
+  fire(kind: string): void;
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | undefined;
 }
@@ -70,6 +76,20 @@ function shimDocument(): void {
       children: [],
       append(...nodes) {
         element.children.push(...nodes);
+      },
+      // The page draws itself again into the same root, and a form does its
+      // work in a listener. Both are rules under test: a session that ended
+      // brings the sign-in back, and a pasted token signs a person in.
+      replaceChildren(...nodes) {
+        element.children.splice(0, element.children.length, ...nodes);
+      },
+      addEventListener(kind, listener) {
+        listeners.push([kind, listener]);
+      },
+      fire(kind) {
+        for (const [held, listener] of listeners) {
+          if (held === kind) listener({ preventDefault: () => undefined });
+        }
       },
       // Attributes are recorded, because two of the rules under test are
       // attributes rather than text: a workflow with work in quarantine is
@@ -88,6 +108,7 @@ function shimDocument(): void {
       },
     };
     let own = "";
+    const listeners: [string, (event: { preventDefault(): void }) => void][] = [];
     return element;
   };
   (globalThis as { document?: unknown }).document = {
@@ -626,4 +647,138 @@ test("a failed notification attempt says why it failed", () => {
 
 test("no notification attempt yet says so", () => {
   assert.match(view.deliveryList([]).textContent ?? "", /No notification has been attempted/);
+});
+
+// ---------------------------------------------------------------------------
+// The page: which project, a session that ended, and a pasted token
+// ---------------------------------------------------------------------------
+
+function page(control: Control, held: signIn.Storage): {
+  root: ShimElement;
+  options: Parameters<typeof render>[0];
+} {
+  const root = (document as unknown as { createElement(tag: string): ShimElement }).createElement("main");
+  return {
+    root,
+    options: {
+      control,
+      storage: held,
+      root: root as unknown as HTMLElement,
+      location: "https://owl.example/",
+      callbackUrl: "https://owl.example/sign-in/callback",
+      now: () => 1_785_628_800_000,
+    },
+  };
+}
+
+/// Every element under one, the element included.
+function all(element: ShimElement): ShimElement[] {
+  return [element, ...element.children.flatMap(all)];
+}
+
+test("the page asks which project it may read before it asks anything about one", async () => {
+  // It used to draw once against a project ID of all zeros, so every load put
+  // three failed queries in the head's log.
+  const { fetch, seen } = head((op) =>
+    op === "list-projects"
+      ? RpcResponse.ok(
+          "ProjectList",
+          toProjectListCbor({
+            projects: [{ projectId: PROJECT, workspaceId: PROJECT, name: "web" }],
+          }),
+        )
+      : emptyResult(),
+  );
+  const held = storage();
+  held.setItem("tallyowl.session", "tos_ab_c");
+  const { options } = page(new Control({ fetch }), held);
+  await render(options);
+
+  assert.equal(seen[0].op, "list-projects");
+  const queries = seen.filter((call) => call.op === "run-query");
+  assert.ok(queries.length > 0, "the page drew nothing");
+  for (const call of queries) {
+    const bytes = JSON.stringify([...call.payload]);
+    assert.ok(
+      bytes.includes(JSON.stringify([...PROJECT]).slice(1, -1)),
+      "a query did not name the project the head listed",
+    );
+  }
+});
+
+test("a session that ended is forgotten and the sign-in comes back", async () => {
+  // The session used to stay in the tab. Every panel then showed a message
+  // written for an application key, and no sign-in form returned.
+  const { fetch } = head(() =>
+    RpcResponse.ok(
+      "ServiceError",
+      toServiceErrorCbor({
+        code: "unauthenticated",
+        message: "This credential is not valid. Ask the person who runs TallyOwl for a new one.",
+        retryable: false,
+      }),
+    ),
+  );
+  const held = storage();
+  held.setItem("tallyowl.session", "tos_ab_c");
+  const control = new Control({ fetch });
+  const { root, options } = page(control, held);
+  await render(options);
+
+  assert.equal(signIn.heldSession(held), undefined, "the dead session stayed in the tab");
+  assert.equal(control.session(), undefined);
+  const said = all(root).map((element) => element.textContent);
+  assert.ok(said.includes("Your session ended. Sign in again."), said.join(" | "));
+  assert.ok(
+    all(root).some((element) => element.tagName === "form"),
+    "the sign-in form did not come back",
+  );
+  assert.ok(
+    !said.some((text) => text.startsWith("This credential is not valid")),
+    "the person was told to ask for a new application key",
+  );
+});
+
+test("a pasted operator session signs a person in, and an application key does not", async () => {
+  // `linkkeys.enabled` is false by default, and `session create` prints a
+  // token. The page had no field that took one.
+  const { fetch, seen } = head((op) =>
+    op === "list-projects"
+      ? RpcResponse.ok("ProjectList", toProjectListCbor({ projects: [] }))
+      : emptyResult(),
+  );
+  const held = storage();
+  const control = new Control({ fetch });
+  const { root, options } = page(control, held);
+  await render(options);
+
+  const forms = all(root).filter((element) => element.tagName === "form");
+  assert.equal(forms.length, 2, "a LinkKeys form and a token form");
+  const tokenForm = forms[1];
+  const input = all(tokenForm).find((element) => element.tagName === "input") as unknown as {
+    value: string;
+  };
+
+  input.value = "tow_0011_an-application-key";
+  tokenForm.fire("submit");
+  assert.equal(control.session(), undefined, "an application key signed a person in");
+  assert.ok(all(tokenForm).some((element) => element.textContent.includes("starts with `tos_`")));
+
+  input.value = "  tos_00ff_c2VjcmV0  ";
+  tokenForm.fire("submit");
+  assert.equal(control.session(), "tos_00ff_c2VjcmV0");
+  assert.equal(signIn.heldSession(held), "tos_00ff_c2VjcmV0");
+  // The page draws again with the session, which is a request to the head.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seen.at(-1)?.auth, "tos_00ff_c2VjcmV0");
+});
+
+test("a sign-in returns to the path the head serves", () => {
+  // The page used to assume `/sign-in/callback`. With any other
+  // `dashboard.callbackPath`, the head refused every sign-in.
+  assert.equal(callbackPath(() => "/auth/return"), "/auth/return");
+  assert.equal(callbackPath(() => null), "/sign-in/callback");
+  assert.equal(callbackPath(() => undefined), "/sign-in/callback");
+  // A value that is not a path on this origin is not one to send a browser to.
+  assert.equal(callbackPath(() => "https://elsewhere.example/x"), "/sign-in/callback");
 });

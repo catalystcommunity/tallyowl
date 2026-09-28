@@ -212,49 +212,121 @@ fn scalar_text(node: &serde_yaml::Value) -> String {
     }
 }
 
+/// One `--flag`, the value it takes, and how many arguments the two used.
+///
+/// Every reader of the argument list goes through this, so the loader and a
+/// binary's verb parser cannot disagree about which word is a value.
+fn option_at(arguments: &[String], index: usize) -> Option<(String, String, usize)> {
+    let argument = arguments.get(index)?;
+    // `--help` is a word a binary answers, and `--` alone is not a flag.
+    if !argument.starts_with("--") || argument == "--" || argument == "--help" {
+        return None;
+    }
+    Some(match argument.split_once('=') {
+        Some((flag, value)) => (flag.to_string(), value.to_string(), 1),
+        None => match arguments.get(index + 1) {
+            // The next word is the value unless it is a flag itself.
+            Some(next) if !next.starts_with("--") => (argument.clone(), next.clone(), 2),
+            _ => (argument.clone(), String::new(), 1),
+        },
+    })
+}
+
+/// The arguments with every `--flag` and its value removed.
+///
+/// What is left is the verb a binary runs and the verb's own arguments. A
+/// binary that removed only `--config` read `--head.data-dir` as its verb and
+/// refused to start, and `provision shop --head.data-dir /x` made a workspace
+/// named `--head.data-dir`.
+pub fn words_without_options(arguments: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        match option_at(arguments, index) {
+            Some((_, _, used)) => index += used,
+            None => {
+                words.push(arguments[index].clone());
+                index += 1;
+            }
+        }
+    }
+    words
+}
+
 /// Read `--key.path value` and `--key.path=value` from the argument list.
-fn arguments_by_flag(arguments: &[String]) -> BTreeMap<String, String> {
+///
+/// The second list is the flags that have the shape of a setting and match
+/// none. A flag with no `.` in it is not reported: `--config` belongs to the
+/// binary, and a test runner passes flags of its own.
+fn arguments_by_flag(arguments: &[String]) -> (BTreeMap<String, String>, Vec<String>) {
     // One pass builds the flag form of every setting, so an argument resolves to
     // a key path by lookup rather than by guessing at the conversion backwards.
     let by_flag: BTreeMap<String, &'static str> =
         SCHEMA.iter().map(|s| (flag_name(s.path), s.path)).collect();
 
     let mut out = BTreeMap::new();
+    let mut unknown = Vec::new();
     let mut index = 0;
     while index < arguments.len() {
-        let argument = &arguments[index];
-        if !argument.starts_with("--") {
+        let Some((flag, value, used)) = option_at(arguments, index) else {
             index += 1;
             continue;
+        };
+        index += used;
+        match by_flag.get(&flag) {
+            Some(path) => {
+                out.insert((*path).to_string(), value);
+            }
+            None if flag.contains('.') => unknown.push(flag),
+            None => {}
         }
-        let (flag, inline) = match argument.split_once('=') {
-            Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
-            None => (argument.clone(), None),
-        };
-        let Some(path) = by_flag.get(&flag) else {
-            index += 1;
-            continue;
-        };
-        let value = match inline {
-            Some(v) => {
-                index += 1;
-                v
-            }
-            None => {
-                let next = arguments.get(index + 1).cloned().unwrap_or_default();
-                index += 2;
-                next
-            }
-        };
-        out.insert((*path).to_string(), value);
     }
-    out
+    (out, unknown)
+}
+
+/// The setting whose key path is nearest to a key that matches none.
+///
+/// `retention.detialed` is two letters from `retention.detailed`, and naming it
+/// is the difference between a warning somebody acts on and one they read past.
+pub fn closest_setting(unknown: &str) -> Option<&'static str> {
+    // A flag or an environment name is compared in its own form.
+    let forms = |path: &'static str| [path.to_string(), flag_name(path), environment_name(path)];
+    SCHEMA
+        .iter()
+        .map(|setting| {
+            let distance = forms(setting.path)
+                .iter()
+                .map(|form| edit_distance(form, unknown))
+                .min()
+                .unwrap_or(usize::MAX);
+            (distance, setting.path)
+        })
+        .filter(|(distance, _)| *distance <= 3)
+        .min()
+        .map(|(_, path)| path)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, left) in a.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, right) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(left != right))
+                .min(above + 1)
+                .min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// Resolve every setting. This does not touch the file system or the process
 /// environment; `Inputs` already holds both.
 pub fn resolve(inputs: &Inputs) -> Result<Resolved, Vec<ConfigError>> {
-    let arguments = arguments_by_flag(&inputs.arguments);
+    let (arguments, unknown_flags) = arguments_by_flag(&inputs.arguments);
     let by_environment: BTreeMap<&'static str, String> = SCHEMA
         .iter()
         .filter_map(|s| {
@@ -305,7 +377,10 @@ pub fn resolve(inputs: &Inputs) -> Result<Resolved, Vec<ConfigError>> {
 
     // A key that matches no setting is almost always a typo, and a typo that
     // does nothing is worse than one that stops startup.
-    let mut unknown_keys = Vec::new();
+    let mut unknown_keys: Vec<(String, Source)> = unknown_flags
+        .into_iter()
+        .map(|flag| (flag, Source::CommandLine))
+        .collect();
     for key in inputs.file.keys() {
         if find(key).is_none() {
             unknown_keys.push((key.clone(), Source::File));
@@ -490,5 +565,74 @@ mod tests {
         let mut i = inputs();
         i.arguments = vec!["config".into(), "check".into(), "--verbose".into()];
         assert!(resolve(&i).is_ok());
+    }
+
+    fn words(text: &[&str]) -> Vec<String> {
+        text.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn a_flag_and_its_value_are_never_read_as_a_verb() {
+        // `tallyowl-head --head.data-dir /x` used to stop with "`--head.data-dir`
+        // is not a verb this binary has", and `provision shop --head.data-dir
+        // /x` made a workspace named `--head.data-dir`.
+        assert!(words_without_options(&words(&["--head.data-dir", "/x"])).is_empty());
+        assert_eq!(
+            words_without_options(&words(&[
+                "--config",
+                "a.yaml",
+                "provision",
+                "shop",
+                "--head.data-dir",
+                "/x",
+                "--log.level=debug",
+            ])),
+            words(&["provision", "shop"])
+        );
+        // `--help` is a word a binary answers, and a flag with no value takes
+        // nothing that follows it.
+        assert_eq!(
+            words_without_options(&words(&["--help"])),
+            words(&["--help"])
+        );
+        assert_eq!(
+            words_without_options(&words(&[
+                "--dashboard.enabled",
+                "--config=a.yaml",
+                "rebuild"
+            ])),
+            words(&["rebuild"])
+        );
+    }
+
+    #[test]
+    fn a_misspelled_flag_is_an_unknown_key_and_the_nearest_setting_is_named() {
+        let mut i = inputs();
+        i.arguments = words(&[
+            "--retention.detialed",
+            "365d",
+            "--config",
+            "a.yaml",
+            "--nocapture",
+        ]);
+        let resolved = resolve(&i).expect("an unknown flag does not stop a start (L009)");
+        assert_eq!(
+            resolved.unknown_keys,
+            vec![("--retention.detialed".to_string(), Source::CommandLine)],
+            "only a flag with the shape of a setting is reported"
+        );
+        assert_eq!(
+            closest_setting("--retention.detialed"),
+            Some("retention.detailed")
+        );
+        assert_eq!(
+            closest_setting("retention.detialed"),
+            Some("retention.detailed")
+        );
+        assert_eq!(
+            closest_setting("TALLYOWL_RETENTION__DETIALED"),
+            Some("retention.detailed")
+        );
+        assert_eq!(closest_setting("nothing.like.a.setting.at.all"), None);
     }
 }

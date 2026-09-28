@@ -172,6 +172,14 @@ pub fn downsample(rows: &[EventRow], bucket_ms: i64, project_id: [u8; 16]) -> Do
         if row.kind != "metric-point" {
             continue;
         }
+        // **A rollup is never rolled up again.** A rolled-up point is a delta
+        // point whose time is the end of its window, which is the first instant
+        // of the next window. The pass read it back an hour later beside that
+        // window's finer points and added it in, so every total grew by the
+        // total before it.
+        if row.properties.contains_key("rollup_resolution_ms") {
+            continue;
+        }
         let kind = text(row, "metric_kind").unwrap_or_default();
         if kind == "gauge" {
             skipped_gauges += 1;
@@ -249,6 +257,162 @@ pub struct Downsampled {
     pub skipped_gauges: u64,
     /// Histogram points whose bucket layout changed inside the window.
     pub skipped_layouts: u64,
+}
+
+/// What the downsample pass runs with.
+#[derive(Debug, Clone, Copy)]
+pub struct DownsampleSettings {
+    /// The width of one rolled-up window.
+    pub resolution_ms: i64,
+    /// `retention.detailed`. A window whose finer points have expired is not
+    /// rolled up, because there is nothing left to read. Zero keeps everything.
+    pub detailed_ms: i64,
+    /// How long after a window closes the pass waits before it rolls it up, so
+    /// a point that arrives a little late is inside its window's rollup.
+    pub lateness_grace_ms: i64,
+}
+
+/// What one run of the pass did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DownsampleReport {
+    pub windows: u64,
+    pub points: u64,
+    pub skipped_layouts: u64,
+    /// One sentence for each window that did not roll up. The pass stops that
+    /// project at that window and tries it again on the next run.
+    pub failures: Vec<String>,
+}
+
+/// The most windows one run rolls up for one project, so a head that was down
+/// for a week catches up over several runs and not inside one.
+pub const MAX_WINDOWS_EACH_RUN: u64 = 48;
+
+/// Roll up every window that has closed since the last run, for every project.
+///
+/// **The pass follows a durable watermark and not the clock.** The earlier pass
+/// slept one resolution, worked, and rolled up only the window that had just
+/// closed. Its period was the resolution plus the work, so the phase drifted
+/// and it skipped a window every so often; a restart across a boundary, or any
+/// downtime, skipped one for good. After `retention.detailed` the rollup is the
+/// only copy, so each skipped window became a permanent hole in a chart and
+/// nothing said so. The watermark is the end of the last window rolled up, the
+/// catalog holds it, and a run rolls every closed window after it.
+///
+/// A project with no watermark starts at the newest closed window. Rolling its
+/// whole history on the first run after an upgrade would read every retained
+/// row of every project in one pass.
+pub fn downsample_due(
+    store: &tallyowl_store::SegmentedStore,
+    settings: DownsampleSettings,
+    now: i64,
+) -> DownsampleReport {
+    use tallyowl_store::Store;
+
+    let mut report = DownsampleReport::default();
+    let resolution = settings.resolution_ms;
+    if resolution <= 0 {
+        return report;
+    }
+    // The newest moment a window may end at and still be rolled up now.
+    let closed_before = now - settings.lateness_grace_ms.max(0);
+    let newest_end = closed_before - closed_before.rem_euclid(resolution);
+
+    let projects = match store.catalog().projects() {
+        Ok(projects) => projects,
+        Err(e) => {
+            report
+                .failures
+                .push(format!("The projects could not be listed. {e}"));
+            return report;
+        }
+    };
+    for project in projects {
+        let project_id = project.project_id;
+        let mut through = match store.catalog().rolled_up_through(project_id) {
+            Ok(Some(through)) => through,
+            Ok(None) => newest_end - resolution,
+            Err(e) => {
+                report.failures.push(format!(
+                    "The downsample watermark of a project could not be read. {e}"
+                ));
+                continue;
+            }
+        };
+        // Nothing older than the detailed retention is worth rolling up,
+        // because the finer points it would read have already expired.
+        if settings.detailed_ms > 0 {
+            let oldest = now - settings.detailed_ms;
+            let oldest_start = oldest - oldest.rem_euclid(resolution) + resolution;
+            through = through.max(oldest_start);
+        }
+
+        let mut rolled = 0;
+        while through + resolution <= newest_end && rolled < MAX_WINDOWS_EACH_RUN {
+            let (start, end) = (through, through + resolution);
+            let scanned = match store.scan(
+                project_id,
+                start,
+                end,
+                tallyowl_store::store::TimeBasis::OccurredAt,
+            ) {
+                Ok(scanned) => scanned,
+                Err(e) => {
+                    report
+                        .failures
+                        .push(format!("A window could not be read for its rollup. {e}"));
+                    break;
+                }
+            };
+            // A rollup over part of a window is a smaller number that looks
+            // like the whole one. The window waits until all of it reads.
+            if scanned.incomplete {
+                report.failures.push(
+                    "Part of a window could not be read, so its rollup waits rather than recording a smaller number."
+                        .to_string(),
+                );
+                break;
+            }
+            let out = downsample(&scanned.rows, resolution, project_id);
+            report.skipped_layouts += out.skipped_layouts;
+            if !out.rows.is_empty() {
+                let count = out.rows.len() as u64;
+                // The batch identifier is derived from the window, so a pass
+                // that runs twice over one window deduplicates to one rollup.
+                let batch_id = downsample_batch_id(project_id, end);
+                if let Err(e) = store.commit([0; 16], batch_id, out.rows) {
+                    report
+                        .failures
+                        .push(format!("A rollup could not be committed. {e}"));
+                    break;
+                }
+                report.points += count;
+            }
+            // After the commit. A stop between the two rolls the window again,
+            // and the derived batch identifier makes that one rollup.
+            if let Err(e) = store.catalog().mark_rolled_up_through(project_id, end) {
+                report
+                    .failures
+                    .push(format!("The downsample watermark could not be stored. {e}"));
+                break;
+            }
+            through = end;
+            rolled += 1;
+            report.windows += 1;
+        }
+    }
+    report
+}
+
+/// A batch identifier derived from the project and the window, so a pass that
+/// runs twice deduplicates to one rollup rather than doubling it.
+pub fn downsample_batch_id(project_id: [u8; 16], window_end: i64) -> [u8; 16] {
+    let mut input = Vec::with_capacity(32);
+    input.extend_from_slice(b"downsample");
+    input.extend_from_slice(&project_id);
+    input.extend_from_slice(&window_end.to_le_bytes());
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&blake3::hash(&input).as_bytes()[..16]);
+    out
 }
 
 #[derive(Debug, Default, Clone)]
@@ -824,5 +988,140 @@ mod tests {
     #[test]
     fn a_downsample_of_nothing_produces_nothing() {
         assert!(downsample(&[], 3_600_000, PROJECT).rows.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // The pass that follows a watermark
+    // -----------------------------------------------------------------------
+
+    const HOUR: i64 = 3_600_000;
+
+    fn directory(name: &str) -> std::path::PathBuf {
+        let base = std::env::var("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("target"));
+        let path = base
+            .join("head-tests")
+            .join(format!("{name}-{}", tallyowl_obs::time::now_nanos()));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    fn settings() -> DownsampleSettings {
+        DownsampleSettings {
+            resolution_ms: HOUR,
+            detailed_ms: 0,
+            lateness_grace_ms: 5 * 60_000,
+        }
+    }
+
+    fn store_with_project(path: &std::path::Path) -> tallyowl_store::SegmentedStore {
+        let store = tallyowl_store::SegmentedStore::open(path).expect("the store opens");
+        store
+            .catalog()
+            .put_project(&tallyowl_store::control::Project {
+                project_id: PROJECT,
+                workspace_id: [8; 16],
+                name: "shop".into(),
+                description: None,
+                created_at: BASE,
+            })
+            .expect("the project is stored");
+        store
+    }
+
+    #[test]
+    fn every_window_that_closed_while_the_pass_was_away_is_rolled_up() {
+        use tallyowl_store::Store;
+        // BASE is on an hour boundary. The clock is the `now` argument.
+        assert_eq!(BASE.rem_euclid(HOUR), 0);
+        let path = directory("downsample-watermark");
+        let store = store_with_project(&path);
+        store
+            .commit(
+                [7; 16],
+                [1; 16],
+                vec![
+                    delta_counter(1, BASE + 60_000, "/cart", 2.0),
+                    delta_counter(2, BASE + HOUR + 60_000, "/cart", 3.0),
+                    delta_counter(3, BASE + 3 * HOUR + 60_000, "/cart", 5.0),
+                ],
+            )
+            .expect("the points commit");
+
+        // The first run rolls the newest closed window and no history.
+        let first = downsample_due(&store, settings(), BASE + HOUR + 10 * 60_000);
+        assert_eq!((first.windows, first.points), (1, 1), "{first:?}");
+
+        // Inside the grace, the window that just closed waits.
+        let early = downsample_due(&store, settings(), BASE + 2 * HOUR + 60_000);
+        assert_eq!(early.windows, 0, "{early:?}");
+
+        // The head stops, and starts again three hours later. The old pass
+        // rolled only the window that had just closed, so the second and the
+        // fourth hour were holes once the detailed points expired.
+        drop(store);
+        let store = tallyowl_store::SegmentedStore::open(&path).expect("the store opens again");
+        let later = downsample_due(&store, settings(), BASE + 4 * HOUR + 10 * 60_000);
+        assert_eq!(later.windows, 3, "{later:?}");
+        assert_eq!(later.points, 2, "the second and the fourth hour");
+        assert!(later.failures.is_empty(), "{later:?}");
+
+        // A run that comes again at once has nothing to do.
+        let again = downsample_due(&store, settings(), BASE + 4 * HOUR + 10 * 60_000);
+        assert_eq!(again.windows, 0);
+        assert_eq!(
+            store.catalog().rolled_up_through(PROJECT).unwrap(),
+            Some(BASE + 4 * HOUR)
+        );
+    }
+
+    #[test]
+    fn a_rollup_is_not_rolled_up_again_with_the_next_window() {
+        // The rolled-up point of one hour sits on the first instant of the next.
+        let first = downsample(
+            &[delta_counter(1, BASE + 60_000, "/cart", 2.0)],
+            HOUR,
+            PROJECT,
+        );
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(first.rows[0].occurred_at, BASE + HOUR);
+
+        let mut next_window = first.rows.clone();
+        next_window.push(delta_counter(2, BASE + HOUR + 60_000, "/cart", 3.0));
+        let second = downsample(&next_window, HOUR, PROJECT);
+        assert_eq!(second.rows.len(), 1);
+        assert_eq!(
+            number(&second.rows[0], "value"),
+            Some(3.0),
+            "the first hour was added in"
+        );
+    }
+
+    #[test]
+    fn a_long_absence_catches_up_over_several_runs_and_skips_what_has_expired() {
+        let path = directory("downsample-catch-up");
+        let store = store_with_project(&path);
+        store
+            .catalog()
+            .mark_rolled_up_through(PROJECT, BASE)
+            .expect("a watermark from before the absence");
+
+        let now = BASE + 1_000 * HOUR + 10 * 60_000;
+        let run = downsample_due(&store, settings(), now);
+        assert_eq!(run.windows, MAX_WINDOWS_EACH_RUN);
+
+        // With a detailed retention of one day, a window whose finer points
+        // are gone is not read at all.
+        let bounded = DownsampleSettings {
+            detailed_ms: 24 * HOUR,
+            ..settings()
+        };
+        let run = downsample_due(&store, bounded, now);
+        assert_eq!(run.windows, 23, "{run:?}");
+        assert_eq!(
+            store.catalog().rolled_up_through(PROJECT).unwrap(),
+            Some(BASE + 1_000 * HOUR)
+        );
     }
 }

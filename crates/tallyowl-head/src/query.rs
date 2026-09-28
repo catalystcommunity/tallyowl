@@ -113,9 +113,265 @@ impl Stage {
     }
 }
 
+/// How many queries of one project may run at once.
+///
+/// `docs/QUERY.md` section 14 asks for a concurrency budget for each project.
+/// Without one, every refresh of a slow dashboard started another thread that
+/// read the same range, and one project could hold the memory and the store
+/// lock that every other project's queries and ingest need. A query past the
+/// limit is refused by name and at once, which a dashboard shows and retries.
+pub struct ProjectPermits {
+    most: usize,
+    held: std::sync::Mutex<BTreeMap<[u8; 16], usize>>,
+}
+
+/// The permits one running query holds, given back when it is dropped, which
+/// covers a query that ends in a panic as well as one that returns.
+pub struct ProjectPermit<'a> {
+    pool: &'a ProjectPermits,
+    projects: Vec<[u8; 16]>,
+}
+
+impl Drop for ProjectPermit<'_> {
+    fn drop(&mut self) {
+        let mut held = self
+            .pool
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for project in &self.projects {
+            if let Some(count) = held.get_mut(project) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    held.remove(project);
+                }
+            }
+        }
+    }
+}
+
+impl ProjectPermits {
+    pub const DEFAULT_MOST: usize = 8;
+
+    pub fn new(most: usize) -> ProjectPermits {
+        ProjectPermits {
+            most: most.max(1),
+            held: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Take one permit in each project the query reads, or none at all.
+    pub fn take(&self, projects: &[[u8; 16]]) -> Result<ProjectPermit<'_>, TallyOwlError> {
+        let mut wanted: Vec<[u8; 16]> = projects.to_vec();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if wanted
+            .iter()
+            .any(|project| held.get(project).copied().unwrap_or(0) >= self.most)
+        {
+            return Err(TallyOwlError::new(
+                tallyowl_obs::ErrorCode::ResourceExhausted,
+                format!(
+                    "This project is already running {} queries, which is the limit in `query.maxConcurrentForEachProject`. Wait for one to finish and ask again, or raise the limit.",
+                    self.most
+                ),
+            ));
+        }
+        for project in &wanted {
+            *held.entry(*project).or_insert(0) += 1;
+        }
+        Ok(ProjectPermit {
+            pool: self,
+            projects: wanted,
+        })
+    }
+}
+
+static PROJECT_PERMITS: std::sync::OnceLock<ProjectPermits> = std::sync::OnceLock::new();
+
+/// Set the limit for this process. The head calls it once, before it listens.
+///
+/// It is process-wide rather than a field of [`QueryService`] because the limit
+/// belongs to the control operation and not to the executor: an alert
+/// evaluation runs the same executor under its own budget pool, and must not
+/// be refused because a dashboard is busy.
+pub fn configure_project_permits(most: usize) {
+    let _ = PROJECT_PERMITS.set(ProjectPermits::new(most));
+}
+
+/// The permits of this process.
+pub fn project_permits() -> &'static ProjectPermits {
+    PROJECT_PERMITS.get_or_init(|| ProjectPermits::new(ProjectPermits::DEFAULT_MOST))
+}
+
+const QUERIES_TOTAL: &str = "tallyowl_queries_total";
+const QUERY_SECONDS: &str = "tallyowl_query_seconds";
+const QUERIES_IN_FLIGHT: &str = "tallyowl_queries_in_flight_count";
+
+static IN_FLIGHT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Declare what the query path publishes. There was no query metric of any
+/// kind, so a slow dashboard, a refused query, and a query that never returned
+/// all looked the same from outside: like nothing.
+pub fn declare_metrics(metrics: &tallyowl_obs::metrics::Registry) {
+    for (name, kind, help, buckets) in [
+        (
+            QUERIES_TOTAL,
+            tallyowl_obs::MetricKind::Counter,
+            "Queries that finished, by the form of the query and by outcome. The outcome is `ok` or the error code.",
+            &[][..],
+        ),
+        (
+            QUERY_SECONDS,
+            tallyowl_obs::MetricKind::Histogram,
+            "How long one query took, by the form of the query.",
+            &[0.005, 0.025, 0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0][..],
+        ),
+        (
+            QUERIES_IN_FLIGHT,
+            tallyowl_obs::MetricKind::Gauge,
+            "Queries running now. A value that stays high while the finished count is flat means queries are not returning.",
+            &[][..],
+        ),
+    ] {
+        metrics
+            .declare(name, kind, help, buckets)
+            .unwrap_or_else(|e| {
+                panic!("the metric `{name}` is not a name the registry accepts: {}", e.0)
+            });
+    }
+}
+
+/// The form of a query, as a metric label. It is one of eight fixed words.
+pub fn form_name(form: &QueryForm) -> &'static str {
+    match form {
+        QueryForm::Node => "node",
+        QueryForm::Trace => "trace",
+        QueryForm::Funnel => "funnel",
+        QueryForm::Retention => "retention",
+        QueryForm::Path => "path",
+        QueryForm::Timeline => "timeline",
+        QueryForm::Attribution => "attribution",
+        QueryForm::CampaignSummary => "campaign-summary",
+    }
+}
+
+/// Counts one running query, and records it when it ends. It records on drop,
+/// so a query that panics still leaves the in-flight count correct.
+pub struct QueryTimer<'a> {
+    metrics: &'a tallyowl_obs::metrics::Registry,
+    form: &'static str,
+    started: Instant,
+    outcome: &'static str,
+}
+
+impl<'a> QueryTimer<'a> {
+    pub fn start(metrics: &'a tallyowl_obs::metrics::Registry, form: &QueryForm) -> QueryTimer<'a> {
+        let running = IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        metrics.set_gauge(
+            QUERIES_IN_FLIGHT,
+            &tallyowl_obs::metrics::labels(&[]),
+            running,
+        );
+        QueryTimer {
+            metrics,
+            form: form_name(form),
+            started: Instant::now(),
+            outcome: "panicked",
+        }
+    }
+
+    /// Say how the query ended: `ok`, or the error code.
+    pub fn finish(&mut self, outcome: &'static str) {
+        self.outcome = outcome;
+    }
+}
+
+impl Drop for QueryTimer<'_> {
+    fn drop(&mut self) {
+        let running = IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+        let labels = tallyowl_obs::metrics::labels;
+        self.metrics
+            .set_gauge(QUERIES_IN_FLIGHT, &labels(&[]), running);
+        self.metrics.increment(
+            QUERIES_TOTAL,
+            &labels(&[("form", self.form), ("outcome", self.outcome)]),
+        );
+        self.metrics.observe(
+            QUERY_SECONDS,
+            &labels(&[("form", self.form)]),
+            self.started.elapsed().as_secs_f64(),
+        );
+    }
+}
+
+/// How long one query may run.
+///
+/// The executor once checked the time only when it entered an operator, and it
+/// enters every operator of a linear chain before any of them reads a row. So
+/// the check always passed, and a scan of the whole retention window ran to the
+/// end whatever `query.maxRuntime` said. This travels with the work instead:
+/// it is checked after each scan returns and every
+/// [`Deadline::ROWS_BETWEEN_CHECKS`] rows inside each loop over rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadline {
+    started: Instant,
+    /// Zero means no bound, which is what `query.maxRuntime: 0` asks for.
+    allowed_ms: i64,
+}
+
+impl Deadline {
+    /// A clock read costs more than a row does, so a loop reads it this often.
+    pub const ROWS_BETWEEN_CHECKS: usize = 4_096;
+
+    /// A deadline that started now.
+    pub fn starting_now(allowed_ms: i64) -> Deadline {
+        Deadline {
+            started: Instant::now(),
+            allowed_ms,
+        }
+    }
+
+    /// A deadline that started at `started`. A test passes a time in the past,
+    /// so it needs no sleep to see a deadline pass.
+    pub fn started_at(started: Instant, allowed_ms: i64) -> Deadline {
+        Deadline {
+            started,
+            allowed_ms,
+        }
+    }
+
+    pub fn check(&self) -> Result<(), TallyOwlError> {
+        if self.allowed_ms > 0 && self.started.elapsed().as_millis() as i64 > self.allowed_ms {
+            return Err(TallyOwlError::new(
+                tallyowl_obs::ErrorCode::BudgetExceeded,
+                format!(
+                    "This query ran for longer than the {} milliseconds it was allowed.",
+                    self.allowed_ms
+                ),
+            )
+            .retryable(false));
+        }
+        Ok(())
+    }
+
+    /// Check on the first row and on every [`Deadline::ROWS_BETWEEN_CHECKS`]th
+    /// row after it.
+    pub fn check_at(&self, index: usize) -> Result<(), TallyOwlError> {
+        if index.is_multiple_of(Deadline::ROWS_BETWEEN_CHECKS) {
+            self.check()?;
+        }
+        Ok(())
+    }
+}
+
 impl QueryService {
     pub fn run(&self, request: QueryRequest) -> Result<QueryResponse, TallyOwlError> {
-        let started = Instant::now();
+        let deadline = self.deadline_of(&request);
 
         if request.algebra_version > ALGEBRA_VERSION {
             return Err(TallyOwlError::new(
@@ -130,43 +386,43 @@ impl QueryService {
         match request.form {
             QueryForm::Trace => {
                 let trace = request.trace.as_ref().ok_or_else(|| missing("a trace"))?;
-                return self.trace(trace, &request);
+                return self.trace(trace, &request, deadline);
             }
             QueryForm::Funnel => {
                 let funnel = request.funnel.as_ref().ok_or_else(|| missing("a funnel"))?;
-                return self.funnel(funnel, &request);
+                return self.funnel(funnel, &request, deadline);
             }
             QueryForm::Retention => {
                 let retention = request
                     .retention
                     .as_ref()
                     .ok_or_else(|| missing("a retention question"))?;
-                return self.retention(retention, &request);
+                return self.retention(retention, &request, deadline);
             }
             QueryForm::Path => {
                 let path = request.path.as_ref().ok_or_else(|| missing("a path"))?;
-                return self.path(path, &request);
+                return self.path(path, &request, deadline);
             }
             QueryForm::Timeline => {
                 let timeline = request
                     .timeline
                     .as_ref()
                     .ok_or_else(|| missing("a timeline"))?;
-                return self.timeline(timeline, &request);
+                return self.timeline(timeline, &request, deadline);
             }
             QueryForm::Attribution => {
                 let attribution = request
                     .attribution
                     .as_ref()
                     .ok_or_else(|| missing("an attribution question"))?;
-                return self.attribution(attribution, &request);
+                return self.attribution(attribution, &request, deadline);
             }
             QueryForm::CampaignSummary => {
                 let summary = request
                     .campaign_summary
                     .as_ref()
                     .ok_or_else(|| missing("a campaign report"))?;
-                return self.campaign_summary(summary, &request);
+                return self.campaign_summary(summary, &request, deadline);
             }
             QueryForm::Node => {}
         }
@@ -176,7 +432,7 @@ impl QueryService {
             )
         })?;
 
-        let stage = self.execute(&child(encoded)?, &request, started)?;
+        let stage = self.execute(&child(encoded)?, deadline, 0)?;
         if stage.incomplete() && !request.allow_partial {
             // Correctness first. A caller must ask for a partial result.
             return Err(TallyOwlError::new(
@@ -241,6 +497,7 @@ impl QueryService {
         &self,
         trace: &tallyowl_control_api::types::TraceQuery,
         request: &QueryRequest,
+        deadline: Deadline,
     ) -> Result<QueryResponse, TallyOwlError> {
         let project_id = to_id(&trace.project_id)?;
         let trace_id: [u8; 16] = trace
@@ -253,6 +510,7 @@ impl QueryService {
             .store
             .lookup_correlated(tallyowl_store::segment::schema::TRACE_ID, &trace_id)
             .map_err(crate::ingest::to_service_error)?;
+        deadline.check()?;
 
         if found.incomplete && !request.allow_partial {
             return Err(TallyOwlError::new(
@@ -364,12 +622,14 @@ impl QueryService {
         &self,
         project_id: [u8; 16],
         range: &tallyowl_control_api::types::TimeRange,
+        deadline: Deadline,
     ) -> Result<(Vec<EventRow>, bool, crate::identity::Identity), TallyOwlError> {
         let basis = to_basis(&range.basis);
         let scanned = self
             .store
             .scan(project_id, range.range_start, range.range_end, basis)
             .map_err(crate::ingest::to_service_error)?;
+        deadline.check()?;
 
         // One logical event, whatever the physical rows, exactly as the general
         // scan does. A retry that duplicated a row must not make a funnel count
@@ -449,6 +709,7 @@ impl QueryService {
         // have seen. `apply` skips what it already folded, so this is the same
         // graph either way.
         identity.apply(&rows);
+        deadline.check()?;
 
         // A row from another project can only be here through a defect, and the
         // graph counts what it ignored so a test can prove the filter did work.
@@ -511,11 +772,13 @@ impl QueryService {
         &self,
         funnel: &tallyowl_control_api::types::FunnelQuery,
         request: &QueryRequest,
+        deadline: Deadline,
     ) -> Result<QueryResponse, TallyOwlError> {
         use tallyowl_control_api::types::CorrelationBasis;
 
         let project_id = to_id(&funnel.project_id)?;
-        let (rows, incomplete, identity) = self.rows_and_identity(project_id, &funnel.range)?;
+        let (rows, incomplete, identity) =
+            self.rows_and_identity(project_id, &funnel.range, deadline)?;
         self.refuse_if_short(incomplete, request)?;
 
         let steps: Vec<crate::analysis::Step> = funnel
@@ -555,7 +818,7 @@ impl QueryService {
             &identity,
             &steps,
             &question,
-            &self.guards,
+            &self.guards.within(deadline),
         )?;
 
         let mut columns = vec![
@@ -608,11 +871,13 @@ impl QueryService {
         &self,
         retention: &tallyowl_control_api::types::RetentionQuery,
         request: &QueryRequest,
+        deadline: Deadline,
     ) -> Result<QueryResponse, TallyOwlError> {
         use tallyowl_control_api::types::RetentionQuery_period as WirePeriod;
 
         let project_id = to_id(&retention.project_id)?;
-        let (rows, incomplete, identity) = self.rows_and_identity(project_id, &retention.range)?;
+        let (rows, incomplete, identity) =
+            self.rows_and_identity(project_id, &retention.range, deadline)?;
         self.refuse_if_short(incomplete, request)?;
 
         let question = crate::analysis::RetentionQuestion {
@@ -642,8 +907,13 @@ impl QueryService {
             epoch: retention.range.range_start,
         };
 
-        let result =
-            crate::analysis::retention(&rows, incomplete, &identity, &question, &self.guards)?;
+        let result = crate::analysis::retention(
+            &rows,
+            incomplete,
+            &identity,
+            &question,
+            &self.guards.within(deadline),
+        )?;
 
         let mut columns = vec!["cohort_start".to_string(), "cohort_size".to_string()];
         for period in 0..question.periods {
@@ -680,11 +950,13 @@ impl QueryService {
         &self,
         path: &tallyowl_control_api::types::PathQuery,
         request: &QueryRequest,
+        deadline: Deadline,
     ) -> Result<QueryResponse, TallyOwlError> {
         use tallyowl_control_api::types::PathQuery_direction as Direction;
 
         let project_id = to_id(&path.project_id)?;
-        let (rows, incomplete, identity) = self.rows_and_identity(project_id, &path.range)?;
+        let (rows, incomplete, identity) =
+            self.rows_and_identity(project_id, &path.range, deadline)?;
         self.refuse_if_short(incomplete, request)?;
 
         let question = crate::analysis::PathQuestion {
@@ -702,7 +974,13 @@ impl QueryService {
             resolution: resolution_of(path.resolution.as_ref()),
         };
 
-        let result = crate::analysis::path(&rows, incomplete, &identity, &question, &self.guards)?;
+        let result = crate::analysis::path(
+            &rows,
+            incomplete,
+            &identity,
+            &question,
+            &self.guards.within(deadline),
+        )?;
 
         let columns = vec![
             "depth".to_string(),
@@ -729,9 +1007,11 @@ impl QueryService {
         &self,
         timeline: &tallyowl_control_api::types::TimelineQuery,
         request: &QueryRequest,
+        deadline: Deadline,
     ) -> Result<QueryResponse, TallyOwlError> {
         let project_id = to_id(&timeline.project_id)?;
-        let (rows, incomplete, identity) = self.rows_and_identity(project_id, &timeline.range)?;
+        let (rows, incomplete, identity) =
+            self.rows_and_identity(project_id, &timeline.range, deadline)?;
         self.refuse_if_short(incomplete, request)?;
 
         let question = crate::analysis::TimelineQuestion {
@@ -751,8 +1031,13 @@ impl QueryService {
             resolution: resolution_of(timeline.resolution.as_ref()),
         };
 
-        let result =
-            crate::analysis::timeline(&rows, incomplete, &identity, &question, &self.guards)?;
+        let result = crate::analysis::timeline(
+            &rows,
+            incomplete,
+            &identity,
+            &question,
+            &self.guards.within(deadline),
+        )?;
         let next_cursor = result
             .next_after
             .map(|(at, event_id)| write_cursor(at, &event_id));
@@ -801,6 +1086,7 @@ impl QueryService {
         &self,
         attribution: &tallyowl_control_api::types::AttributionQuery,
         request: &QueryRequest,
+        deadline: Deadline,
     ) -> Result<QueryResponse, TallyOwlError> {
         let project_id = to_id(&attribution.project_id)?;
         let settings = self.attribution.settings(project_id);
@@ -831,7 +1117,7 @@ impl QueryService {
         settings.check_window(question.lookback_ms)?;
 
         let (rows, incomplete, identity) =
-            self.rows_and_identity(project_id, &attribution.range)?;
+            self.rows_and_identity(project_id, &attribution.range, deadline)?;
         self.refuse_if_short(incomplete, request)?;
 
         let answer = crate::attribution::run(&rows, incomplete, &identity, &question, &settings)?;
@@ -870,6 +1156,7 @@ impl QueryService {
         &self,
         summary: &tallyowl_control_api::types::CampaignSummaryQuery,
         request: &QueryRequest,
+        deadline: Deadline,
     ) -> Result<QueryResponse, TallyOwlError> {
         use crate::campaign::Dimension;
         use tallyowl_control_api::types::CampaignSummaryQuery_dimension as WireDimension;
@@ -905,7 +1192,8 @@ impl QueryService {
         settings.check_model(question.model)?;
         settings.check_window(question.lookback_ms)?;
 
-        let (rows, incomplete, identity) = self.rows_and_identity(project_id, &summary.range)?;
+        let (rows, incomplete, identity) =
+            self.rows_and_identity(project_id, &summary.range, deadline)?;
         self.refuse_if_short(incomplete, request)?;
 
         let report =
@@ -975,17 +1263,29 @@ impl QueryService {
     fn execute(
         &self,
         node: &QueryNodeBox,
-        request: &QueryRequest,
-        started: Instant,
+        deadline: Deadline,
+        depth: u32,
     ) -> Result<Stage, TallyOwlError> {
+        // **The executor recurses once for each level, on a worker's stack.**
+        // Authorization walks a `run-query` tree and refuses a deep one, and an
+        // alert rule's stored query reaches this function without that walk. A
+        // few thousand nested limits fit inside one request and overflowed the
+        // stack, which stops the process, so the bound is here as well.
+        if depth > MAX_TREE_DEPTH {
+            return Err(too_deep());
+        }
         // A budget that only bounded the whole query would let one pathological
-        // subtree run for the whole of it. The check is at each operator.
-        self.check_deadline(started, request)?;
+        // subtree run for the whole of it. The check is at each operator, and
+        // again after each scan and inside each loop over rows, because every
+        // operator of a chain is entered before any of them does its work.
+        deadline.check()?;
 
         match node.node {
             QueryNodeKind::Scan => {
                 let scan = node.scan.as_ref().ok_or_else(|| missing("a scan"))?;
-                self.scan(scan)
+                let stage = self.scan(scan)?;
+                deadline.check()?;
+                Ok(stage)
             }
             QueryNodeKind::Filter => {
                 let filter = node.filter.as_ref().ok_or_else(|| missing("a filter"))?;
@@ -996,7 +1296,7 @@ impl QueryService {
                 // of reading the whole range. See `lookup_scan`.
                 let input = match self.lookup_scan(&inner, &filter.filter)? {
                     Some(stage) => stage,
-                    None => self.execute(&inner, request, started)?,
+                    None => self.execute(&inner, deadline, depth + 1)?,
                 };
                 let Stage::Rows {
                     rows,
@@ -1011,8 +1311,15 @@ impl QueryService {
                 };
                 let prepared: Prepared =
                     expr::prepare(&filter.filter, &rows, self.max_expression_depth)?;
+                let mut kept = Vec::new();
+                for (index, row) in rows.into_iter().enumerate() {
+                    deadline.check_at(index)?;
+                    if prepared.keeps(&row) {
+                        kept.push(row);
+                    }
+                }
                 Ok(Stage::Rows {
-                    rows: rows.into_iter().filter(|row| prepared.keeps(row)).collect(),
+                    rows: kept,
                     basis,
                     incomplete,
                     zone,
@@ -1028,10 +1335,10 @@ impl QueryService {
                 // states and never pulls raw rows to aggregate. It applies to
                 // an aggregate directly over a scan, because a filter above the
                 // scan is expression work this store contract does not carry.
-                if let Some(stage) = self.pushed_down_aggregate(node, aggregate)? {
+                if let Some(stage) = self.pushed_down_aggregate(node, aggregate, deadline)? {
                     return Ok(stage);
                 }
-                let input = self.execute(&child(&aggregate.input)?, request, started)?;
+                let input = self.execute(&child(&aggregate.input)?, deadline, depth + 1)?;
                 let Stage::Rows {
                     rows,
                     basis,
@@ -1043,28 +1350,28 @@ impl QueryService {
                         "An aggregate reads from a scan or a filter in this release.",
                     ));
                 };
-                self.aggregate(aggregate, rows, basis, incomplete, zone, None)
+                self.aggregate(aggregate, rows, basis, incomplete, zone, None, deadline)
             }
             QueryNodeKind::Project => {
                 let project = node.project.as_ref().ok_or_else(|| missing("a projection"))?;
-                let input = self.execute(&child(&project.input)?, request, started)?;
+                let input = self.execute(&child(&project.input)?, deadline, depth + 1)?;
                 self.project(project, input)
             }
             QueryNodeKind::Sort => {
                 let sort = node.sort.as_ref().ok_or_else(|| missing("a sort"))?;
-                let input = self.execute(&child(&sort.input)?, request, started)?;
+                let input = self.execute(&child(&sort.input)?, deadline, depth + 1)?;
                 let table = self.materialize(input);
                 self.sort(sort, table)
             }
             QueryNodeKind::Limit => {
                 let limit = node.limit.as_ref().ok_or_else(|| missing("a limit"))?;
-                let input = self.execute(&child(&limit.input)?, request, started)?;
+                let input = self.execute(&child(&limit.input)?, deadline, depth + 1)?;
                 let table = self.materialize(input);
                 Ok(Stage::Table(self.limit(limit, table)?))
             }
             QueryNodeKind::Union => {
                 let union: &UnionNode = node.union.as_ref().ok_or_else(|| missing("a union"))?;
-                self.union(union, request, started)
+                self.union(union, deadline, depth)
             }
             QueryNodeKind::Join => Err(unsupported(
                 "This installation does not answer a join yet. Correlating two datasets on an exact ID arrives with the trace query.",
@@ -1072,28 +1379,22 @@ impl QueryService {
         }
     }
 
-    fn check_deadline(
-        &self,
-        started: Instant,
-        request: &QueryRequest,
-    ) -> Result<(), TallyOwlError> {
+    /// The deadline of one request: what it asked for, and never more than
+    /// `query.maxRuntime`.
+    fn deadline_of(&self, request: &QueryRequest) -> Deadline {
         let allowed = request
             .budget
             .as_ref()
             .and_then(|b| b.deadline_ms)
             .filter(|deadline| *deadline > 0)
-            .map(|deadline| deadline.min(self.max_runtime_ms))
+            // `query.maxRuntime: 0` is no bound, so it must not lower a
+            // deadline the request asked for to zero.
+            .map(|deadline| match self.max_runtime_ms {
+                most if most > 0 => deadline.min(most),
+                _ => deadline,
+            })
             .unwrap_or(self.max_runtime_ms);
-        if allowed > 0 && started.elapsed().as_millis() as i64 > allowed {
-            return Err(TallyOwlError::new(
-                tallyowl_obs::ErrorCode::BudgetExceeded,
-                format!(
-                    "This query ran for longer than the {allowed} milliseconds it was allowed."
-                ),
-            )
-            .retryable(false));
-        }
-        Ok(())
+        Deadline::starting_now(allowed)
     }
 
     fn scan(&self, scan: &ScanNode) -> Result<Stage, TallyOwlError> {
@@ -1158,6 +1459,7 @@ impl QueryService {
         &self,
         node: &QueryNodeBox,
         aggregate: &AggregateNode,
+        deadline: Deadline,
     ) -> Result<Option<Stage>, TallyOwlError> {
         // An aggregate over a scan is pushed down, and so is an aggregate over
         // filters over a scan: the predicate travels inside the plan bytes the
@@ -1202,6 +1504,7 @@ impl QueryService {
             !partials.complete,
             zone,
             Some(partials.states),
+            deadline,
         )?))
     }
 
@@ -1212,6 +1515,9 @@ impl QueryService {
     /// of measures on the cluster contract: a second implementation of a sum is
     /// a second answer waiting to happen, and L102 records what that costs.
     pub fn partial_aggregate(&self, plan: &[u8]) -> Result<Option<Vec<u8>>, TallyOwlError> {
+        // The tablet has no request to read a budget from, so the bound is the
+        // installation's own.
+        let deadline = Deadline::starting_now(self.max_runtime_ms);
         let boxed = tallyowl_control_api::codec::decode_query_node_box(plan).map_err(|e| {
             TallyOwlError::internal(format!("A pushed-down aggregate could not be read: {e}"))
         })?;
@@ -1245,9 +1551,11 @@ impl QueryService {
         else {
             return Ok(None);
         };
+        deadline.check()?;
         for filter in filters.iter().rev() {
             let prepared: Prepared = expr::prepare(filter, &rows, self.max_expression_depth)?;
             rows.retain(|row| prepared.keeps(row));
+            deadline.check()?;
         }
 
         let bucketing = bucketing(aggregate, zone)?;
@@ -1264,12 +1572,14 @@ impl QueryService {
             &bucketing,
             &dimensions,
             &aggregate.measures,
+            deadline,
         )?;
         Ok(encode_partial_groups(&groups))
     }
 
     /// Group by dimensions, and by a time bucket when the query names an
     /// interval.
+    #[allow(clippy::too_many_arguments)]
     fn aggregate(
         &self,
         aggregate: &AggregateNode,
@@ -1280,6 +1590,7 @@ impl QueryService {
         // One encoded partial state for each tablet, when the aggregate was
         // pushed down. `None` means the rows above are what to fold.
         partials: Option<Vec<Vec<u8>>>,
+        deadline: Deadline,
     ) -> Result<Stage, TallyOwlError> {
         if aggregate.measures.is_empty() {
             return Err(TallyOwlError::invalid_argument(
@@ -1343,6 +1654,7 @@ impl QueryService {
                 &bucketing,
                 &dimensions,
                 &aggregate.measures,
+                deadline,
             )?,
         }
 
@@ -1496,8 +1808,8 @@ impl QueryService {
     fn union(
         &self,
         union: &UnionNode,
-        request: &QueryRequest,
-        started: Instant,
+        deadline: Deadline,
+        depth: u32,
     ) -> Result<Stage, TallyOwlError> {
         if union.union.is_empty() {
             return Err(TallyOwlError::invalid_argument(
@@ -1506,7 +1818,7 @@ impl QueryService {
         }
         let mut combined: Option<Table> = None;
         for encoded in &union.union {
-            let stage = self.execute(&child(encoded)?, request, started)?;
+            let stage = self.execute(&child(encoded)?, deadline, depth + 1)?;
             let table = self.materialize(stage);
             match combined.as_mut() {
                 None => combined = Some(table),
@@ -2643,17 +2955,21 @@ pub fn projects_named(request: &QueryRequest) -> Result<Vec<[u8; 16]>, TallyOwlE
 /// ever by an unauthenticated caller is worse than no check.
 const MAX_TREE_DEPTH: u32 = 64;
 
+fn too_deep() -> TallyOwlError {
+    TallyOwlError::new(
+        tallyowl_obs::ErrorCode::BudgetExceeded,
+        format!("This query nests operators more than {MAX_TREE_DEPTH} deep."),
+    )
+    .retryable(false)
+}
+
 fn collect_projects(
     node: &QueryNodeBox,
     out: &mut Vec<[u8; 16]>,
     depth: u32,
 ) -> Result<(), TallyOwlError> {
     if depth > MAX_TREE_DEPTH {
-        return Err(TallyOwlError::new(
-            tallyowl_obs::ErrorCode::BudgetExceeded,
-            format!("This query nests operators more than {MAX_TREE_DEPTH} deep."),
-        )
-        .retryable(false));
+        return Err(too_deep());
     }
     let walk = |encoded: &[u8], out: &mut Vec<[u8; 16]>| -> Result<(), TallyOwlError> {
         collect_projects(&child(encoded)?, out, depth + 1)
@@ -3302,8 +3618,10 @@ fn fold_rows(
     bucketing: &Option<Bucketing>,
     dimensions: &[(String, expr::Field)],
     measures: &[Measure],
+    deadline: Deadline,
 ) -> Result<(), TallyOwlError> {
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
+        deadline.check_at(index)?;
         let mut key: Vec<GroupKey> = Vec::new();
         if let Some(bucket) = bucketing {
             key.push(GroupKey::Integer(bucket.start_of(time_of(row, basis))));
@@ -3319,4 +3637,107 @@ fn fold_rows(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(count: usize) -> Vec<EventRow> {
+        (0..count)
+            .map(|n| {
+                let mut id = [0u8; 16];
+                id[..8].copy_from_slice(&(n as u64).to_be_bytes());
+                EventRow::new(id, "event", "checkout", 1_000 + n as i64)
+            })
+            .collect()
+    }
+
+    /// A deadline of one millisecond that started an hour ago. The clock is the
+    /// start time a test passes, so nothing here sleeps.
+    fn passed() -> Deadline {
+        Deadline::started_at(Instant::now() - std::time::Duration::from_secs(3_600), 1)
+    }
+
+    #[test]
+    fn a_deadline_that_passes_stops_the_loop_over_rows_and_not_only_the_next_operator() {
+        // `query.maxRuntime` was read when the executor entered an operator,
+        // and it enters every operator of a chain before any of them reads a
+        // row. So the fold ran to its end whatever the deadline said.
+        let measures = Vec::new();
+        let mut groups = BTreeMap::new();
+        let refused = fold_rows(
+            &mut groups,
+            &rows(10),
+            TimeBasis::OccurredAt,
+            &None,
+            &[],
+            &measures,
+            passed(),
+        )
+        .expect_err("the fold ran past its deadline");
+        assert_eq!(refused.code, tallyowl_obs::ErrorCode::BudgetExceeded);
+        assert!(groups.is_empty(), "rows were folded after the deadline");
+
+        // No bound is no bound, and a deadline that has time left reads every row.
+        let unbounded =
+            Deadline::started_at(Instant::now() - std::time::Duration::from_secs(3_600), 0);
+        fold_rows(
+            &mut groups,
+            &rows(10),
+            TimeBasis::OccurredAt,
+            &None,
+            &[],
+            &measures,
+            unbounded,
+        )
+        .expect("no bound");
+        assert_eq!(groups.len(), 1);
+    }
+
+    #[test]
+    fn the_clock_is_read_on_the_first_row_and_then_once_in_every_few_thousand() {
+        let deadline = passed();
+        assert!(deadline.check_at(0).is_err());
+        assert!(
+            deadline.check_at(1).is_ok(),
+            "the clock was read for every row"
+        );
+        assert!(deadline.check_at(Deadline::ROWS_BETWEEN_CHECKS).is_err());
+    }
+
+    #[test]
+    fn a_project_at_its_limit_is_refused_by_name_and_its_permits_come_back() {
+        let permits = ProjectPermits::new(2);
+        let (a, b) = ([1u8; 16], [2u8; 16]);
+        let first = permits.take(&[a]).expect("one");
+        let second = permits
+            .take(&[a, a])
+            .expect("two, and a project named twice counts once");
+        let refused = permits.take(&[a]).err().expect("the third is refused");
+        assert_eq!(refused.code, tallyowl_obs::ErrorCode::ResourceExhausted);
+        assert!(
+            refused
+                .message
+                .contains("query.maxConcurrentForEachProject"),
+            "{}",
+            refused.message
+        );
+        // Another project is not affected, and a union over both is refused
+        // without taking a permit in the project that had room.
+        assert!(permits.take(&[a, b]).is_err());
+        let other = permits
+            .take(&[b])
+            .expect("the other project has its own budget");
+        let again = permits
+            .take(&[b])
+            .expect("and the refused union took nothing from it");
+        drop((other, again));
+
+        drop(first);
+        permits
+            .take(&[a])
+            .expect("a finished query gives its permit back");
+        drop(second);
+    }
 }

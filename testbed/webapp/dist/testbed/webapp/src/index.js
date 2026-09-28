@@ -28,12 +28,19 @@ export function open(router, release = "seedstore-0.0.0") {
 /// The caller decides how far a session gets, because the ledger is what
 /// decides how many sessions complete and this surface must not invent one.
 export async function walk(storefront, steps) {
+    record(storefront, steps);
+    await storefront.client.flush();
+}
+/// Buffer `steps` of the funnel and send nothing.
+///
+/// This is the form for an event handler. A click handler has nobody to give a
+/// rejected promise to, so it records here and lets `flushSafely` send.
+export function record(storefront, steps) {
     for (const step of steps) {
         storefront.client.capture(Capture.event(step)
             .withSession(storefront.session.id)
             .withProperty("surface", text("web")));
     }
-    await storefront.client.flush();
 }
 /// Record a purchase. Money travels as an exact decimal and never as a float.
 export async function purchase(storefront, orderId, value, currency) {
@@ -80,12 +87,16 @@ export function start(routes = defaultRoutes) {
     const storefront = open(new HostRouter(routes));
     // The unload flush reaches seedstore's own route, never a TallyOwl address.
     storefront.client.attachUnloadFlush(unloadSender(routes), globalThis.document);
+    storefront.client.start();
     root.replaceChildren();
     for (const step of FUNNEL) {
         const button = document.createElement("button");
         button.textContent = step;
         button.addEventListener("click", () => {
-            void walk(storefront, [step]);
+            record(storefront, [step]);
+            // `flushSafely` never rejects. What seedstore's route did not take stays
+            // buffered, and the flush timer sends it again.
+            void storefront.client.flushSafely();
         });
         root.append(button);
     }

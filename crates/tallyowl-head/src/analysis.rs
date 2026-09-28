@@ -52,6 +52,28 @@ pub struct Guards {
     pub max_path_nodes: usize,
     pub max_correlation_keys: usize,
     pub max_timeline_rows: usize,
+    /// When the question that carries these guards runs out of time. `None` is
+    /// no bound, which is what a caller with no request has. Every loop over
+    /// rows or keys here reads it, because `query.maxRuntime` bounded nothing
+    /// an operator did once it had its rows.
+    pub deadline: Option<crate::query::Deadline>,
+}
+
+impl Guards {
+    /// These guards, for a question that must end by `deadline`.
+    pub fn within(&self, deadline: crate::query::Deadline) -> Guards {
+        Guards {
+            deadline: Some(deadline),
+            ..*self
+        }
+    }
+
+    fn check_time(&self, index: usize) -> Result<(), TallyOwlError> {
+        match &self.deadline {
+            Some(deadline) => deadline.check_at(index),
+            None => Ok(()),
+        }
+    }
 }
 
 impl Default for Guards {
@@ -70,6 +92,7 @@ impl Default for Guards {
             // memory as a budget, and this is its unit for these operators.
             max_correlation_keys: 2_000_000,
             max_timeline_rows: 10_000,
+            deadline: None,
         }
     }
 }
@@ -193,7 +216,8 @@ pub fn funnel(
         incomplete,
         ..Coverage::default()
     };
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
+        guards.check_time(index)?;
         match identity.key_for(row, question.basis, question.resolution) {
             None => coverage.rows_without_identity += 1,
             Some(key) => {
@@ -227,7 +251,8 @@ pub fn funnel(
         .collect();
     let mut by_dimension: BTreeMap<String, Vec<StepResult>> = BTreeMap::new();
 
-    for (_key, mut owned) in by_key {
+    for (index, (_key, mut owned)) in by_key.into_iter().enumerate() {
+        guards.check_time(index)?;
         owned.sort_by_key(|row| (row.occurred_at, row.event_id));
         let Some(walked) = walk(&owned, &real, &exclusions, question) else {
             continue;
@@ -483,7 +508,8 @@ pub fn retention(
 
     // What each key did, in time order.
     let mut by_key: BTreeMap<String, Vec<&EventRow>> = BTreeMap::new();
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
+        guards.check_time(index)?;
         match identity.key_for(row, question.basis, question.resolution) {
             None => coverage.rows_without_identity += 1,
             Some(key) => {
@@ -501,7 +527,8 @@ pub fn retention(
     coverage.keys = by_key.len();
 
     let mut cohorts: BTreeMap<usize, Cohort> = BTreeMap::new();
-    for (_key, mut owned) in by_key {
+    for (index, (_key, mut owned)) in by_key.into_iter().enumerate() {
+        guards.check_time(index)?;
         owned.sort_by_key(|row| (row.occurred_at, row.event_id));
 
         let Some(entered) = owned.iter().find(|row| question.initial.keeps(row)) else {
@@ -615,7 +642,8 @@ pub fn path(
         ..Coverage::default()
     };
     let mut by_key: BTreeMap<String, Vec<&EventRow>> = BTreeMap::new();
-    for row in rows {
+    for (index, row) in rows.iter().enumerate() {
+        guards.check_time(index)?;
         match identity.key_for(row, question.basis, question.resolution) {
             None => coverage.rows_without_identity += 1,
             Some(key) => by_key.entry(key).or_default().push(row),
@@ -625,7 +653,8 @@ pub fn path(
 
     // Each key contributes at most one sequence, from its first anchor.
     let mut sequences: Vec<Vec<String>> = Vec::new();
-    for (_key, mut owned) in by_key {
+    for (index, (_key, mut owned)) in by_key.into_iter().enumerate() {
+        guards.check_time(index)?;
         owned.sort_by_key(|row| (row.occurred_at, row.event_id));
         let Some(anchor_at) = owned.iter().position(|row| question.anchor.keeps(row)) else {
             continue;

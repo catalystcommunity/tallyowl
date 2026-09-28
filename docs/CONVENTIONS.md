@@ -99,6 +99,35 @@ Known cases where readiness must fail:
 A health response says which check failed, in the language of section 1. "Cannot
 reach the durable store" beats "corndogs_conn=nil".
 
+### What makes liveness fail
+
+One state makes liveness fail. A role thread of the collector ended: the
+sweep, the delivery loop, the depth count, or the watchdog. The process cannot
+start that thread again, and a restart repairs it. The collector also fails
+the `role-threads` health check, so the health report gives the cause.
+
+`/livez` answers 200 from the moment the operational port opens, which is
+before the store opens. No other code path marks a process as not live. The
+head has no such state.
+
+This has two results:
+
+- A liveness probe never stops a node during a long recovery of the append
+  log. That is correct. A probe that restarts a node in recovery causes an
+  outage that repeats.
+- A liveness probe does not detect a loop that is stalled but has not ended.
+  Readiness detects it. The collector fails `delivery-loop` when the delivery
+  loop does not turn. The head sets a `loop-<name>` check to degraded when a
+  background loop does not finish a pass. The rules in `deploy/monitoring/`
+  read the same ages.
+
+The charts also set a startup probe on `/livez`. It waits for the operational
+port and delays the other probes until that port answers.
+
+Liveness must fail only for a state that a restart repairs and that the process
+cannot repair itself. When a release adds such a state, this section must name
+it.
+
 ### Degraded, and saying why
 
 A component can be alive, ready, and unwell. A node that answers every request

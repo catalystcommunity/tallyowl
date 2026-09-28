@@ -285,11 +285,16 @@ fn read(bytes: &[u8], at: usize, depth: usize) -> Result<(Value, usize), DecodeE
         2 | 3 => {
             let length = usize::try_from(argument)
                 .map_err(|_| error("a length is larger than this reader holds", at))?;
-            // Validate the declared length before allocating for it.
-            if used + length > bytes.len() {
+            // Validate the declared length before allocating for it. The
+            // comparison is a subtraction, because a declared length near the
+            // top of 64 bits wrapped the sum, passed the check, and the slice
+            // below then stopped the process.
+            if length > bytes.len().saturating_sub(used) {
                 return Err(error("a value claims more bytes than remain", at));
             }
-            let slice = &bytes[used..used + length];
+            let slice = bytes
+                .get(used..used + length)
+                .ok_or_else(|| error("a value claims more bytes than remain", at))?;
             used += length;
             if major == 2 {
                 Value::Bytes(slice.to_vec())
@@ -306,7 +311,7 @@ fn read(bytes: &[u8], at: usize, depth: usize) -> Result<(Value, usize), DecodeE
                 .map_err(|_| error("an array is longer than this reader holds", at))?;
             // One byte is the least any item can take, so a count larger than
             // what remains is a damaged file rather than a large allocation.
-            if count > bytes.len() - used {
+            if count > bytes.len().saturating_sub(used) {
                 return Err(error("an array claims more items than remain", at));
             }
             let mut items = Vec::with_capacity(count);
@@ -320,7 +325,7 @@ fn read(bytes: &[u8], at: usize, depth: usize) -> Result<(Value, usize), DecodeE
         5 => {
             let count = usize::try_from(argument)
                 .map_err(|_| error("a map is larger than this reader holds", at))?;
-            if count > bytes.len() - used {
+            if count > bytes.len().saturating_sub(used) {
                 return Err(error("a map claims more entries than remain", at));
             }
             let mut entries = BTreeMap::new();
@@ -340,7 +345,9 @@ fn read(bytes: &[u8], at: usize, depth: usize) -> Result<(Value, usize), DecodeE
             21 => Value::Bool(true),
             22 => Value::Null,
             27 => Value::Float(f64::from_be_bytes(
-                bytes[at + 1..at + 9]
+                bytes
+                    .get(at + 1..at + 9)
+                    .ok_or_else(|| error("a number stops early", at))?
                     .try_into()
                     .map_err(|_| error("a number stops early", at))?,
             )),
@@ -353,7 +360,7 @@ fn read(bytes: &[u8], at: usize, depth: usize) -> Result<(Value, usize), DecodeE
 }
 
 fn read_be(bytes: &[u8], at: usize, width: usize) -> Result<u64, DecodeError> {
-    if at + width > bytes.len() {
+    if at > bytes.len() || width > bytes.len() - at {
         return Err(error("a number stops early", at));
     }
     let mut out = 0u64;
@@ -370,6 +377,29 @@ mod tests {
     fn round_trip(value: Value) {
         let bytes = encode(&value);
         assert_eq!(decode(&bytes).unwrap(), value, "{value:?}");
+    }
+
+    #[test]
+    fn a_declared_length_near_the_top_of_64_bits_is_refused_and_does_not_stop_the_process() {
+        // `used + length` wrapped, passed the check, and the slice panicked.
+        // These bytes come from disk and from a peer, so a panic here took a
+        // node down on one bad file.
+        for major in [0x5bu8, 0x7b] {
+            for length in [u64::MAX, u64::MAX - 8, u64::MAX - 9] {
+                let mut bytes = vec![major];
+                bytes.extend_from_slice(&length.to_be_bytes());
+                bytes.extend_from_slice(b"tail");
+                assert!(decode(&bytes).is_err(), "{major:#x} {length}");
+            }
+        }
+        // An array and a map that claim more items than there are bytes.
+        for major in [0x9bu8, 0xbb] {
+            let mut bytes = vec![major];
+            bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+            assert!(decode(&bytes).is_err());
+        }
+        // A float that stops early.
+        assert!(decode(&[0xfb, 0, 0, 0]).is_err());
     }
 
     #[test]

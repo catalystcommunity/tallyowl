@@ -3,7 +3,7 @@
 // Target: typescript-codec
 
 import { CsilDecimal } from "./types.gen.ts";
-import type { AliasPayload, Batch, BatchId, CampaignCostPayload, CampaignLinking, CampaignParameters, CampaignTouchPayload, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, CollectionPolicy, CollectorHealth, CommitBatchRequest, CommitBatchResponse, Compression, Consent, ConsentState, ConversionPayload, DeliveryTask, DurationMs, Envelope, ErrorCode, ErrorPayload, EventId, EventPayload, FeatureExposurePayload, FetchPolicyRequest, FetchPolicyResponse, GroupPayload, HealthRequest, HistogramValue, IdentifyPayload, InteractionPayload, Measurement, MeasurementKind, MeasurementList, MetricKind, MetricPointPayload, PageViewPayload, PolicyVersionRequest, PolicyVersionResponse, ProjectId, Property, PropertyList, PropertyOrigin, ProtectedKey, ReceiptPolicy, RejectedItem, ResolveKeyRequest, ResolveKeyResponse, RetentionClass, RetentionRule, SamplingClause, ServiceError, SessionEndPayload, SessionId, SessionStartPayload, SourceId, SpanId, SpanKind, SpanLink, SpanPayload, StackFrame, SubmitBatchRequest, SubmitBatchResponse, TailRule, TelemetryItem, TelemetryKind, Timestamp, TraceId, TypedValue, TypedValueKind, WorkspaceId } from "./types.gen.ts";
+import type { AlertNotifyRequest, AlertNotifyResponse, AliasPayload, Batch, BatchId, CampaignCostPayload, CampaignLinking, CampaignParameters, CampaignTouchPayload, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, CollectionPolicy, CollectorHealth, CommitBatchRequest, CommitBatchResponse, Compression, Consent, ConsentState, ConversionPayload, DeliveryTask, DurationMs, Envelope, ErrorCode, ErrorPayload, EventId, EventPayload, FeatureExposurePayload, FetchPolicyRequest, FetchPolicyResponse, GroupPayload, HealthRequest, HistogramValue, IdentifyPayload, InteractionPayload, Measurement, MeasurementKind, MeasurementList, MetricKind, MetricPointPayload, PageViewPayload, PolicyVersionRequest, PolicyVersionResponse, ProjectId, Property, PropertyList, PropertyOrigin, ProtectedKey, ReceiptPolicy, RejectedItem, ResolveKeyRequest, ResolveKeyResponse, RetentionClass, RetentionRule, SamplingClause, ServiceError, SessionEndPayload, SessionId, SessionStartPayload, SourceId, SpanId, SpanKind, SpanLink, SpanPayload, StackFrame, SubmitBatchRequest, SubmitBatchResponse, TailRule, TelemetryItem, TelemetryKind, Timestamp, TraceId, TypedValue, TypedValueKind, WorkspaceId } from "./types.gen.ts";
 
 /** A CBOR semantic tag wrapping an inner value (e.g. tag 0 timestamp, tag 4 decimal). */
 export type CborTag = { readonly tag: number; readonly value: CborValue };
@@ -1731,5 +1731,47 @@ export function toPolicyVersionResponseCbor(v: PolicyVersionResponse): Uint8Arra
 
 export function fromPolicyVersionResponseCbor(bytes: Uint8Array): PolicyVersionResponse {
   return fromPolicyVersionResponseCborValue(decode(bytes));
+}
+
+export function toAlertNotifyRequestCborValue(v: AlertNotifyRequest): CborValue {
+  const csilMap = new Map<CborValue, CborValue>();
+  csilMap.set("body", v.body);
+  csilMap.set("signature", v.signature);
+  csilMap.set("signed_at", v.signedAt);
+  return csilMap;
+}
+
+export function fromAlertNotifyRequestCborValue(value: CborValue): AlertNotifyRequest {
+  return {
+    signedAt: asNumber(requireKey(value, "signed_at")),
+    signature: asString(requireKey(value, "signature")),
+    body: asBytes(requireKey(value, "body")),
+  };
+}
+
+export function toAlertNotifyRequestCbor(v: AlertNotifyRequest): Uint8Array {
+  return encodeValue(toAlertNotifyRequestCborValue(v));
+}
+
+export function fromAlertNotifyRequestCbor(bytes: Uint8Array): AlertNotifyRequest {
+  return fromAlertNotifyRequestCborValue(decode(bytes));
+}
+
+export function toAlertNotifyResponseCborValue(v: AlertNotifyResponse): CborValue {
+  const csilMap = new Map<CborValue, CborValue>();
+  return csilMap;
+}
+
+export function fromAlertNotifyResponseCborValue(value: CborValue): AlertNotifyResponse {
+  void value;
+  return {} as AlertNotifyResponse;
+}
+
+export function toAlertNotifyResponseCbor(v: AlertNotifyResponse): Uint8Array {
+  return encodeValue(toAlertNotifyResponseCborValue(v));
+}
+
+export function fromAlertNotifyResponseCbor(bytes: Uint8Array): AlertNotifyResponse {
+  return fromAlertNotifyResponseCborValue(decode(bytes));
 }
 

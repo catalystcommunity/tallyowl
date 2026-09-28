@@ -124,3 +124,22 @@ func (c *TallyOwlIngestClient) PolicyVersion(ctx context.Context, req PolicyVers
 	}
 	return DecodePolicyVersionResponse(csilResp)
 }
+
+// TallyOwlAlertReceiverClient is a typed client for the TallyOwlAlertReceiver service. The client owns
+// (de)serialization via the generated codec; the transport only moves bytes.
+type TallyOwlAlertReceiverClient struct {
+	transport Transport
+}
+
+func NewTallyOwlAlertReceiverClient(transport Transport) *TallyOwlAlertReceiverClient {
+	return &TallyOwlAlertReceiverClient{transport: transport}
+}
+
+func (c *TallyOwlAlertReceiverClient) Notify(ctx context.Context, req AlertNotifyRequest) (AlertNotifyResponse, error) {
+	var csilZero AlertNotifyResponse
+	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlAlertReceiver", "notify", EncodeAlertNotifyRequest(req))
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	return DecodeAlertNotifyResponse(csilResp)
+}

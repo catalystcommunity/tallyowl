@@ -14,4 +14,4 @@ export declare class HostRouter implements Router {
         payload: Uint8Array;
     }>;
 }
-export declare function unloadSender(routes?: HostRoutes, beacon?: (url: string, payload: BlobPart) => boolean): (payload: Uint8Array) => void;
+export declare function unloadSender(routes?: HostRoutes, beacon?: (url: string, payload: BlobPart) => boolean): (payload: Uint8Array) => boolean;

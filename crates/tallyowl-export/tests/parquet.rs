@@ -427,3 +427,135 @@ fn an_export_stops_rather_than_displacing_live_data() {
         50
     );
 }
+
+#[test]
+fn an_export_walks_windows_and_a_type_that_differs_between_them_becomes_text() {
+    // The export holds one window of rows at a time, so the columns come from a
+    // first pass over the whole range. A property that is a number in the first
+    // hour and text in the third must still export as text, with every row.
+    let place = directory("windows");
+    let store = store(&place);
+    let mut spread = rows(30);
+    for (index, row) in spread.iter_mut().enumerate() {
+        // Three hours, so the range is several windows wide.
+        row.occurred_at = BASE_TIME + (index as i64 % 3) * 3_600_000 + index as i64;
+        row.received_at = row.occurred_at + 5;
+    }
+    spread[29].properties.insert(
+        "attempts".into(),
+        (PropertyValue::Text("many".into()), "client".into()),
+    );
+    store.commit([1; 16], [1; 16], spread).unwrap();
+
+    let file = place.join("windows.parquet");
+    let manifest = export_events(
+        &store,
+        &ExportRequest {
+            project_id: PROJECT,
+            range_start: BASE_TIME,
+            range_end: BASE_TIME + 4 * 3_600_000,
+            basis: TimeBasis::OccurredAt,
+            into: file.clone(),
+            tombstone_generation: 0,
+            reserve_bytes: 0,
+        },
+    )
+    .expect("the export runs");
+    assert_eq!(
+        manifest.rows, 30,
+        "a window boundary lost or repeated a row"
+    );
+
+    let counted = query(
+        &file,
+        &format!(
+            "SELECT count(*), count(DISTINCT event_id), count(p_attempts) FROM read_parquet('{}')",
+            file.display()
+        ),
+    );
+    assert_eq!(counted, "30|30|30", "{counted}");
+    let text = query(
+        &file,
+        &format!(
+            "SELECT count(*) FROM read_parquet('{}') WHERE p_attempts = 'many'",
+            file.display()
+        ),
+    );
+    assert_eq!(
+        text, "1",
+        "the conflicting value in a later window was dropped"
+    );
+}
+
+#[test]
+fn an_export_never_replaces_a_file() {
+    // A destination that named a live file was truncated. The export now
+    // creates its file new, and a name that is taken is refused untouched.
+    let place = directory("taken");
+    let store = store(&place);
+    store.commit([1; 16], [1; 16], rows(5)).unwrap();
+
+    std::fs::create_dir_all(&place).unwrap();
+    let file = place.join("taken.parquet");
+    std::fs::write(&file, b"somebody else's bytes").unwrap();
+
+    let request = ExportRequest {
+        project_id: PROJECT,
+        range_start: BASE_TIME - 1,
+        range_end: BASE_TIME + 1_000_000,
+        basis: TimeBasis::OccurredAt,
+        into: file.clone(),
+        tombstone_generation: 0,
+        reserve_bytes: 0,
+    };
+    let refused = export_events(&store, &request).unwrap_err();
+    assert!(
+        refused.to_string().contains("never replaces a file"),
+        "{refused}"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"somebody else's bytes");
+    assert!(!manifest_path_for(&file).exists());
+
+    // A description that is already there is somebody's as well.
+    let other = place.join("described.parquet");
+    std::fs::write(manifest_path_for(&other), b"an older description").unwrap();
+    let refused = export_events(
+        &store,
+        &ExportRequest {
+            into: other.clone(),
+            ..request
+        },
+    )
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("never replaces a file"),
+        "{refused}"
+    );
+    assert!(!other.exists(), "a refused export left a file behind");
+}
+
+#[test]
+fn an_export_with_no_range_or_an_endless_one_is_refused_in_words() {
+    let place = directory("ranges");
+    let store = store(&place);
+    store.commit([1; 16], [1; 16], rows(5)).unwrap();
+    let request = |range_start, range_end, name: &str| ExportRequest {
+        project_id: PROJECT,
+        range_start,
+        range_end,
+        basis: TimeBasis::OccurredAt,
+        into: place.join(name),
+        tombstone_generation: 0,
+        reserve_bytes: 0,
+    };
+
+    // `0..0` is what a request with no range used to become, and it wrote an
+    // empty file and reported success.
+    let none = export_events(&store, &request(0, 0, "none.parquet")).unwrap_err();
+    assert!(none.to_string().contains("needs a time range"), "{none}");
+    assert!(!place.join("none.parquet").exists());
+
+    let endless = export_events(&store, &request(0, i64::MAX, "endless.parquet")).unwrap_err();
+    assert!(endless.to_string().contains("shorter range"), "{endless}");
+    assert!(!place.join("endless.parquet").exists());
+}

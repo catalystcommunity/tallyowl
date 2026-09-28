@@ -32,10 +32,8 @@ use tallyowl_control_api::types::{
 use tallyowl_obs::error::{ErrorCode, TallyOwlError};
 use tallyowl_obs::metrics::{labels, Registry};
 use tallyowl_obs::time::now_ms;
-use tallyowl_store::certificates::{
-    sign_request, IssuedCertificate, Subject, DEFAULT_CERTIFICATE_LIFETIME_MS,
-};
-use tallyowl_store::control::{Role, SignedIn, OPERATOR_ISSUER};
+use tallyowl_store::certificates::{sign_request, IssuedCertificate, Subject};
+use tallyowl_store::control::SignedIn;
 use tallyowl_store::identity::{
     EnrollmentRefusal, NodeRecord, NodeRole, ResolvedToken, RoleTokenPolicy, ENROLLMENT_REFUSAL,
 };
@@ -53,6 +51,11 @@ pub struct EnrollmentService {
     pub store: Arc<SegmentedStore>,
     pub metrics: Arc<Registry>,
 }
+
+/// Who a connection proved it is. A mutual TLS listener reads it from the
+/// peer's verified leaf certificate and passes it to
+/// [`EnrollmentService::renew`]. D62.
+pub use tallyowl_rpc::PeerIdentity;
 
 impl EnrollmentService {
     pub fn declare_metrics(metrics: &Registry) {
@@ -77,7 +80,9 @@ impl EnrollmentService {
         self.count(refusal.as_str());
         let retryable = matches!(
             refusal,
-            EnrollmentRefusal::UsesExhausted | EnrollmentRefusal::ActiveNodeLimit
+            EnrollmentRefusal::UsesExhausted
+                | EnrollmentRefusal::ActiveNodeLimit
+                | EnrollmentRefusal::RateLimited
         );
         // A malformed request is the one case where the caller can act on the
         // detail, and it says nothing about the installation.
@@ -132,17 +137,22 @@ impl EnrollmentService {
     pub fn list_role_tokens(
         &self,
         signed_in: &SignedIn,
-        _request: ListRequest,
+        request: ListRequest,
     ) -> Result<RoleTokenList, TallyOwlError> {
         self.require_installation_authority(signed_in)?;
         let now = now_ms();
+        // The page is cut first, so the live-node count runs for the tokens of
+        // this page and not for every token there is.
+        let (held, next_cursor) = crate::control::page(
+            self.store
+                .catalog()
+                .role_tokens()
+                .map_err(control_failure)?,
+            &request,
+            |token| order_key(token.created_at, &token.token_id),
+        );
         let mut tokens = Vec::new();
-        for token in self
-            .store
-            .catalog()
-            .role_tokens()
-            .map_err(control_failure)?
-        {
+        for token in held {
             let active = self
                 .store
                 .catalog()
@@ -161,7 +171,7 @@ impl EnrollmentService {
         }
         Ok(RoleTokenList {
             tokens,
-            next_cursor: None,
+            next_cursor,
         })
     }
 
@@ -174,6 +184,24 @@ impl EnrollmentService {
         self.store
             .guard_control_write()
             .map_err(crate::ingest::to_service_error)?;
+        // A mistyped ID used to answer "revoked" and leave the real token
+        // live. During an incident that is the worst answer there is.
+        if self
+            .store
+            .catalog()
+            .role_token(&request.token_id)
+            .map_err(control_failure)?
+            .is_none()
+        {
+            return Err(TallyOwlError::new(
+                ErrorCode::NotFound,
+                format!(
+                    "There is no role token with the ID `{}`, so nothing was revoked. List the role tokens and copy the ID from there.",
+                    request.token_id
+                ),
+            )
+            .retryable(false));
+        }
         self.store
             .catalog()
             .revoke_role_token(
@@ -212,11 +240,14 @@ impl EnrollmentService {
         self.store
             .guard_control_write()
             .map_err(crate::ingest::to_service_error)?;
+        // A head that is not a signer says so, with the settings that make it
+        // one. That is a fact about this head's configuration and not about
+        // the caller's token, so it does not need the one-sentence refusal.
         let authority = self
             .store
             .catalog()
             .certificate_authority()
-            .map_err(|e| TallyOwlError::internal(e.to_string()))?;
+            .map_err(|e| TallyOwlError::new(ErrorCode::FailedPrecondition, e.to_string()))?;
 
         // A stateful node asks for its own identity again; a stateless one gets
         // a fresh identity every time. Section 8 against section 7.
@@ -225,13 +256,19 @@ impl EnrollmentService {
             None => new_node_id(),
         };
 
-        let lifetime = resolved
-            .policy
-            .certificate_lifetime_ms
-            .unwrap_or(DEFAULT_CERTIFICATE_LIFETIME_MS)
-            .clamp(60_000, DEFAULT_CERTIFICATE_LIFETIME_MS);
+        let lifetime = certificate_lifetime(&resolved.policy);
 
-        let issued = sign_request(
+        // The token gives up one enrollment before anything is signed. The use
+        // count, the hourly rate, and the revocation are one transaction there,
+        // so two enrollments cannot share the last use and a revoked token
+        // signs nothing.
+        self.store
+            .catalog()
+            .claim_token_use(&resolved.token_id, now)
+            .map_err(control_failure)?
+            .map_err(|refusal| self.refuse(&refusal))?;
+
+        let enrolled = sign_request(
             &authority,
             &request.certificate_request,
             &Subject {
@@ -243,18 +280,28 @@ impl EnrollmentService {
             now,
             lifetime,
         )
-        .map_err(|e| self.refuse(&EnrollmentRefusal::MalformedRequest(e.to_string())))?;
-
-        self.record(
-            &node_id,
-            &resolved,
-            requested_role,
-            cell,
-            region,
-            &issued,
-            request.capabilities.as_ref(),
-            now,
-        )?;
+        .map_err(|e| self.refuse(&EnrollmentRefusal::MalformedRequest(e.to_string())))
+        .and_then(|issued| {
+            self.record(
+                &node_id,
+                &resolved,
+                requested_role,
+                cell,
+                region,
+                &issued,
+                request.capabilities.as_ref(),
+                now,
+            )?;
+            Ok(issued)
+        });
+        let issued = match enrolled {
+            Ok(issued) => issued,
+            Err(failure) => {
+                // Nothing was enrolled, so the token keeps its use.
+                let _ = self.store.catalog().release_token_use(&resolved.token_id);
+                return Err(failure);
+            }
+        };
         self.count("enrolled");
 
         Ok(response_for(
@@ -271,11 +318,29 @@ impl EnrollmentService {
     ///
     /// Section 6: a deployment can drop the token after enrollment. This is what
     /// makes that true.
+    ///
+    /// **The identity is the peer's certificate, and nothing in the request.**
+    /// The request names a node ID and carries a certificate request, and a
+    /// node ID is in a log line, in `list-nodes`, and in every certificate's
+    /// common name. A renewal that trusted it would sign a certificate, with
+    /// that node's role and location, for anybody who could reach the listener.
+    /// So the listener passes what the handshake proved, and the two must
+    /// match.
+    ///
+    /// A listener that verified nothing passes `None`, and the renewal is
+    /// refused. A refused node enrolls again with its role token, which does
+    /// authenticate it.
     pub fn renew(
         &self,
         request: RenewNodeCertificateRequest,
+        peer: Option<&PeerIdentity>,
     ) -> Result<EnrollNodeResponse, TallyOwlError> {
         let now = now_ms();
+        let Some(peer) = peer.filter(|peer| peer.node_id == request.node_id) else {
+            return Err(self.refuse(&EnrollmentRefusal::Credential(
+                tallyowl_store::control::AuthFailure::Unknown,
+            )));
+        };
         let held = self
             .store
             .catalog()
@@ -286,6 +351,18 @@ impl EnrollmentService {
                     tallyowl_store::control::AuthFailure::Unknown,
                 ))
             })?;
+
+        // A certificate that is not the node's current one is an old identity,
+        // and a renewal is for the identity a node holds now. The record holds
+        // the serial in lowercase hexadecimal, as the peer's certificate is read.
+        if !peer
+            .certificate_serial
+            .eq_ignore_ascii_case(&held.certificate_serial)
+        {
+            return Err(self.refuse(&EnrollmentRefusal::Credential(
+                tallyowl_store::control::AuthFailure::Revoked,
+            )));
+        }
 
         // A revoked or long-expired node re-enrolls with a token. Renewal is for
         // an identity that is still its own.
@@ -302,11 +379,11 @@ impl EnrollmentService {
             .catalog()
             .role_token(&held.token_id)
             .map_err(control_failure)?;
-        if !token.is_some_and(|token| token.is_active(now)) {
+        let Some(token) = token.filter(|token| token.is_active(now)) else {
             return Err(self.refuse(&EnrollmentRefusal::Credential(
                 tallyowl_store::control::AuthFailure::Revoked,
             )));
-        }
+        };
 
         self.store
             .guard_control_write()
@@ -326,17 +403,25 @@ impl EnrollmentService {
                 region: held.region.clone(),
             },
             now,
-            DEFAULT_CERTIFICATE_LIFETIME_MS,
+            // The token's own lifetime, as at enrollment. A token limited to
+            // one hour used to get a day at its first renewal. See L057.
+            certificate_lifetime(&token.policy),
         )
         .map_err(|e| self.refuse(&EnrollmentRefusal::MalformedRequest(e.to_string())))?;
 
-        let mut renewed = held.clone();
-        renewed.certificate_serial = issued.serial.clone();
-        renewed.expires_at = issued.expires_at;
-        self.store
+        // The record is read again inside the write. A revocation that landed
+        // while this signed is kept, and the certificate is then never
+        // returned.
+        let recorded = self
+            .store
             .catalog()
-            .put_node(&renewed)
+            .renew_node(&held.node_id, &issued.serial, issued.expires_at, now)
             .map_err(control_failure)?;
+        if !recorded {
+            return Err(self.refuse(&EnrollmentRefusal::Credential(
+                tallyowl_store::control::AuthFailure::Revoked,
+            )));
+        }
         self.count("renewed");
 
         Ok(response_for(
@@ -352,14 +437,15 @@ impl EnrollmentService {
     pub fn list_nodes(
         &self,
         signed_in: &SignedIn,
-        _request: ListRequest,
+        request: ListRequest,
     ) -> Result<NodeList, TallyOwlError> {
         self.require_installation_authority(signed_in)?;
-        let nodes = self
-            .store
-            .catalog()
-            .nodes()
-            .map_err(control_failure)?
+        let (held, next_cursor) = crate::control::page(
+            self.store.catalog().nodes().map_err(control_failure)?,
+            &request,
+            |node| order_key(node.enrolled_at, &node.node_id),
+        );
+        let nodes = held
             .into_iter()
             .map(|node| NodeSummary {
                 node_id: node.node_id,
@@ -373,10 +459,7 @@ impl EnrollmentService {
                 revoked: node.revoked_at.is_some(),
             })
             .collect();
-        Ok(NodeList {
-            nodes,
-            next_cursor: None,
-        })
+        Ok(NodeList { nodes, next_cursor })
     }
 
     /// Remove node records whose certificates expired long enough ago.
@@ -497,10 +580,6 @@ impl EnrollmentService {
                     .map(|c| c.software_version.clone())
                     .unwrap_or_default(),
             })
-            .map_err(control_failure)?;
-        self.store
-            .catalog()
-            .record_token_use(&resolved.token_id, now)
             .map_err(control_failure)
     }
 
@@ -519,12 +598,7 @@ impl EnrollmentService {
     /// the role model is workspace-scoped; an installation-scoped role is the
     /// wider change it names.
     fn require_installation_authority(&self, signed_in: &SignedIn) -> Result<(), TallyOwlError> {
-        let allowed = signed_in.issuer == OPERATOR_ISSUER
-            || signed_in
-                .memberships
-                .iter()
-                .any(|(_, role)| role.allows(Role::Owner));
-        if allowed {
+        if crate::control::holds_installation_authority(signed_in) {
             return Ok(());
         }
         Err(TallyOwlError::new(
@@ -532,6 +606,25 @@ impl EnrollmentService {
             "Only somebody who administers this installation can manage role tokens and enrolled nodes.",
         ))
     }
+}
+
+/// The order of a list a person reads oldest first: the moment, then the ID,
+/// so two records of one millisecond still have one order.
+fn order_key(at: i64, id: &str) -> Vec<u8> {
+    // The sign bit is flipped so that the bytes sort the way the number does.
+    let mut key = ((at as u64) ^ (1 << 63)).to_be_bytes().to_vec();
+    key.extend_from_slice(id.as_bytes());
+    key
+}
+
+/// How long a certificate this token's nodes ask for.
+///
+/// One rule for enrollment and for renewal. A token that names no lifetime
+/// asks for the most the head issues. `sign_request` then holds every request
+/// between a minute and `enrollment.certificateLifetimeHours`, so the token can
+/// shorten the head's lifetime and cannot lengthen it.
+fn certificate_lifetime(policy: &RoleTokenPolicy) -> i64 {
+    policy.certificate_lifetime_ms.unwrap_or(i64::MAX)
 }
 
 fn response_for(

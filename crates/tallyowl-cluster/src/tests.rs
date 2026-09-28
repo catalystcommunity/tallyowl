@@ -29,7 +29,9 @@ use crate::topology::{
 };
 
 mod consensus;
+mod durability;
 mod operator;
+mod seed;
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -880,18 +880,18 @@ fn arithmetic(op: &ArithOp, left: &PropertyValue, right: &PropertyValue) -> Outc
             ArithOp::Add => a.checked_add(b),
             ArithOp::Sub => a.checked_sub(b),
             ArithOp::Mul => a.checked_mul(b),
-            ArithOp::Div => {
-                if b == 0 {
-                    None
-                } else if a % b == 0 {
-                    Some(a / b)
-                } else {
-                    // Not an exact integer. Fall through to the float below
-                    // rather than truncating, which would be a wrong answer
-                    // that looks right.
-                    None
-                }
-            }
+            // `checked_rem` and `checked_div`, because the smallest integer
+            // divided by minus one has no answer an integer can hold. The plain
+            // operators stop the thread on that pair in every build, and the
+            // pair is two literals anybody may write in a saved filter. It
+            // falls through to the float below, as an inexact division does.
+            ArithOp::Div => match a.checked_rem(b) {
+                Some(0) => a.checked_div(b),
+                // Not an exact integer, or a zero divisor. Fall through to
+                // the float below rather than truncating, which would be a
+                // wrong answer that looks right.
+                _ => None,
+            },
         };
         if let Some(value) = value {
             return Outcome::Known(PropertyValue::Integer(value));
@@ -1070,5 +1070,43 @@ fn convert(value: &PropertyValue, to: &str) -> Outcome {
             _ => Outcome::Unknown,
         },
         _ => Outcome::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_smallest_integer_divided_by_minus_one_is_a_number_and_not_a_stopped_thread() {
+        // Two literals in a saved alert filter. The plain operators stop the
+        // thread on this pair in a release build as well as a debug one, and
+        // the thread was the only alert evaluation worker.
+        let smallest = PropertyValue::Integer(i64::MIN);
+        let minus_one = PropertyValue::Integer(-1);
+        match arithmetic(&ArithOp::Div, &smallest, &minus_one) {
+            Outcome::Known(PropertyValue::Float(value)) => assert!(value > 9.0e18),
+            other => panic!("expected a float, got {other:?}"),
+        }
+        assert!(matches!(
+            arithmetic(&ArithOp::Div, &smallest, &PropertyValue::Integer(0)),
+            Outcome::Unknown
+        ));
+        assert!(matches!(
+            arithmetic(
+                &ArithOp::Div,
+                &PropertyValue::Integer(12),
+                &PropertyValue::Integer(4)
+            ),
+            Outcome::Known(PropertyValue::Integer(3))
+        ));
+        assert!(matches!(
+            arithmetic(
+                &ArithOp::Div,
+                &PropertyValue::Integer(7),
+                &PropertyValue::Integer(2)
+            ),
+            Outcome::Known(PropertyValue::Float(_))
+        ));
     }
 }

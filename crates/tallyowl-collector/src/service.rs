@@ -52,11 +52,6 @@ impl Dispatcher for CollectorService {
 
 impl CollectorService {
     fn submit_batch(&self, request: &Request) -> Outcome {
-        let decoded = match decode_submit_batch_request(&request.payload) {
-            Ok(decoded) => decoded,
-            Err(e) => return malformed(e),
-        };
-
         // The connection's credential decides tenancy. A per-request credential
         // overrides it only because Phase 1 has no connection-level
         // authentication yet; Phase 4 moves this to the connection.
@@ -65,7 +60,27 @@ impl CollectorService {
             .clone()
             .unwrap_or_else(|| self.credential.clone());
 
-        match self.intake.submit(&credential, decoded) {
+        // The credential first, and the batch second. The credential travels
+        // outside the payload, so nothing has to be decoded to read it, and a
+        // caller that has proved nothing does not get a frame of its choosing
+        // turned into a value tree several times its size.
+        let tenancy = match self.intake.authenticate(&credential) {
+            Ok(tenancy) => tenancy,
+            Err(e) => {
+                self.logger.warning(
+                    "Refused a batch.",
+                    &[("code", e.code.as_str()), ("reason", &e.message)],
+                );
+                return error_outcome(encode_service_error(&to_wire_error(&e)));
+            }
+        };
+
+        let decoded = match decode_submit_batch_request(&request.payload) {
+            Ok(decoded) => decoded,
+            Err(e) => return malformed(e),
+        };
+
+        match self.intake.submit_as(tenancy, decoded) {
             Ok(accepted) => {
                 self.logger.info(
                     "Accepted a batch into the durable store.",
@@ -184,4 +199,100 @@ fn primary_role(roles: &[String]) -> tallyowl_collector_api::types::CollectorHea
 /// Hexadecimal, for a log line that has to be correlated with another one.
 fn tallyowl_store_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::durable::testing::FakeQueue;
+    use crate::durable::DurableQueue;
+    use crate::intake::Limits;
+    use crate::tenancy::testing::FakeDirectory;
+    use crate::tenancy::{KeyDirectory, TenancyResolver};
+    use tallyowl_collector_api::codec::decode_service_error;
+    use tallyowl_obs::log::Severity;
+    use tallyowl_obs::metrics::{labels, Registry};
+
+    fn service(directory: Arc<FakeDirectory>, metrics: Arc<Registry>) -> CollectorService {
+        Intake::declare_metrics(&metrics);
+        CollectorService {
+            intake: Arc::new(Intake {
+                queue: FakeQueue::new() as Arc<dyn DurableQueue>,
+                queue_name: "tallyowl-delivery".into(),
+                tenancy: Arc::new(TenancyResolver::new(
+                    directory as Arc<dyn KeyDirectory>,
+                    60_000,
+                )),
+                limits: Limits {
+                    max_batch_bytes: 512 * 1024,
+                    max_event_bytes: 64 * 1024,
+                    max_properties: 128,
+                },
+                durable_copies: 1,
+                series: Arc::new(crate::series::SeriesLedger::new(
+                    crate::series::SeriesBudget::default(),
+                )),
+                metrics,
+                stamped: Vec::new(),
+                policy: None,
+            }),
+            health: Health::new(),
+            logger: Arc::new(Logger::new(
+                "collector-service-test",
+                "0.0.0",
+                Severity::Error,
+            )),
+            forwarder_state: ForwarderState::new(),
+            credential: String::new(),
+            roles: vec!["intake".into()],
+            policy: None,
+        }
+    }
+
+    fn submit(credential: &str, payload: Vec<u8>) -> Request {
+        let mut request = Request::new(SERVICE_NAME, "submit-batch", payload);
+        request.auth = Some(credential.to_string());
+        request
+    }
+
+    #[test]
+    fn a_caller_with_no_valid_key_is_refused_before_its_batch_is_decoded() {
+        // The body here cannot be decoded. A caller that has proved nothing is
+        // told about its key and not about its body, which shows the body was
+        // never looked at.
+        let directory = FakeDirectory::new();
+        let metrics = Registry::new();
+        let service = service(Arc::clone(&directory), Arc::clone(&metrics));
+
+        let outcome = service.dispatch(&submit("wrong", vec![0xff; 64]));
+        let Outcome::Reply { variant, payload } = outcome else {
+            panic!("a wrong key is a typed refusal, not a transport failure");
+        };
+        assert_eq!(variant, "ServiceError");
+        let refusal = decode_service_error(&payload).expect("a service error");
+        assert_eq!(
+            refusal.code,
+            tallyowl_collector_api::types::ErrorCode::Unauthenticated
+        );
+        assert_eq!(
+            metrics.counter_value(
+                "tallyowl_batches_refused_total",
+                &labels(&[("reason", "unauthenticated")])
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn a_caller_with_a_valid_key_still_hears_that_its_batch_could_not_be_read() {
+        let directory = FakeDirectory::new();
+        directory.add("key-a", None);
+        let service = service(directory, Registry::new());
+
+        let outcome = service.dispatch(&submit("key-a", vec![0xff; 64]));
+        assert!(
+            matches!(outcome, Outcome::Transport(..)),
+            "an authenticated caller gets the decode failure it got before"
+        );
+    }
 }

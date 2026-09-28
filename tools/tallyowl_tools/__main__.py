@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 
-from . import audit, build, commits, deps, dev, drill, generate, helm, packages, release, soak
+from . import audit, build, commits, deps, dev, drill, generate, helm, kindcheck, packages, release, soak
 from .commands import ToolFailed, warn
 
 USAGE = """\
@@ -34,6 +34,11 @@ tools.sh <verb>
   check                   csil-validate, fmt, lint, and test
   helm-check              Lint the charts, render every profile, and prove
                           every refusal refuses
+  kind-check [--keep]     Install both charts in a disposable kind cluster and
+                          prove them: TLS, enrollment, delivery, a refusal, a
+                          certificate rotation, and a three-head cell. Needs a
+                          container tool and OpenSSL 3. Deletes the cluster
+                          unless --keep
   audit                   Check dependencies: advisories, licenses, sources
 
   commits check [<base>]  Fail when a commit does not say what kind of change
@@ -131,6 +136,12 @@ def main(argv: list[str]) -> int:
         return build.check()
     if verb == "helm-check":
         return helm.check()
+    if verb == "kind-check":
+        unknown = [word for word in rest if word != "--keep"]
+        if unknown:
+            warn(f"`kind-check` takes only `--keep`, and was given {' '.join(unknown)}.")
+            return 1
+        return kindcheck.kind_check(keep="--keep" in rest)
     if verb == "audit":
         return audit.audit()
 

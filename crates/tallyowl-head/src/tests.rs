@@ -97,6 +97,7 @@ fn head(name: &str) -> (Ingest, QueryService, Arc<dyn Store>) {
             receipt_policy: ReceiptPolicy::LocalOne,
             open_traces: None,
             policy: None,
+            sources: None,
         },
         QueryService {
             store: Arc::clone(&store),
@@ -267,6 +268,7 @@ fn a_committed_batch_survives_a_restart_of_the_head() {
             receipt_policy: ReceiptPolicy::LocalOne,
             open_traces: None,
             policy: None,
+            sources: None,
         };
         ingest
             .commit(commit_request(
@@ -289,6 +291,7 @@ fn a_committed_batch_survives_a_restart_of_the_head() {
         receipt_policy: ReceiptPolicy::LocalOne,
         open_traces: None,
         policy: None,
+        sources: None,
     };
     let retry = ingest
         .commit(commit_request(
@@ -626,6 +629,7 @@ fn a_query_over_damaged_data_refuses_rather_than_returning_a_smaller_number() {
             receipt_policy: ReceiptPolicy::LocalOne,
             open_traces: None,
             policy: None,
+            sources: None,
         }
         .commit(commit_request(1, vec![item(1, "a", BASE_TIME)]))
         .unwrap();

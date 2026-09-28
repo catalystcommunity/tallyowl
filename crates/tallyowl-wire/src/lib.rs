@@ -118,9 +118,36 @@ impl Value {
     }
 }
 
+/// The largest decimal exponent, in either direction, that the contract
+/// permits.
+///
+/// An `i128` mantissa holds about 38 digits, so an exponent past 38 names no
+/// amount a person records. The bound exists because the exponent is a number
+/// of digits to write: without it, a value of a few bytes on the wire asks the
+/// reader to build text of any length the sender chooses.
+pub const MAX_DECIMAL_EXPONENT: i64 = 38;
+
+/// Refuse a decimal whose exponent is outside the permitted range.
+///
+/// Every reader of a wire decimal calls this before it keeps the value, so one
+/// bad item is a rejected item and never a stopped process.
+pub fn check_decimal(exponent: i64) -> Result<(), WireError> {
+    if (-MAX_DECIMAL_EXPONENT..=MAX_DECIMAL_EXPONENT).contains(&exponent) {
+        return Ok(());
+    }
+    Err(WireError::new(format!(
+        "An exact number has the exponent {exponent}, and the limit is {MAX_DECIMAL_EXPONENT} in each direction. Send a number with fewer digits."
+    )))
+}
+
 fn decimal_text(exponent: i64, mantissa: i128) -> String {
     if exponent == 0 {
         return mantissa.to_string();
+    }
+    // A value that did not come through `check_decimal` still renders. It
+    // renders in the short form, so the text length never follows the exponent.
+    if check_decimal(exponent).is_err() {
+        return format!("{mantissa}e{exponent}");
     }
     let negative = mantissa < 0;
     let digits = mantissa.unsigned_abs().to_string();
@@ -261,14 +288,17 @@ macro_rules! shared_types_bridge {
                         .float_value
                         .map(Value::Float)
                         .ok_or_else(|| missing("a number")),
-                    TypedValueKind::Decimal => value
-                        .decimal_value
-                        .as_ref()
-                        .map(|d| Value::Decimal {
+                    TypedValueKind::Decimal => {
+                        let d = value
+                            .decimal_value
+                            .as_ref()
+                            .ok_or_else(|| missing("an exact number"))?;
+                        crate::check_decimal(d.exponent)?;
+                        Ok(Value::Decimal {
                             exponent: d.exponent,
                             mantissa: d.mantissa,
                         })
-                        .ok_or_else(|| missing("an exact number")),
+                    }
                     TypedValueKind::Text => value
                         .text_value
                         .clone()
@@ -317,14 +347,14 @@ macro_rules! shared_types_bridge {
                         .int_value
                         .map(Value::Integer)
                         .ok_or_else(missing),
-                    MeasurementKind::Decimal => measurement
-                        .decimal_value
-                        .as_ref()
-                        .map(|d| Value::Decimal {
+                    MeasurementKind::Decimal => {
+                        let d = measurement.decimal_value.as_ref().ok_or_else(missing)?;
+                        crate::check_decimal(d.exponent)?;
+                        Ok(Value::Decimal {
                             exponent: d.exponent,
                             mantissa: d.mantissa,
                         })
-                        .ok_or_else(missing),
+                    }
                 }
             }
 
@@ -958,6 +988,42 @@ mod tests {
         for value in values {
             let wire = collector::write(&value);
             assert_eq!(collector::read(&wire).unwrap(), value, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_decimal_with_an_exponent_outside_the_limit_is_refused_and_never_rendered() {
+        // A few bytes on the wire must not name a text of any length. Before
+        // the bound, rendering this value asked for a terabyte of zeros.
+        for exponent in [
+            1_000_000_000_000,
+            -1_000_000_000_000,
+            i64::MAX,
+            i64::MIN,
+            MAX_DECIMAL_EXPONENT + 1,
+            -MAX_DECIMAL_EXPONENT - 1,
+        ] {
+            let value = Value::Decimal {
+                exponent,
+                mantissa: 1,
+            };
+            let refused = collector::read(&collector::write(&value)).unwrap_err();
+            assert!(refused.message.contains("exponent"), "{}", refused.message);
+
+            let measurement = collector::measurement("cost", value.clone(), None).unwrap();
+            assert!(collector::read_measurement(&measurement).is_err());
+
+            // A value built without the check still renders, and the text
+            // length does not follow the exponent.
+            assert!(value.to_display().len() < 64, "{exponent}");
+        }
+        for exponent in [MAX_DECIMAL_EXPONENT, -MAX_DECIMAL_EXPONENT] {
+            let value = Value::Decimal {
+                exponent,
+                mantissa: -7,
+            };
+            assert_eq!(collector::read(&collector::write(&value)).unwrap(), value);
+            assert!(value.to_display().len() <= 42);
         }
     }
 

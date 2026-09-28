@@ -32,6 +32,21 @@ TYPESCRIPT_TRANSPORT = CSILGEN_CHECKOUT / "transports" / "typescript"
 
 CSILGEN_REMOTE = "https://github.com/catalystcommunity/csilgen.git"
 
+#: Which csilgen release the unpacked transport came from. It is written after
+#: the unpack, so its presence says the unpack finished and its content says
+#: which pin it finished for. A transport from a clone has no stamp.
+TRANSPORT_STAMP = TYPESCRIPT_TRANSPORT / ".csilgen-release"
+
+
+def transport_is_pinned() -> bool:
+    """Whether the transport on disk is the one `CSILGEN_VERSION` names."""
+    if not (TYPESCRIPT_TRANSPORT / "package.json").is_file():
+        return False
+    try:
+        return TRANSPORT_STAMP.read_text().strip() == CSILGEN_VERSION
+    except OSError:
+        return False
+
 
 def _git() -> str:
     return require("git", "Install Git and run this again.")
@@ -82,35 +97,39 @@ def fetch_transport(force: bool = False) -> bool:
     from, and this change is only the second one.
 
     Returns False when the release carries no transport asset, and the caller
-    clones the repository instead — which is what happens today.
+    clones the repository instead. "Carries no asset" is a 404 and nothing
+    else. A rate limit or a lost network is raised: read as "no asset", it
+    gives one machine the release transport and the next one a clone of an
+    older tag, and the two then build different packages.
     """
     from . import csilgen_release
 
-    if not force and (TYPESCRIPT_TRANSPORT / "package.json").is_file():
+    if not force and transport_is_pinned():
         return True
 
-    release = csilgen_release.find_release(CSILGEN_VERSION)
-    if release is None:
-        return False
-    chosen = csilgen_release.pick(release, "transport-typescript")
-    if chosen is None:
-        return False
-
+    url = _csilgen_asset_url(
+        "transport-typescript", f"csilgen-transport-typescript-{CSILGEN_VERSION}.tar.gz"
+    )
     archive = DEPENDENCY_DIR / "csilgen-transport-typescript.tar.gz"
     try:
-        _download(chosen.url, archive, f"the TypeScript transport from {release.tag}")
-    except ToolFailed:
-        archive.unlink(missing_ok=True)
+        _download(
+            url,
+            archive,
+            f"the TypeScript transport from {CSILGEN_TAG}",
+            advice=CSILGEN_DOWNLOAD_ADVICE,
+        )
+    except NotPublished:
         return False
     csilgen_release.extract_tree(archive, TYPESCRIPT_TRANSPORT, marker="src/index.ts")
     archive.unlink(missing_ok=True)
 
     if not (TYPESCRIPT_TRANSPORT / "src" / "index.ts").is_file():
         raise ToolFailed(
-            f"{chosen.name} unpacked into {TYPESCRIPT_TRANSPORT} and there is no "
+            f"{url} unpacked into {TYPESCRIPT_TRANSPORT} and there is no "
             "`src/index.ts` in it. Eight files import that path; check what the "
             "archive holds and how many leading directories to drop."
         )
+    TRANSPORT_STAMP.write_text(CSILGEN_VERSION + "\n")
     return True
 
 
@@ -122,16 +141,15 @@ def fetch_csilgen(force: bool = False) -> Path:
     clones nothing: a 200 MB checkout to read one directory is a poor trade
     when the directory is downloadable.
 
-    This is idempotent. A checkout already at the pinned revision costs one
-    `rev-parse` and nothing else.
+    This is idempotent. A transport already unpacked from the pinned release
+    costs one file read, and a checkout already at the pinned revision costs
+    one `rev-parse`.
     """
-    if not force and (TYPESCRIPT_TRANSPORT / "package.json").is_file():
-        return CSILGEN_CHECKOUT
-
     if fetch_transport(force):
         return CSILGEN_CHECKOUT
 
-    if not force and current_revision() == _resolved_transport_revision():
+    has_transport = (TYPESCRIPT_TRANSPORT / "package.json").is_file()
+    if not force and has_transport and current_revision() == _resolved_transport_revision():
         return CSILGEN_CHECKOUT
 
     git = _git()
@@ -277,6 +295,14 @@ def fetch_duckdb(force: bool = False) -> Path:
 HELM_VERSION = "3.16.4"
 HELM_PATH = DEPENDENCY_DIR / "bin" / "helm"
 
+#: `kind-check` makes a disposable cluster with these. The runner image has
+#: neither. kind decides the Kubernetes version of the node image it makes, and
+#: this kubectl is within the supported skew of it.
+KIND_VERSION = "0.31.0"
+KIND_PATH = DEPENDENCY_DIR / "bin" / "kind"
+KUBECTL_VERSION = "1.36.4"
+KUBECTL_PATH = DEPENDENCY_DIR / "bin" / "kubectl"
+
 #: The first npm with `npm stage publish`, to the minor.
 #:
 #: npm deprecated the 2FA-bypass granular token in August 2026 and removes its
@@ -334,41 +360,196 @@ def _platform_target() -> tuple[str, str]:
     return system, machine
 
 
-def _download(url: str, destination: Path, what: str, quiet: bool = False) -> Path:
+#: The SHA-256 of each pinned download, by URL. `_download` refuses a file
+#: whose digest differs, and installs nothing from it.
+#:
+#: By URL rather than by file name, because the Docker client has one file name
+#: for every architecture. An entry moves with its version constant: a version
+#: bump without a new digest here fails at the download, which is the point.
+#:
+#: A download with no entry is still installed, and `_download` prints its
+#: digest so that the entry is one paste. Never write a digest here that did
+#: not come from a download somebody checked.
+#: Each value was measured from two separate downloads over TLS that agreed.
+#: The release publishes no checksum file, so this is trust on first use: it
+#: proves that a later download is the file that was checked, not that the
+#: first one was genuine. A platform that is missing here is not measured yet,
+#: and its download prints the digest to add.
+_CSILGEN_RELEASE = "https://github.com/catalystcommunity/csilgen/releases/download/csilgen/v0.2.9"
+PINNED_SHA256: dict[str, str] = {
+    # kind and kubectl publish a SHA-256 file beside each binary, and these
+    # values are copied from those files, not measured here.
+    "https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64":
+        "eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa",
+    "https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-arm64":
+        "8e1014e87c34901cc422a1445866835d1e666f2a61301c27e722bdeab5a1f7e4",
+    "https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl":
+        "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a",
+    "https://dl.k8s.io/release/v1.36.4/bin/linux/arm64/kubectl":
+        "0ecf44450ee6063bf19dd166a103ee6df4a9034455c2abce626e6eea657d73fb",
+    # Measured from two downloads that agreed. The Corndogs release publishes
+    # no checksum file.
+    "https://github.com/catalystcommunity/corndogs/releases/download/helm_chart%2Fv0.5.7/corndogs-0.5.7.tgz":
+        "331363fc8b45c10486ee4b506637a57faa55861e108fe91cad1bf7195f01d454",
+    f"{_CSILGEN_RELEASE}/csilgen-0.2.9-x86_64-unknown-linux-gnu.tar.gz":
+        "9977d7f4dd9b2ccffc395d4ec968e18517b75821c96d67f349842028b8e81bf9",
+    f"{_CSILGEN_RELEASE}/csilgen-generators-0.2.9.tar.gz":
+        "34b892b1c84147a2da00e5b25381bc2c277b3b060651cc309d7caa31e9b0af0d",
+    f"{_CSILGEN_RELEASE}/csilgen-transport-typescript-0.2.9.tar.gz":
+        "1ca0e88405f3b4cb0ee2ab57caaf91f44ca3847c4f7505d34705d5c46567ecc9",
+}
+
+#: What a person does when a fetch fails. csilgen has its own, because the
+#: pinned csilgen is the only one this repository runs.
+DOWNLOAD_ADVICE = (
+    "Check the network and run `./tools.sh deps` again, or install it yourself "
+    "and put it on the path."
+)
+CSILGEN_DOWNLOAD_ADVICE = (
+    "Check the network and run `./tools.sh deps` again. A csilgen on the path "
+    "is not used, because generated code is compared against the pinned one."
+)
+
+
+class NotPublished(ToolFailed):
+    """The host answered 404: this file does not exist at this URL.
+
+    Separate from every other failure, because only this one permits a caller
+    to use another source. A timeout that is read as "not published" sends one
+    machine to the release asset and the next to a build from a checkout.
+    """
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _download(
+    url: str,
+    destination: Path,
+    what: str,
+    quiet: bool = False,
+    advice: str = DOWNLOAD_ADVICE,
+) -> Path:
     """Fetch one pinned release archive.
 
     `curl` first, because a release host answers a Python library's request
     with a 503 and answers curl with the file. Python is the fallback for a
     machine that has no curl, which the release runner is not.
+
+    The bytes land under a temporary name. They move to `destination` only when
+    the download is complete and its digest agrees with `PINNED_SHA256`, so a
+    file at `destination` is always a whole, checked file.
     """
     from .commands import which as _which
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(f".{destination.name}.part")
+    partial.unlink(missing_ok=True)
     if not quiet:
         say(f"Fetching {what}")
 
+    fetched = False
     curl = _which("curl")
     if curl:
         result = run(
             [curl, "--fail", "--silent", "--show-error", "--location",
-             "--max-time", "300", "--output", str(destination), url],
+             "--max-time", "300", "--write-out", "%{http_code}",
+             "--output", str(partial), url],
             check=False,
             quiet=quiet,
+            capture=True,
         )
-        if result.ok and destination.is_file() and destination.stat().st_size > 0:
-            return destination
+        fetched = result.ok and partial.is_file() and partial.stat().st_size > 0
+        if not fetched and result.stdout.strip().endswith("404"):
+            partial.unlink(missing_ok=True)
+            raise NotPublished(f"{what} is not published at {url}.")
 
-    import urllib.request
+    if not fetched:
+        import urllib.error
+        import urllib.request
 
-    request = urllib.request.Request(url, headers={"User-Agent": "tallyowl-tools"})
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:  # noqa: S310
-            destination.write_bytes(response.read())
-    except Exception as error:  # pragma: no cover - a network failure
+        request = urllib.request.Request(url, headers={"User-Agent": "tallyowl-tools"})
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:  # noqa: S310
+                partial.write_bytes(response.read())
+        except urllib.error.HTTPError as error:
+            partial.unlink(missing_ok=True)
+            if error.code == 404:
+                raise NotPublished(f"{what} is not published at {url}.") from error
+            raise ToolFailed(
+                f"{what} could not be fetched from {url}: the host answered "
+                f"{error.code}. {advice}"
+            ) from error
+        except Exception as error:
+            partial.unlink(missing_ok=True)
+            raise ToolFailed(
+                f"{what} could not be fetched from {url}: {error}. {advice}"
+            ) from error
+
+    found = _sha256(partial)
+    wanted = PINNED_SHA256.get(url)
+    if wanted is None:
+        if not quiet:
+            say(
+                f"No SHA-256 is pinned for {url}. This download has {found}. To "
+                "pin it, add that to PINNED_SHA256 in tools/tallyowl_tools/deps.py."
+            )
+    elif found != wanted.lower():
+        partial.unlink(missing_ok=True)
         raise ToolFailed(
-            f"{what} could not be fetched from {url}: {error}. Install it "
-            "yourself and put it on the path."
-        ) from error
+            f"{what} does not match its pinned SHA-256, and it was not "
+            f"installed. Pinned: {wanted}. Downloaded: {found}. When the version "
+            "moved on purpose, put the new digest in PINNED_SHA256 in "
+            "tools/tallyowl_tools/deps.py. Otherwise do not use this download."
+        )
+    import os
+
+    os.replace(partial, destination)
+    return destination
+
+
+def _install_binary(archive: Path, destination: Path, member: str | None = None) -> Path:
+    """Take one program out of a release archive and put it at `destination`.
+
+    `member` is its path inside the archive. Without one, the first member with
+    the destination's file name is taken, wherever it sits.
+
+    The program is written under a temporary name, made executable, and moved
+    into place. Every fetch here reads "the file is there" as "the tool is
+    installed", so a short file under the real name would be run as the tool.
+    """
+    import os
+    import tarfile
+
+    partial = f".{destination.name}.part"
+    with tarfile.open(archive) as bundle:
+        if member is None:
+            taken = next(
+                (m for m in bundle.getmembers() if Path(m.name).name == destination.name),
+                None,
+            )
+        else:
+            taken = next((m for m in bundle.getmembers() if m.name == member), None)
+        if taken is None or not taken.isfile():
+            archive.unlink(missing_ok=True)
+            raise ToolFailed(
+                f"{archive.name} holds no `{member or destination.name}`, so "
+                f"{destination.name} was not installed. The release may have "
+                "changed how it lays out its archive."
+            )
+        taken.name = partial
+        bundle.extract(taken, destination.parent, filter="data")
+    archive.unlink(missing_ok=True)
+    staged = destination.parent / partial
+    staged.chmod(0o755)
+    os.replace(staged, destination)
     return destination
 
 
@@ -394,21 +575,56 @@ def fetch_helm(force: bool = False) -> Path:
     if not force and (_which("helm") or HELM_PATH.is_file()):
         return HELM_PATH
 
-    import tarfile
-
     system, machine = _platform_target()
     archive = _download(
         f"https://get.helm.sh/helm-v{HELM_VERSION}-{system}-{machine}.tar.gz",
         HELM_PATH.parent / "helm.tar.gz",
         f"Helm {HELM_VERSION} for {system}-{machine}",
     )
-    with tarfile.open(archive) as bundle:
-        member = bundle.getmember(f"{system}-{machine}/helm")
-        member.name = "helm"
-        bundle.extract(member, HELM_PATH.parent, filter="data")
-    archive.unlink(missing_ok=True)
-    HELM_PATH.chmod(0o755)
-    return HELM_PATH
+    return _install_binary(archive, HELM_PATH, f"{system}-{machine}/helm")
+
+
+def _install_plain(download: Path, destination: Path) -> Path:
+    """Put a program that is published as one bare file at `destination`.
+
+    The same rule as `_install_binary`: executable first, then moved into place
+    under its real name, so a short file is never run as the tool.
+    """
+    import os
+
+    download.chmod(0o755)
+    os.replace(download, destination)
+    return destination
+
+
+def fetch_kind(force: bool = False) -> Path:
+    """Fetch the pinned kind release into `.deps/bin`."""
+    from .commands import which as _which
+
+    if not force and (_which("kind") or KIND_PATH.is_file()):
+        return Path(_which("kind") or KIND_PATH)
+    system, machine = _platform_target()
+    download = _download(
+        f"https://github.com/kubernetes-sigs/kind/releases/download/v{KIND_VERSION}/kind-{system}-{machine}",
+        KIND_PATH.parent / ".kind.download",
+        f"kind {KIND_VERSION} for {system}-{machine}",
+    )
+    return _install_plain(download, KIND_PATH)
+
+
+def fetch_kubectl(force: bool = False) -> Path:
+    """Fetch the pinned kubectl release into `.deps/bin`."""
+    from .commands import which as _which
+
+    if not force and (_which("kubectl") or KUBECTL_PATH.is_file()):
+        return Path(_which("kubectl") or KUBECTL_PATH)
+    system, machine = _platform_target()
+    download = _download(
+        f"https://dl.k8s.io/release/v{KUBECTL_VERSION}/bin/{system}/{machine}/kubectl",
+        KUBECTL_PATH.parent / ".kubectl.download",
+        f"kubectl {KUBECTL_VERSION} for {system}-{machine}",
+    )
+    return _install_plain(download, KUBECTL_PATH)
 
 
 def node_bin() -> Path | None:
@@ -472,8 +688,6 @@ def fetch_semver_tags(force: bool = False) -> Path:
     if not force and (_which("semver-tags") or SEMVER_TAGS_PATH.is_file()):
         return SEMVER_TAGS_PATH
 
-    import tarfile
-
     system, machine = _platform_target()
     # The release carries one archive for each platform, and a legacy
     # `semver-tags.tar.gz` beside them. Name the platform: the legacy archive
@@ -484,11 +698,7 @@ def fetch_semver_tags(force: bool = False) -> Path:
         SEMVER_TAGS_PATH.parent / "semver-tags.tar.gz",
         f"semver-tags {SEMVER_TAGS_VERSION} for {system}-{machine}",
     )
-    with tarfile.open(archive) as bundle:
-        bundle.extract("semver-tags", SEMVER_TAGS_PATH.parent, filter="data")
-    archive.unlink(missing_ok=True)
-    SEMVER_TAGS_PATH.chmod(0o755)
-    return SEMVER_TAGS_PATH
+    return _install_binary(archive, SEMVER_TAGS_PATH, "semver-tags")
 
 
 def crane_program() -> str:
@@ -514,8 +724,6 @@ def fetch_crane(force: bool = False) -> Path:
         return CRANE_PATH
 
     import platform
-    import tarfile
-
     system, machine = _platform_target()
     # crane names the platform its own way, and only here.
     crane_system = {"linux": "Linux", "darwin": "Darwin"}[system]
@@ -528,11 +736,7 @@ def fetch_crane(force: bool = False) -> Path:
         CRANE_PATH.parent / "crane.tar.gz",
         f"crane {CRANE_VERSION} for {crane_system}_{crane_machine}",
     )
-    with tarfile.open(archive) as bundle:
-        bundle.extract("crane", CRANE_PATH.parent, filter="data")
-    archive.unlink(missing_ok=True)
-    CRANE_PATH.chmod(0o755)
-    return CRANE_PATH
+    return _install_binary(archive, CRANE_PATH, "crane")
 
 
 def gh_program() -> str:
@@ -557,8 +761,6 @@ def fetch_gh(force: bool = False) -> Path:
     if not force and (_which("gh") or GH_PATH.is_file()):
         return GH_PATH
 
-    import tarfile
-
     system, machine = _platform_target()
     release = f"gh_{GH_VERSION}_{system}_{machine}"
     archive = _download(
@@ -566,13 +768,7 @@ def fetch_gh(force: bool = False) -> Path:
         GH_PATH.parent / "gh.tar.gz",
         f"the GitHub command line {GH_VERSION} for {system}-{machine}",
     )
-    with tarfile.open(archive) as bundle:
-        member = bundle.getmember(f"{release}/bin/gh")
-        member.name = "gh"
-        bundle.extract(member, GH_PATH.parent, filter="data")
-    archive.unlink(missing_ok=True)
-    GH_PATH.chmod(0o755)
-    return GH_PATH
+    return _install_binary(archive, GH_PATH, f"{release}/bin/gh")
 
 
 #: The static Docker client. The release job builds the service image against
@@ -593,8 +789,6 @@ def fetch_docker_cli(force: bool = False) -> Path:
     if not force and (_which("docker") or DOCKER_PATH.is_file()):
         return DOCKER_PATH
 
-    import tarfile
-
     system, machine = _platform_target()
     if system != "linux":
         raise ToolFailed(
@@ -607,13 +801,7 @@ def fetch_docker_cli(force: bool = False) -> Path:
         DOCKER_PATH.parent / "docker.tgz",
         f"the Docker client {DOCKER_CLI_VERSION} for {static}",
     )
-    with tarfile.open(archive) as bundle:
-        member = bundle.getmember("docker/docker")
-        member.name = "docker"
-        bundle.extract(member, DOCKER_PATH.parent, filter="data")
-    archive.unlink(missing_ok=True)
-    DOCKER_PATH.chmod(0o755)
-    return DOCKER_PATH
+    return _install_binary(archive, DOCKER_PATH, "docker/docker")
 
 
 # ---------------------------------------------------------------------------
@@ -629,10 +817,14 @@ def fetch_docker_cli(force: bool = False) -> Path:
 #: The csilgen release this repository generates with. A release rather than
 #: "latest": generated output is checked in, so the generator is a pin like any
 #: other dependency, and a new one is a deliberate change with a diff to read.
-CSILGEN_VERSION = "0.2.7"
+CSILGEN_VERSION = "0.2.9"
 
-#: csilgen tags a core release with this prefix.
-CSILGEN_TAG = f"csilgen-core/v{CSILGEN_VERSION}"
+#: csilgen tags the combined release with this prefix.
+CSILGEN_TAG = f"csilgen/v{CSILGEN_VERSION}"
+
+#: The vendor and libc parts of the Rust target triple in a csilgen asset name,
+#: for each system. The Linux build links glibc; csilgen has no musl build.
+CSILGEN_TRIPLE_TAILS = {"linux": "unknown-linux-gnu", "darwin": "apple-darwin"}
 CSILGEN_PATH = DEPENDENCY_DIR / "bin" / "csilgen"
 
 
@@ -644,54 +836,103 @@ def csilgen_binary() -> str:
     pass here and fail in CI.
 
     The binary alone is not enough. csilgen loads a WASM generator for each
-    target from the home directory, and without them it refuses every target it
-    was asked for.
+    target, and without them it refuses every target it was asked for.
     """
-    if not CSILGEN_PATH.is_file():
-        fetch_csilgen_binary()
+    fetch_csilgen_binary()
     fetch_csilgen_generators()
     return str(CSILGEN_PATH)
+
+
+def installed_csilgen_version(program: Path | None = None) -> str | None:
+    """The version the csilgen at `.deps/bin` reports, or `None`.
+
+    A release build prints `csilgen <version>`, and the version is the release
+    it came from. A build somebody made by hand prints the crate version, which
+    is never the pin, so it is fetched over. That is the intent: the pinned
+    generator is the only one this repository runs.
+    """
+    import re
+
+    program = program or CSILGEN_PATH
+    if not program.is_file():
+        return None
+    try:
+        result = run([str(program), "--version"], capture=True, check=False, quiet=True)
+    except (ToolFailed, OSError):
+        # A short or foreign file under the name. It is not the pin.
+        return None
+    found = re.search(r"csilgen\s+(\d+\.\d+\.\d+\S*)", result.stdout) if result.ok else None
+    return found.group(1) if found else None
+
+
+def _csilgen_asset_url(kind: str, name: str, system: str = "", machine: str = "") -> str:
+    """Where one csilgen release asset is: from the asset list, or by its name.
+
+    The asset list is the better source, because it survives a renamed asset.
+    It is not the only source. When GitHub does not answer, the published name
+    gives the same file, so what a machine installs does not depend on whether
+    the API answered.
+    """
+    from . import csilgen_release
+
+    url = f"https://github.com/catalystcommunity/csilgen/releases/download/{CSILGEN_TAG}/{name}"
+    try:
+        release = csilgen_release.find_release(CSILGEN_VERSION)
+    except ToolFailed as error:
+        warn(f"{error} Taking {name} by its published name instead.")
+        return url
+    if release:
+        chosen = csilgen_release.pick(release, kind, system, machine)
+        if chosen:
+            return chosen.url
+    return url
 
 
 def fetch_csilgen_binary(force: bool = False) -> Path:
     """Fetch the pinned csilgen command line into `.deps/bin`.
 
     From the release's own asset list when that release can be read, and from
-    the per-platform name this repository has always used when it cannot.
-    """
-    if not force and CSILGEN_PATH.is_file():
-        return CSILGEN_PATH
+    the target-triple name csilgen publishes since 0.2.8 when it cannot.
 
-    from . import csilgen_release
+    "It is there" is not "it is the pin". A machine that fetched 0.2.7 keeps
+    that file for ever, and `gen-check` then disagrees with a machine that
+    started clean. So the file is asked for its version, and fetched again when
+    the answer is not `CSILGEN_VERSION`.
+    """
+    have = installed_csilgen_version()
+    if not force and have == CSILGEN_VERSION:
+        return CSILGEN_PATH
+    if CSILGEN_PATH.is_file() and have != CSILGEN_VERSION:
+        say(
+            f"The csilgen at {CSILGEN_PATH} is {have or 'not a release build'} and "
+            f"the pin is {CSILGEN_VERSION}. Fetching {CSILGEN_VERSION}."
+        )
 
     system, machine = _platform_target()
     # csilgen names the architecture the way the compiler does.
     csilgen_machine = {"amd64": "x86_64", "arm64": "aarch64"}[machine]
 
-    url = (
-        f"https://github.com/catalystcommunity/csilgen/releases/download/{CSILGEN_TAG}"
-        f"/csilgen-{CSILGEN_VERSION}-{system}-{csilgen_machine}.tar.gz"
+    url = _csilgen_asset_url(
+        "cli",
+        f"csilgen-{CSILGEN_VERSION}-{csilgen_machine}-{CSILGEN_TRIPLE_TAILS[system]}.tar.gz",
+        system,
+        csilgen_machine,
     )
-    release = csilgen_release.find_release(CSILGEN_VERSION)
-    if release:
-        chosen = csilgen_release.pick(release, "cli", system, csilgen_machine)
-        if chosen:
-            url = chosen.url
-
     archive = _download(
         url,
         CSILGEN_PATH.parent / "csilgen.tar.gz",
         f"csilgen {CSILGEN_VERSION} for {system}-{csilgen_machine}",
+        advice=CSILGEN_DOWNLOAD_ADVICE,
     )
-    taken = csilgen_release.extract_members(
-        archive, __import__("re").compile(r"^csilgen$"), CSILGEN_PATH.parent
-    )
-    archive.unlink(missing_ok=True)
-    if not taken:
+    _install_binary(archive, CSILGEN_PATH)
+
+    now = installed_csilgen_version()
+    if now != CSILGEN_VERSION:
         raise ToolFailed(
-            f"The csilgen archive at {url} holds no `csilgen` binary."
+            f"The csilgen from {url} reports version {now or 'nothing'}, and the "
+            f"pin is {CSILGEN_VERSION}. Check CSILGEN_VERSION and CSILGEN_TAG in "
+            "tools/tallyowl_tools/deps.py against the csilgen release page."
         )
-    CSILGEN_PATH.chmod(0o755)
     return CSILGEN_PATH
 
 
@@ -708,19 +949,6 @@ CARGO_AUDIT_PATH = DEPENDENCY_DIR / "bin" / "cargo-audit"
 
 CARGO_DENY_VERSION = "0.20.2"
 CARGO_DENY_PATH = DEPENDENCY_DIR / "bin" / "cargo-deny"
-
-
-def _extract_one(archive: Path, name: str, destination: Path) -> Path:
-    """Take one named file out of a release archive, wherever it sits inside."""
-    import tarfile
-
-    with tarfile.open(archive) as bundle:
-        member = next(m for m in bundle.getmembers() if Path(m.name).name == name)
-        member.name = name
-        bundle.extract(member, destination.parent, filter="data")
-    archive.unlink(missing_ok=True)
-    destination.chmod(0o755)
-    return destination
 
 
 def cargo_audit_program() -> str:
@@ -749,7 +977,7 @@ def fetch_cargo_audit(force: bool = False) -> Path:
         CARGO_AUDIT_PATH.parent / "cargo-audit.tgz",
         f"cargo-audit {CARGO_AUDIT_VERSION} for {target}",
     )
-    return _extract_one(archive, "cargo-audit", CARGO_AUDIT_PATH)
+    return _install_binary(archive, CARGO_AUDIT_PATH)
 
 
 def cargo_deny_program() -> str:
@@ -777,22 +1005,30 @@ def fetch_cargo_deny(force: bool = False) -> Path:
         CARGO_DENY_PATH.parent / "cargo-deny.tar.gz",
         f"cargo-deny {CARGO_DENY_VERSION} for {target}",
     )
-    return _extract_one(archive, "cargo-deny", CARGO_DENY_PATH)
+    return _install_binary(archive, CARGO_DENY_PATH)
 
 
 # ---------------------------------------------------------------------------
 # The csilgen generators
 #
-# csilgen loads a WASM generator for each target from `~/.csilgen/generators`,
-# and the release archive carries only the binary. A machine with the binary
-# and no generators refuses with "Unknown target 'rust'", which is what a
-# run-local job found. The generators are built from the pinned checkout — the
-# same one the TypeScript transport comes from — and installed where csilgen
-# looks.
+# csilgen loads a WASM generator for each target, and the release archive
+# carries only the binary. A machine with the binary and no generators refuses
+# with "Unknown target 'rust'", which is what a run-local job found.
 #
-# **This is the one provisioning step that compiles rather than downloads.**
-# csilgen publishes no generator artifact today; when it does, this becomes a
-# fetch like every other tool here. See L185.
+# **They are installed for this repository, not for the user.** csilgen reads
+# `.generators` under its working directory before `~/.csilgen/generators`, and
+# the first one it finds for a target wins. `./tools.sh gen` runs csilgen from
+# `csil/`, so `csil/.generators` is a link to `.deps/csilgen-generators/<pin>`.
+#
+# The home directory is one flat directory for every repository on the machine.
+# It cannot hold two versions, so a pin written there is either ignored (what
+# happened: a 0.2.8 pin and 0.2.7 generators) or it takes another repository's
+# generators away. This repository no longer writes there, and no longer
+# depends on what is there.
+#
+# **The fallback is the one provisioning step that compiles.** When csilgen
+# publishes no generator archive for the pin, the three generators are built
+# from the csilgen source at the pinned tag. See L185.
 # ---------------------------------------------------------------------------
 
 #: The three targets this repository generates. Building the other twelve would
@@ -804,117 +1040,208 @@ GENERATOR_TARGETS = ("rust", "go", "typescript")
 #: `csilgen-generator-<language>-<version>.tar.gz` on the tag
 #: `generator-<language>/v<version>`.
 #:
-#: **Fetched when it is there, built when it is not.** The generator releases
-#: for 0.2.0 are drafts with no assets today, so the fallback is what runs; the
-#: day a generator release carries its archive, this fetches it and the build
-#: disappears without another change here. See L185.
-GENERATOR_VERSION = "0.2.7"
+#: **Fetched when it is there, built when it is not.** "Not there" is a 404. A
+#: failure of any other kind stops the run, because a build from the checkout
+#: is a different generator from the published one.
+GENERATOR_VERSION = "0.2.9"
 
-#: Where csilgen looks. The path is relative to the home directory of whoever
-#: runs it, which is why this is installed rather than kept in `.deps`.
-GENERATOR_DIR = Path.home() / ".csilgen" / "generators"
+#: One directory for each pin, so a new pin never overwrites the old one in
+#: place, and "is the pin installed" is "does its directory hold `.complete`".
+GENERATOR_STORE = DEPENDENCY_DIR / "csilgen-generators"
+GENERATOR_DIR = GENERATOR_STORE / GENERATOR_VERSION
+
+#: Written last, after every generator is in the directory.
+GENERATOR_COMPLETE = ".complete"
+
+#: Where csilgen looks first when it runs from `csil/`.
+GENERATOR_LINK = REPOSITORY_ROOT / "csil" / ".generators"
+
+
+def _generator_names() -> list[str]:
+    return [f"csilgen_{name}_generator.wasm" for name in GENERATOR_TARGETS]
 
 
 def generator_files() -> list[Path]:
     """What must exist for `csilgen generate` to know a target."""
-    return [GENERATOR_DIR / f"csilgen_{name}_generator.wasm" for name in GENERATOR_TARGETS]
+    return [GENERATOR_DIR / name for name in _generator_names()]
 
 
-def _download_all_generators() -> bool:
+def generators_are_pinned() -> bool:
+    """Whether the generators for `GENERATOR_VERSION` are installed and whole."""
+    return (GENERATOR_DIR / GENERATOR_COMPLETE).is_file() and all(
+        path.is_file() for path in generator_files()
+    )
+
+
+def link_generators() -> Path:
+    """Point `csil/.generators` at the pinned generators.
+
+    A link rather than a copy, so the 9 MB of generators stay under `.deps`,
+    which Git and the image build already ignore.
+    """
+    import os
+
+    target = os.path.relpath(GENERATOR_DIR, GENERATOR_LINK.parent)
+    if GENERATOR_LINK.is_symlink():
+        if os.readlink(GENERATOR_LINK) == target:
+            return GENERATOR_LINK
+    elif GENERATOR_LINK.exists():
+        raise ToolFailed(
+            f"{GENERATOR_LINK} is a directory that `./tools.sh` did not make. "
+            "csilgen reads it before the pinned generators, so the generated "
+            "code would come from whatever it holds. Move it away and run "
+            "`./tools.sh deps` again."
+        )
+    staged = GENERATOR_LINK.with_name(".generators.part")
+    staged.unlink(missing_ok=True)
+    staged.symlink_to(target, target_is_directory=True)
+    os.replace(staged, GENERATOR_LINK)
+    return GENERATOR_LINK
+
+
+def _download_all_generators(into: Path) -> bool:
     """Take the whole generator tarball out of the combined csilgen release."""
     import re
 
     from . import csilgen_release
 
-    release = csilgen_release.find_release(CSILGEN_VERSION)
-    if release is None:
-        return False
-    chosen = csilgen_release.pick(release, "generators")
-    if chosen is None:
-        return False
-
+    url = _csilgen_asset_url("generators", f"csilgen-generators-{CSILGEN_VERSION}.tar.gz")
     archive = DEPENDENCY_DIR / "csilgen-generators.tar.gz"
     try:
-        _download(chosen.url, archive, f"the csilgen generators from {release.tag}")
-    except ToolFailed:
-        archive.unlink(missing_ok=True)
+        _download(
+            url,
+            archive,
+            f"the csilgen generators from {CSILGEN_TAG}",
+            advice=CSILGEN_DOWNLOAD_ADVICE,
+        )
+    except NotPublished:
         return False
     taken = csilgen_release.extract_members(
-        archive, re.compile(r"^csilgen_.+_generator\.wasm$"), GENERATOR_DIR
+        archive, re.compile(r"^csilgen_.+_generator\.wasm$"), into
     )
     archive.unlink(missing_ok=True)
     if taken:
-        say(f"Installed {len(taken)} generators from {chosen.name}.")
+        say(f"Took {len(taken)} generators from {url.rsplit('/', 1)[-1]}.")
     return bool(taken)
 
 
-def _download_generator(name: str) -> bool:
+def _download_generator(name: str, into: Path) -> bool:
     """Take one published generator archive, when csilgen has published it."""
-    import tarfile
+    import re
 
-    wasm = GENERATOR_DIR / f"csilgen_{name}_generator.wasm"
-    archive = GENERATOR_DIR / f"csilgen-generator-{name}.tar.gz"
-    GENERATOR_DIR.mkdir(parents=True, exist_ok=True)
+    from . import csilgen_release
+
+    wasm = f"csilgen_{name}_generator.wasm"
+    archive = DEPENDENCY_DIR / f"csilgen-generator-{name}.tar.gz"
     url = (
         "https://github.com/catalystcommunity/csilgen/releases/download/"
         f"generator-{name}/v{GENERATOR_VERSION}"
         f"/csilgen-generator-{name}-{GENERATOR_VERSION}.tar.gz"
     )
     try:
-        _download(url, archive, f"the {name} generator {GENERATOR_VERSION}", quiet=True)
-    except ToolFailed:
-        archive.unlink(missing_ok=True)
+        _download(
+            url,
+            archive,
+            f"the {name} generator {GENERATOR_VERSION}",
+            quiet=True,
+            advice=CSILGEN_DOWNLOAD_ADVICE,
+        )
+    except NotPublished:
         return False
     try:
-        with tarfile.open(archive) as bundle:
-            member = next(
-                (m for m in bundle.getmembers() if Path(m.name).name == wasm.name), None
-            )
-            if member is None:
-                return False
-            member.name = wasm.name
-            bundle.extract(member, GENERATOR_DIR, filter="data")
+        csilgen_release.extract_members(archive, re.compile(f"^{re.escape(wasm)}$"), into)
     finally:
         archive.unlink(missing_ok=True)
-    return wasm.is_file()
+    return (into / wasm).is_file()
 
 
 def fetch_csilgen_generators(force: bool = False) -> Path:
-    """Put the WASM generators where csilgen looks for them.
+    """Put the pinned WASM generators where csilgen looks for them first.
 
     A published archive first. csilgen builds one for each language in its own
     release job, and downloading three files beats compiling them.
-    """
-    from .commands import require
 
-    if not force and all(path.is_file() for path in generator_files()):
+    The generators are gathered in a directory beside the real one, and that
+    directory takes the real name only when it holds all of them and its
+    `.complete` file. A run that stops part way leaves nothing a later run
+    could take for an installed pin.
+    """
+    import shutil
+
+    from . import csilgen_release
+
+    if not force and generators_are_pinned():
+        link_generators()
         return GENERATOR_DIR
 
-    missing = [
-        name
-        for name in GENERATOR_TARGETS
-        if not (GENERATOR_DIR / f"csilgen_{name}_generator.wasm").is_file()
-    ]
+    staged = GENERATOR_STORE / f".{GENERATOR_VERSION}.part"
+    if staged.exists():
+        shutil.rmtree(staged)
+    staged.mkdir(parents=True)
+
+    def missing() -> list[str]:
+        return [
+            name
+            for name in GENERATOR_TARGETS
+            if not (staged / f"csilgen_{name}_generator.wasm").is_file()
+        ]
 
     # One tarball of every generator, which is what the combined release
     # carries. It costs the same as one and covers targets this repository does
     # not generate today.
-    if _download_all_generators():
-        if all(path.is_file() for path in generator_files()):
-            return GENERATOR_DIR
+    _download_all_generators(staged)
 
-    still_missing = [name for name in missing if not _download_generator(name)]
-    if not still_missing:
-        say(f"Installed {len(missing)} generators from the csilgen release.")
-        return GENERATOR_DIR
+    wanted = missing()
+    still_missing = [name for name in wanted if not _download_generator(name, staged)]
+    if wanted and not still_missing:
+        say(f"Took {len(wanted)} generators from the csilgen generator releases.")
 
-    warn(
-        "csilgen publishes no archive for "
-        + ", ".join(still_missing)
-        + f" at {GENERATOR_VERSION}, so they are built from the pinned checkout."
-    )
+    if still_missing:
+        warn(
+            "csilgen publishes no archive for "
+            + ", ".join(still_missing)
+            + f" at {GENERATOR_VERSION}, so they are built from the csilgen source at {CSILGEN_TAG}."
+        )
+        _build_generators(still_missing, staged)
 
-    checkout = fetch_csilgen()
+    (staged / GENERATOR_COMPLETE).write_text(GENERATOR_VERSION + "\n")
+    csilgen_release.replace_tree(staged, GENERATOR_DIR)
+    link_generators()
+    say(f"Installed the {GENERATOR_VERSION} generators into {GENERATOR_DIR}.")
+    return GENERATOR_DIR
+
+
+#: The csilgen source the generators are built from, when they must be built.
+#: Apart from `.deps/csilgen`, which is the TypeScript transport and, since the
+#: release carries it, holds no source at all.
+CSILGEN_SOURCE = DEPENDENCY_DIR / "csilgen-source"
+
+
+def _csilgen_source() -> Path:
+    """A csilgen checkout at the tag the generator pin names."""
+    git = _git()
+    DEPENDENCY_DIR.mkdir(parents=True, exist_ok=True)
+    if not (CSILGEN_SOURCE / ".git").exists():
+        say(f"Fetching the csilgen source at {CSILGEN_TAG}")
+        sibling = REPOSITORY_ROOT.parent / "csilgen"
+        source = str(sibling) if (sibling / ".git").exists() else CSILGEN_REMOTE
+        run([git, "clone", "--quiet", source, str(CSILGEN_SOURCE)])
+    else:
+        run([git, "fetch", "--quiet", "--tags", "origin"], cwd=CSILGEN_SOURCE, check=False)
+    result = run([git, "checkout", "--quiet", CSILGEN_TAG], cwd=CSILGEN_SOURCE, check=False)
+    if not result.ok:
+        raise ToolFailed(
+            f"csilgen {CSILGEN_TAG} could not be checked out in {CSILGEN_SOURCE}. "
+            "The pin is CSILGEN_VERSION in tools/tallyowl_tools/deps.py."
+        )
+    return CSILGEN_SOURCE
+
+
+def _build_generators(names: list[str], into: Path) -> None:
+    """Build the named generators from the csilgen source at the pin, into `into`."""
+    import shutil
+
+    checkout = _csilgen_source()
     cargo = require(
         "cargo",
         "Install the Rust toolchain from https://rustup.rs and run this again.",
@@ -925,9 +1252,9 @@ def fetch_csilgen_generators(force: bool = False) -> Path:
         # nothing, and says so in a way nobody expects here.
         run([rustup, "target", "add", "wasm32-unknown-unknown"], check=False)
 
-    say(f"Building the {len(GENERATOR_TARGETS)} csilgen generators this repository uses")
+    say(f"Building the {len(names)} csilgen generators that are not published")
     packages = []
-    for name in GENERATOR_TARGETS:
+    for name in names:
         packages.extend(["--package", f"csilgen-{name}-generator"])
     # `--target-dir` explicitly, rather than trusting the default: a caller
     # with `CARGO_TARGET_DIR` set builds somewhere else entirely, and the
@@ -944,20 +1271,15 @@ def fetch_csilgen_generators(force: bool = False) -> Path:
         cwd=checkout,
     )
 
-    import shutil
-
-    GENERATOR_DIR.mkdir(parents=True, exist_ok=True)
     built = built_root / "wasm32-unknown-unknown" / "release"
-    for name in GENERATOR_TARGETS:
+    for name in names:
         source = built / f"csilgen_{name}_generator.wasm"
         if not source.is_file():
             raise ToolFailed(
                 f"The {name} generator did not build at {source}. csilgen's "
                 "package list may have moved; see its tools/xtask."
             )
-        shutil.copy(source, GENERATOR_DIR / source.name)
-    say(f"Installed {len(GENERATOR_TARGETS)} generators into {GENERATOR_DIR}.")
-    return GENERATOR_DIR
+        shutil.copy(source, into / source.name)
 
 
 def _which_program(name: str) -> str | None:

@@ -68,6 +68,31 @@ impl Config {
         Ok(config)
     }
 
+    /// One sentence for each key that matches no setting, for a service to log
+    /// as a warning when it starts.
+    ///
+    /// L009 lets a service start with a key it does not know, so that an
+    /// upgrade or a rollback never turns a new key into an outage. It did not
+    /// mean the key should go unmentioned: `retention.detialed: 365d` started
+    /// cleanly, the default of 30 days applied, and the data was gone.
+    /// `config check` still refuses the same key.
+    pub fn unknown_key_warnings(&self) -> Vec<String> {
+        self.resolved
+            .unknown_keys
+            .iter()
+            .map(|(key, source)| {
+                let nearest = match loader::closest_setting(key) {
+                    Some(path) => format!(" Did you mean `{path}`?"),
+                    None => String::new(),
+                };
+                format!(
+                    "The key `{key}` from the {} matches no setting, so it changed nothing.{nearest} Run `config check` to see every setting.",
+                    source.as_str()
+                )
+            })
+            .collect()
+    }
+
     pub fn resolved(&self) -> &Resolved {
         &self.resolved
     }

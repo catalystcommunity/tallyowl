@@ -124,6 +124,20 @@ impl Zone {
     /// The start of the calendar period `at_ms` falls in, as UTC milliseconds.
     pub fn start_of(&self, at_ms: i64, unit: Unit) -> i64 {
         let local = self.local(at_ms).naive_local();
+        // **An hour is a length of time, so its start is found in instants.**
+        // An autumn boundary repeats a wall-clock hour. Naming the start by its
+        // wall-clock time and taking the earlier of the pair put both hours in
+        // one bucket and left the next one empty, once a year, in every hourly
+        // chart. The minutes into the local hour are the same whichever of the
+        // pair this is, so taking them off the instant keeps the two apart. It
+        // is still the local hour: a zone at a half-hour offset starts its
+        // hours on the half hour.
+        if unit == Unit::Hour {
+            let into_hour = i64::from(local.minute()) * 60_000
+                + i64::from(local.second()) * 1_000
+                + i64::from(local.and_utc().timestamp_subsec_millis());
+            return at_ms.saturating_sub(into_hour);
+        }
         let floored = match unit {
             Unit::Hour => local.date().and_hms_opt(local.hour(), 0, 0),
             Unit::Day => local.date().and_hms_opt(0, 0, 0),
@@ -154,6 +168,12 @@ impl Zone {
         let start = self.start_of(at_ms, unit);
         if count == 0 {
             return start;
+        }
+        // Hours are counted in instants for the same reason `start_of` finds
+        // them there: the hour after the first 01:00 of an autumn boundary is
+        // the second 01:00, and wall-clock arithmetic cannot say so.
+        if unit == Unit::Hour {
+            return start.saturating_add(count.saturating_mul(3_600_000));
         }
         let local = self.local(start).naive_local();
         let moved = match unit {
@@ -210,6 +230,33 @@ mod tests {
         DateTime::parse_from_rfc3339(text)
             .expect("a timestamp")
             .timestamp_millis()
+    }
+
+    #[test]
+    fn the_repeated_hour_of_an_autumn_boundary_is_two_buckets() {
+        // 2026-10-25 in Berlin: 03:00 summer time becomes 02:00 winter time, so
+        // 02:00 to 03:00 happens twice. Both used to fall in the first bucket.
+        let zone = Zone::named(Some("Europe/Berlin")).unwrap();
+        let first = at("2026-10-25T02:30:00+02:00");
+        let second = at("2026-10-25T02:30:00+01:00");
+        assert_eq!(second - first, 3_600_000);
+
+        let first_bucket = zone.start_of(first, Unit::Hour);
+        let second_bucket = zone.start_of(second, Unit::Hour);
+        assert_eq!(first_bucket, at("2026-10-25T02:00:00+02:00"));
+        assert_eq!(second_bucket, at("2026-10-25T02:00:00+01:00"));
+        assert_eq!(zone.advance(first, Unit::Hour, 1), second_bucket);
+        assert_eq!(
+            zone.advance(first, Unit::Hour, 2),
+            at("2026-10-25T03:00:00+01:00")
+        );
+
+        // A zone at a half-hour offset starts its hours on the half hour.
+        let kolkata = Zone::named(Some("Asia/Kolkata")).unwrap();
+        assert_eq!(
+            kolkata.start_of(at("2026-06-01T10:45:10.250+05:30"), Unit::Hour),
+            at("2026-06-01T10:00:00+05:30")
+        );
     }
 
     #[test]

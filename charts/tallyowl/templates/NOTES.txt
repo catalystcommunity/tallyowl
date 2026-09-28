@@ -8,15 +8,69 @@ Health and metrics are on port {{ include "tallyowl.port" .Values.head.operation
   /livez, /readyz, and /metrics.
 
 {{- if .Values.dashboard.enabled }}
-The dashboard is on port {{ include "tallyowl.port" .Values.dashboard.listen }}.
+The dashboard is on port {{ include "tallyowl.port" .Values.dashboard.listen }}. It serves plaintext and carries session
+tokens: reach it through a Gateway that ends TLS.
 {{- end }}
 
-To make a key for an application:
-  kubectl exec {{ include "tallyowl.fullname" . }}-0 -- \
-    tallyowl-head --config /etc/tallyowl/tallyowl.yaml provision <project>
+{{- if .Values.transport.allowPlaintext }}
 
-The key is printed once. Store it as a secret and give the collector release a
-reference to it, never the value.
+TRANSPORT SECURITY IS OFF. `transport.allowPlaintext` is true, so collectors
+and peers reach this head in plaintext. Something else must protect this
+network. See docs/DEPLOYMENT.md section 7c.
+{{- else }}
+
+Collectors and peers reach the head over mutual TLS. Each collector verifies
+the head as `head.tallyowl.internal` against the authorities in
+`deployment.tls.authorities`, and enrolls with a role token. See
+docs/DEPLOYMENT.md section 7c for how to make one.
+{{- end }}
+
+{{- if .Values.deployment.maintenance.enabled }}
+
+A MAINTENANCE JOB IS ENABLED, SO THE HEAD IS STOPPED.
+Read the result, then turn the Job off to start the head again:
+  kubectl --namespace {{ .Release.Namespace }} logs --selector tallyowl.io/component=maintenance
+  helm upgrade {{ .Release.Name }} <chart> --namespace {{ .Release.Namespace }} \
+    --reuse-values --set deployment.maintenance.enabled=false
+{{- else }}
+
+To make a key for an application, or a session for an operator:
+  `kubectl exec` cannot do this. Each verb that changes the store needs the
+  data directory to itself, and the running head holds it. Run the verb as a
+  maintenance Job. The head stops while the Job is enabled.
+
+  helm upgrade {{ .Release.Name }} <chart> --namespace {{ .Release.Namespace }} \
+    --reuse-values \
+    --set deployment.maintenance.enabled=true \
+    --set 'deployment.maintenance.args={provision,<project>}'
+  kubectl --namespace {{ .Release.Namespace }} wait --for=condition=complete --timeout=5m \
+    job --selector tallyowl.io/component=maintenance
+  kubectl --namespace {{ .Release.Namespace }} logs --selector tallyowl.io/component=maintenance
+  helm upgrade {{ .Release.Name }} <chart> --namespace {{ .Release.Namespace }} \
+    --reuse-values --set deployment.maintenance.enabled=false
+
+The key is printed once, in the Job log. Store it as a Secret immediately. The
+last command deletes the Job. Give the collector release the name of the
+Secret in `deployment.apiKeySecret.name`, never the value.
+See docs/DEPLOYMENT.md section 9.
+{{- end }}
+
+{{- if .Values.corndogsDeployment.enabled }}
+
+The queue is at {{ include "tallyowl.fullname" . }}-corndogs:{{ include "tallyowl.port" .Values.corndogs.endpoint }}.
+Set `corndogs.endpoint` of the collector release to that address, and
+`head.endpoint` to {{ include "tallyowl.fullname" . }}:{{ include "tallyowl.port" .Values.head.listen }}.
+{{- if .Values.corndogsDeployment.tlsSecret }}
+The queue serves TLS with the certificate in `{{ .Values.corndogsDeployment.tlsSecret }}`.
+{{- else }}
+The queue serves plaintext, because `corndogsDeployment.tlsSecret` is empty.
+{{- end }}
+Corndogs does not check who calls it.
+{{- if not .Values.deployment.networkPolicy.enabled }}
+Turn on `deployment.networkPolicy.enabled`: it limits the queue port to this
+release and the collectors.
+{{- end }}
+{{- end }}
 
 {{- if gt (int .Values.replicas) 1 }}
 

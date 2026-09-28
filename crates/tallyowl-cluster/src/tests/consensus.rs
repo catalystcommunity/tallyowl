@@ -153,11 +153,19 @@ impl Node {
     }
 
     fn start_holding(name: &str, tablet: &str) -> Node {
+        Node::start_secured(name, tablet, crate::security::PeerSecurity::default())
+    }
+
+    /// A node whose replication listener and peer connections use `security`.
+    /// With mutual TLS in it, the listener requires a certificate that chains
+    /// to the trusted authorities, and every peer connection presents one.
+    fn start_secured(name: &str, tablet: &str, security: crate::security::PeerSecurity) -> Node {
         let place = directory(name);
         let segments = Arc::new(SegmentedStore::open(place.join("data")).expect("a store opens"));
         let store: Arc<dyn Store> = Arc::clone(&segments) as Arc<dyn Store>;
         let registry = GroupRegistry::new(name, "127.0.0.1:0", Some(place.join("consensus")))
             .expect("a registry");
+        registry.set_security(security.clone());
         let topology = Arc::new(Mutex::new(Topology::new()));
         let held = GroupKey::Tablet(tablet.to_string());
         let reporting = Arc::clone(&registry);
@@ -173,12 +181,15 @@ impl Node {
             crate::transfer::StoreSegments::new(tablet, Arc::clone(&segments))
                 .reporting_applied(Arc::new(move || reporting.applied_index(&held))),
         ));
-        let server = tallyowl_rpc::serve(
-            "127.0.0.1:0",
-            Arc::new(service) as Arc<dyn Dispatcher>,
-            crate::raft::network::MAX_FRAME_BYTES,
-        )
-        .expect("a listener");
+        let dispatcher = Arc::new(service) as Arc<dyn Dispatcher>;
+        let options = tallyowl_rpc::ServerOptions::new(crate::raft::network::MAX_FRAME_BYTES);
+        let server = match (security.identity(), security.trust()) {
+            (Some(identity), Some(trust)) => {
+                tallyowl_rpc::tls::serve_mutual("127.0.0.1:0", dispatcher, options, identity, trust)
+                    .expect("a mutual TLS listener")
+            }
+            _ => tallyowl_rpc::serve_with("127.0.0.1:0", dispatcher, options).expect("a listener"),
+        };
         let address = server.local_address().to_string();
         Node {
             name: name.to_string(),
@@ -195,6 +206,31 @@ impl Node {
         Member::voter(self.name.clone(), self.address.clone())
             .in_region("west")
             .in_domain(format!("rack-{}", self.name))
+    }
+
+    /// The tablet machine the head builds: it copies segments when it is sent a
+    /// snapshot, and its own snapshots carry its erasures.
+    fn tablet_machine(&self, tablet: &str) -> Arc<TabletMachine> {
+        let reporting = Arc::clone(&self.registry);
+        let held = GroupKey::Tablet(tablet.to_string());
+        let into: Arc<dyn crate::transfer::TabletSegments> = Arc::new(
+            crate::transfer::StoreSegments::new(tablet, Arc::clone(&self.segments))
+                .reporting_applied(Arc::new(move || reporting.applied_index(&held))),
+        );
+        let erasures = Arc::clone(&self.segments);
+        Arc::new(
+            TabletMachine::new(Arc::clone(&self.store))
+                .catching_up_with(Arc::new(crate::transfer::SegmentCatchUp::new(tablet, into)))
+                .carrying_erasures_from(Arc::new(move || {
+                    Ok(erasures
+                        .catalog()
+                        .tombstones()
+                        .map_err(|e| e.to_string())?
+                        .iter()
+                        .map(tallyowl_store::catalog::encode_tombstone)
+                        .collect())
+                })),
+        )
     }
 
     /// Take this node away, the way losing a host does: it stops holding the
@@ -635,7 +671,7 @@ fn a_message_from_an_older_placement_generation_is_refused_with_the_current_one(
                     name: Some("t1".into()),
                 },
                 kind: ConsensusKind::Vote,
-                sender: "n2".into(),
+                sender: "n1".into(),
                 // One generation behind.
                 generation: current,
                 payload: vec![0xf6],
@@ -656,7 +692,7 @@ fn a_message_from_an_older_placement_generation_is_refused_with_the_current_one(
                     name: Some("t1".into()),
                 },
                 kind: ConsensusKind::Vote,
-                sender: "n2".into(),
+                sender: "n1".into(),
                 generation: current - 1,
                 payload: vec![0xf6],
             }),
@@ -666,6 +702,28 @@ fn a_message_from_an_older_placement_generation_is_refused_with_the_current_one(
     assert!(!stale.accepted);
     assert_eq!(stale.current_generation, Some(current));
     assert!(stale.refusal.unwrap().contains("placement generation"));
+
+    // A name that is not in the group is refused whatever its generation. It
+    // is a node from another cell, or one that was removed.
+    let stranger = client
+        .call(
+            crate::raft::network::REPLICATION_SERVICE,
+            crate::raft::network::DELIVER_CONSENSUS,
+            encode_consensus_message(&ConsensusMessage {
+                group: GroupRef {
+                    kind: GroupKind::Tablet,
+                    name: Some("t1".into()),
+                },
+                kind: ConsensusKind::Vote,
+                sender: "somebody-else".into(),
+                generation: current,
+                payload: vec![0xf6],
+            }),
+        )
+        .expect("the call reaches the service");
+    let stranger = decode_consensus_reply(&stranger.payload).unwrap();
+    assert!(!stranger.accepted);
+    assert!(stranger.refusal.unwrap().contains("not a member"));
 }
 
 #[test]
@@ -1605,4 +1663,562 @@ fn a_snapshot_policy_of_zero_is_refused_rather_than_stopping_the_node() {
         ),
         "a zero snapshot policy reached openraft"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A replica behind the purged log. L099 turned the purge on; this is the half
+// that was missing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_replica_behind_the_purged_log_holds_the_rows_before_it_reports_caught_up() {
+    // The leader purged the entries this replica needs, so it is sent a
+    // snapshot, and a tablet snapshot carries marks and no rows. Before the
+    // catch-up was driven from the install, the replica took the marks,
+    // reported itself level with the leader, and held nothing.
+    let nodes = [Node::start("p1"), Node::start("p2"), Node::start("p3")];
+    let group = GroupKey::Tablet("t1".into());
+    let voters: Vec<Member> = nodes[..2].iter().map(|n| n.member()).collect();
+    for node in &nodes[..2] {
+        // A snapshot every four entries and one entry kept, so a handful of
+        // batches puts the log behind the purge point.
+        node.registry.set_log_bounds(4, 1);
+        node.registry
+            .start(group.clone(), node.tablet_machine("t1"), voters.clone(), 0)
+            .expect("the group starts");
+    }
+    nodes[0]
+        .registry
+        .bootstrap(&group, &voters)
+        .expect("two voters");
+    let leader = leader_of(&nodes[..2], &group);
+
+    let store = ReplicatedStore::new(
+        Arc::clone(&leader.registry),
+        "t1",
+        Arc::clone(&leader.store),
+        ReceiptPolicy::LocalQuorum,
+        "west",
+    );
+    for n in 1..=12u8 {
+        let (source, batch) = ids(n);
+        store
+            .commit(source, batch, vec![a_row(n)])
+            .expect("the write commits");
+    }
+
+    // Wait for the purge rather than for a duration.
+    let mut purged = 0;
+    for _ in 0..1000 {
+        purged = leader
+            .registry
+            .health_of(&group)
+            .map(|health| health.purged_index)
+            .unwrap_or(0);
+        if purged > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        purged > 0,
+        "the leader never purged, so this test proves nothing"
+    );
+
+    // The third replica starts from nothing, behind the purge point.
+    nodes[2].registry.set_log_bounds(4, 1);
+    nodes[2]
+        .registry
+        .start(
+            group.clone(),
+            nodes[2].tablet_machine("t1"),
+            voters.clone(),
+            0,
+        )
+        .expect("the group starts");
+    let learner = Member::learner(nodes[2].name.clone(), nodes[2].address.clone());
+    leader
+        .registry
+        .add_member(&group, &learner)
+        .expect("the replica joins once it has caught up");
+
+    let target = leader.registry.applied_index(&group);
+    let mut reached = false;
+    for _ in 0..1000 {
+        if nodes[2].registry.applied_index(&group) >= target {
+            reached = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(reached, "the replica catches up");
+    let held = nodes[2]
+        .store
+        .scan([7u8; 16], 0, 10_000, tallyowl_store::TimeBasis::OccurredAt)
+        .expect("a scan")
+        .rows
+        .len();
+    assert_eq!(
+        held, 12,
+        "the replica reports itself level with the leader and does not hold the rows"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A voter that comes back with no consensus state.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_voter_that_lost_its_disk_does_not_vote_until_it_has_caught_up() {
+    // An empty log makes every candidate look up to date. A voter that lost
+    // its disk and voted at once would hand leadership to a replica that lacks
+    // a committed write, and that write would then be truncated on the replica
+    // that still held it.
+    let mut nodes = vec![Node::start("w1"), Node::start("w2"), Node::start("w3")];
+    let group = GroupKey::Tablet("t1".into());
+    let members: Vec<Member> = nodes.iter().map(|n| n.member()).collect();
+    for node in &nodes {
+        node.registry
+            .start(group.clone(), node.tablet_machine("t1"), members.clone(), 0)
+            .expect("the group starts");
+    }
+    nodes[0]
+        .registry
+        .bootstrap(&group, &members)
+        .expect("three voters");
+    let leader_name = leader_of(&nodes, &group).name.clone();
+
+    let lost = nodes
+        .iter()
+        .position(|n| n.name != leader_name)
+        .expect("a follower");
+    {
+        let leader = nodes.iter().find(|n| n.name == leader_name).unwrap();
+        let store = ReplicatedStore::new(
+            Arc::clone(&leader.registry),
+            "t1",
+            Arc::clone(&leader.store),
+            ReceiptPolicy::LocalQuorum,
+            "west",
+        );
+        let (source, batch) = ids(1);
+        store
+            .commit(source, batch, vec![a_row(1)])
+            .expect("the write commits");
+    }
+
+    // The follower loses its consensus state, and only that.
+    let root = nodes[lost]
+        .registry
+        .root()
+        .expect("a durable root")
+        .to_path_buf();
+    nodes[lost].registry.stop(&group);
+    std::fs::remove_dir_all(root.join(group.directory_name())).expect("the state is gone");
+    let machine = nodes[lost].tablet_machine("t1");
+    nodes[lost]
+        .registry
+        .start(group.clone(), machine, members.clone(), 0)
+        .expect("it starts again with nothing");
+    assert!(
+        !nodes[lost].registry.has_history(&group),
+        "a wiped node reads as one that has state"
+    );
+    nodes[lost].registry.hold_votes(&group);
+    let marker = root.join(group.directory_name()).join("holding-votes");
+    assert!(marker.exists(), "a restart would forget the hold");
+
+    // A candidate with any log at all looks up to date to an empty one.
+    let candidate = nodes
+        .iter()
+        .find(|n| n.name != leader_name && n.name != nodes[lost].name);
+    let candidate_id = crate::raft::node_id(&candidate.expect("the other follower").name);
+    let asked = nodes[lost].registry.deliver_vote(
+        &group,
+        openraft::raft::VoteRequest::new(
+            openraft::Vote::new(1_000, candidate_id),
+            Some(openraft::LogId::new(
+                openraft::CommittedLeaderId::new(1, candidate_id),
+                1,
+            )),
+        ),
+    );
+    let refused = asked.expect_err("a node with no state granted a vote");
+    assert!(
+        refused.message.contains("does not vote yet"),
+        "{}",
+        refused.message
+    );
+
+    // The leader brings it back, and then its vote is as safe as any other.
+    let mut released = false;
+    for _ in 0..1000 {
+        if !nodes[lost].registry.is_holding_votes(&group) {
+            released = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        released,
+        "the hold never ended, so this node would never vote again"
+    );
+    assert!(
+        !marker.exists(),
+        "the hold would come back at the next start"
+    );
+    let leader = nodes.iter().find(|n| n.name == leader_name).unwrap();
+    assert!(
+        nodes[lost].registry.applied_index(&group) > 0
+            || leader.registry.applied_index(&group) == 0,
+        "the hold ended before the node held anything"
+    );
+    nodes[lost].lose(&group);
+}
+
+// ---------------------------------------------------------------------------
+// Unsafe recovery, against a group that has really lost its quorum.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unsafe_recovery_forms_one_voter_when_two_of_three_are_gone() {
+    // A voter set is changed by committing the change, and this is the case
+    // where nothing commits. Asking the group to change itself was refused by
+    // a survivor that was not the leader, and never returned on one that was.
+    let mut nodes = vec![Node::start("u1"), Node::start("u2"), Node::start("u3")];
+    let group = GroupKey::Tablet("t1".into());
+    let members: Vec<Member> = nodes.iter().map(|n| n.member()).collect();
+    start_group(&nodes, &group, &members);
+    let leader_name = leader_of(&nodes, &group).name.clone();
+    {
+        let leader = nodes.iter().find(|n| n.name == leader_name).unwrap();
+        let store = ReplicatedStore::new(
+            Arc::clone(&leader.registry),
+            "t1",
+            Arc::clone(&leader.store),
+            ReceiptPolicy::LocalQuorum,
+            "west",
+        );
+        let (source, batch) = ids(1);
+        store
+            .commit(source, batch, vec![a_row(1)])
+            .expect("the write commits");
+    }
+    let applied = nodes
+        .iter()
+        .find(|n| n.name == leader_name)
+        .unwrap()
+        .registry
+        .applied_index(&group);
+
+    // The survivor is a follower, which is the harder case. Wait until it holds
+    // the write, then lose the other two.
+    let survivor = nodes
+        .iter()
+        .position(|n| n.name != leader_name)
+        .expect("a follower");
+    for _ in 0..500 {
+        if nodes[survivor].registry.applied_index(&group) >= applied {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for (index, node) in nodes.iter_mut().enumerate() {
+        if index != survivor {
+            node.lose(&group);
+        }
+    }
+
+    let watermark = nodes[survivor]
+        .registry
+        .force_single_voter(&group)
+        .expect("the survivor forms a voter set of one from its own log");
+    assert!(
+        watermark >= applied,
+        "the survivor lost what it had applied"
+    );
+    assert!(nodes[survivor].registry.is_leader(&group));
+    assert_eq!(nodes[survivor].registry.members(&group).len(), 1);
+
+    // It takes a write alone, and still holds the one from before.
+    let store = ReplicatedStore::new(
+        Arc::clone(&nodes[survivor].registry),
+        "t1",
+        Arc::clone(&nodes[survivor].store),
+        ReceiptPolicy::LocalQuorum,
+        "west",
+    );
+    let (source, batch) = ids(2);
+    store
+        .commit(source, batch, vec![a_row(2)])
+        .expect("one voter commits alone");
+    assert_eq!(nodes[survivor].store.row_count(), 2);
+}
+
+#[test]
+fn a_read_asks_the_next_replica_when_the_first_one_is_gone() {
+    // A tablet with one dead replica still has a healthy quorum. Asking only
+    // the first member made every tablet that listed the dead node first
+    // unreadable for as long as the node was down.
+    let (one, two) = two_tablets();
+    let (s, b) = ids(1);
+    two.store.commit(s, b, vec![a_row(3)]).expect("a write");
+
+    // `tb` gains a replica that is listed first and answers nothing.
+    {
+        let mut held = one.topology.lock().expect("topology");
+        held.apply(&crate::topology::ControllerCommand::RegisterNode {
+            node: "gone".into(),
+            address: "127.0.0.1:1".into(),
+            region: "west".into(),
+            domain: "rack-gone".into(),
+        })
+        .expect("a node registers");
+        held.apply(&crate::topology::ControllerCommand::AddReplica {
+            tablet: "tb".into(),
+            member: Member::voter("gone", "127.0.0.1:1")
+                .in_region("west")
+                .in_domain("rack-gone"),
+        })
+        .expect("a replica is added");
+        held.apply(&crate::topology::ControllerCommand::RemoveReplica {
+            tablet: "tb".into(),
+            node: two.name.clone(),
+        })
+        .expect("the live replica leaves");
+        held.apply(&crate::topology::ControllerCommand::AddReplica {
+            tablet: "tb".into(),
+            member: two.member(),
+        })
+        .expect("and comes back, now listed second");
+        let members = &held.tablet("tb").expect("the tablet").members;
+        assert_eq!(members[0].node, "gone", "the dead replica is not first");
+    }
+
+    let store = ReplicatedStore::new(
+        Arc::clone(&one.registry),
+        "ta",
+        Arc::clone(&one.store),
+        ReceiptPolicy::LocalOne,
+        "west",
+    )
+    .reading_across(reads_across(&one));
+    let scanned = store
+        .scan([7u8; 16], 0, 10_000, tallyowl_store::TimeBasis::OccurredAt)
+        .expect("a scan across both tablets");
+    assert_eq!(scanned.rows.len(), 1, "the live replica was not asked");
+    assert!(
+        !scanned.incomplete,
+        "a tablet with a live replica read as missing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D62: node-to-node traffic over mutual TLS, and the sender a certificate
+// proves.
+// ---------------------------------------------------------------------------
+
+/// An installation authority and the certificates it gives nodes.
+struct TestAuthority {
+    key: rcgen::KeyPair,
+    certificate: rcgen::Certificate,
+}
+
+impl TestAuthority {
+    fn new() -> TestAuthority {
+        let key = rcgen::KeyPair::generate().expect("a key");
+        let mut params = rcgen::CertificateParams::default();
+        let mut name = rcgen::DistinguishedName::new();
+        name.push(rcgen::DnType::CommonName, "test installation");
+        params.distinguished_name = name;
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let certificate = params.self_signed(&key).expect("an authority");
+        TestAuthority { key, certificate }
+    }
+
+    /// A node certificate: the node's name as its common name and as the name
+    /// a peer verifies it against.
+    fn node(&self, name: &str) -> tallyowl_rpc::tls::Identity {
+        let key = rcgen::KeyPair::generate().expect("a key");
+        let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).expect("a name");
+        let mut subject = rcgen::DistinguishedName::new();
+        subject.push(rcgen::DnType::CommonName, name);
+        subject.push(rcgen::DnType::OrganizationalUnitName, "storage-process");
+        params.distinguished_name = subject;
+        params.extended_key_usages = vec![
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        let leaf = params
+            .signed_by(&key, &self.certificate, &self.key)
+            .expect("signed");
+        tallyowl_rpc::tls::Identity {
+            chain: vec![leaf.der().to_vec(), self.certificate.der().to_vec()],
+            private_key: key.serialize_der(),
+            authority: self.certificate.der().to_vec(),
+            expected_server_name: name.to_string(),
+        }
+    }
+
+    fn security_for(&self, name: &str) -> crate::security::PeerSecurity {
+        crate::security::PeerSecurity::mutual(
+            Arc::new(tallyowl_rpc::material::StaticIdentity(self.node(name))),
+            Arc::new(tallyowl_rpc::trust::StaticTrust(vec![self
+                .certificate
+                .der()
+                .to_vec()])),
+            false,
+        )
+    }
+}
+
+#[test]
+fn three_voters_over_mutual_tls_elect_a_leader_and_commit() {
+    let authority = TestAuthority::new();
+    let nodes: Vec<Node> = ["tls1", "tls2", "tls3"]
+        .iter()
+        .map(|name| Node::start_secured(name, "t1", authority.security_for(name)))
+        .collect();
+    let group = GroupKey::Tablet("t1".into());
+    let members: Vec<Member> = nodes.iter().map(|n| n.member()).collect();
+    start_group(&nodes, &group, &members);
+
+    let leader = leader_of(&nodes, &group);
+    let store = ReplicatedStore::new(
+        Arc::clone(&leader.registry),
+        "t1",
+        Arc::clone(&leader.store),
+        ReceiptPolicy::LocalQuorum,
+        "west",
+    );
+    let (source, batch) = ids(1);
+    let outcome = store
+        .commit(source, batch, vec![a_row(1)])
+        .expect("three voters over mutual TLS commit");
+    assert_eq!(outcome.accepted, 1);
+}
+
+/// Send one consensus message to `node`, as the holder of `identity`, naming
+/// `sender` as its author. Returns the refusal, if any.
+fn send_as(
+    node: &Node,
+    authority: &TestAuthority,
+    identity: tallyowl_rpc::tls::Identity,
+    sender: &str,
+) -> Option<String> {
+    use tallyowl_cluster_api::codec::{decode_consensus_reply, encode_consensus_message};
+    use tallyowl_cluster_api::types::{ConsensusKind, ConsensusMessage};
+    let client = tallyowl_rpc::Client::mutual(
+        node.address.clone(),
+        crate::raft::network::MAX_FRAME_BYTES,
+        &node.name,
+        Arc::new(tallyowl_rpc::material::StaticIdentity(identity)),
+        Arc::new(tallyowl_rpc::trust::StaticTrust(vec![authority
+            .certificate
+            .der()
+            .to_vec()])),
+    );
+    let message = ConsensusMessage {
+        group: GroupKey::Tablet("t1".into()).to_wire(),
+        kind: ConsensusKind::Vote,
+        sender: sender.to_string(),
+        generation: 0,
+        payload: vec![0],
+    };
+    let response = client
+        .call(
+            crate::raft::network::REPLICATION_SERVICE,
+            "deliver-consensus",
+            encode_consensus_message(&message),
+        )
+        .expect("the message reaches the node");
+    let reply = decode_consensus_reply(&response.payload).expect("a consensus reply");
+    (!reply.accepted).then(|| reply.refusal.unwrap_or_default())
+}
+
+#[test]
+fn a_consensus_message_whose_sender_is_not_its_certificate_is_refused() {
+    // A node that proves it is `intruder` writes `tls-b`, a member, into the
+    // message. The name is a claim; the certificate is proof.
+    let authority = TestAuthority::new();
+    let nodes: Vec<Node> = ["tls-a", "tls-b"]
+        .iter()
+        .map(|name| Node::start_secured(name, "t1", authority.security_for(name)))
+        .collect();
+    let group = GroupKey::Tablet("t1".into());
+    let members: Vec<Member> = nodes.iter().map(|n| n.member()).collect();
+    start_group(&nodes, &group, &members);
+
+    let refusal = send_as(&nodes[0], &authority, authority.node("intruder"), "tls-b")
+        .expect("a message whose sender is not its certificate was taken");
+    assert!(
+        refusal.contains("proved it is `intruder`"),
+        "the refusal does not say why: {refusal}"
+    );
+
+    // The same member, proving itself, reaches the membership and consensus
+    // checks. What it sent is not a real vote, so it may still be refused, but
+    // not for its identity.
+    let honest = send_as(&nodes[0], &authority, authority.node("tls-b"), "tls-b");
+    assert!(
+        honest.is_none_or(|refusal| !refusal.contains("proved it is")),
+        "a member that proved itself was refused for its identity"
+    );
+}
+
+#[test]
+fn a_plaintext_replication_listener_is_refused_off_loopback() {
+    use crate::security::PeerSecurity;
+    let refused = PeerSecurity::plaintext(false)
+        .check_listen("10.99.0.1:5200")
+        .expect_err("a plaintext replication listener on a network address was allowed");
+    assert!(
+        refused.message.contains("`replication.listen`"),
+        "{}",
+        refused.message
+    );
+
+    for permitted in [
+        "127.0.0.1:5200",
+        "[::1]:5200",
+        "unix:/run/tallyowl/replication.sock",
+    ] {
+        PeerSecurity::plaintext(false)
+            .check_listen(permitted)
+            .unwrap_or_else(|e| panic!("{permitted} was refused: {}", e.message));
+    }
+    PeerSecurity::plaintext(true)
+        .check_listen("10.99.0.1:5200")
+        .expect("the operator allowed plaintext");
+    TestAuthority::new()
+        .security_for("n")
+        .check_listen("10.99.0.1:5200")
+        .expect("a node with a certificate may listen anywhere");
+}
+
+#[test]
+fn only_a_proved_or_local_peer_reaches_the_replication_service() {
+    use crate::security::PeerSecurity;
+    use tallyowl_rpc::{Peer, PeerIdentity};
+    let strict = PeerSecurity::plaintext(false);
+    assert!(strict.admits(&Peer::Local).is_ok());
+    assert!(strict.admits(&Peer::Anonymous).is_err());
+    assert!(strict.admits(&Peer::Unverified).is_err());
+    assert!(PeerSecurity::plaintext(true)
+        .admits(&Peer::Unverified)
+        .is_ok());
+
+    let proved = Peer::Verified(PeerIdentity {
+        node_id: "n1".into(),
+        role: None,
+        certificate_serial: "01".into(),
+        expires_at_ms: i64::MAX,
+    });
+    assert!(strict.check_sender(&proved, "n1").is_ok());
+    assert!(strict.check_sender(&proved, "n2").is_err());
+    assert!(strict.check_sender(&Peer::Local, "anybody").is_ok());
 }

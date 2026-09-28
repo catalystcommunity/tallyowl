@@ -23,6 +23,10 @@ tallyowl-compat = { workspace = true }
 tallyowl-wire = { workspace = true }
 tallyowl-config = { workspace = true }
 tallyowl-rpc = { workspace = true }
+# The node identity for mutual TLS. D62.
+tallyowl-identity = { workspace = true }
+# The OpenTelemetry receiver serves the same certificates as intake. D62.
+rustls = { workspace = true }
 tallyowl-collector-api = { workspace = true }
 corndogs = { workspace = true }
 tallyowl-queue = { workspace = true }
@@ -31,6 +35,9 @@ csilgen-transport = { workspace = true }
 # segment pages; a queue payload lives for seconds, so the same reasoning
 # applies more strongly. See src/task.rs.
 zstd = { workspace = true }
+# One call: install the handler that lets a collector stop in order when it is
+# told to. The store already uses this crate for `statvfs`.
+libc = { workspace = true }
 
 [dev-dependencies]
 # The testbed runs the reference application twice: once against the local
@@ -42,3 +49,6 @@ tallyowl-driver-rust = { path = "../tallyowl-driver-rust" }
 tallyowl-control-api = { workspace = true }
 tallyowl-store = { workspace = true }
 serde_json = { workspace = true }
+# Certificates for the transport tests. D62.
+rcgen = { workspace = true }
+time = { workspace = true }

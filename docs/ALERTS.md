@@ -92,6 +92,37 @@ time, and a link to the query. A notification never carries telemetry rows.
 Delivery retries with capped jitter. A failed delivery is visible in a metric
 and in the operator interface. A failed delivery never changes the alert state.
 
+### 6.1 Signatures
+
+The head signs each notification on both channels in the same way:
+
+- The key is the BLAKE3 hash of the secret that the target's `secret_ref`
+  names.
+- The signature is the keyed BLAKE3 hash, as lowercase hexadecimal text, of
+  the time in milliseconds since 1970 as decimal text, a full stop, and the
+  body.
+- A webhook carries the time in the `tallyowl-timestamp` header and the
+  signature in the `tallyowl-signature` header.
+- A callback carries the time, the signature, and the body in its
+  `AlertNotifyRequest`. The body is the exact bytes that the head signed.
+
+A receiver does these steps before it reads the body:
+
+1. Calculate the signature from its own copy of the secret.
+2. Compare it with the signature that it received, in constant time.
+3. Refuse a time that is more than five minutes from its own clock. An older
+   notification is a replay.
+
+The head signs each attempt again, so a retry is never too old. The Go and
+the Rust app drivers do all three steps for a callback:
+`VerifyAlertCallback` and `verify_alert_callback`.
+
+A callback target needs a `secret_ref`. The head refuses a rule with a
+callback target and no secret. A callback receiver that refuses a
+notification answers a `ServiceError` with the code `unauthenticated` that is
+not retryable. The head records the refusal and does not send that
+notification again.
+
 ## 7. Resource control
 
 Alerts share the storage and query path with the dashboard. An alert must never

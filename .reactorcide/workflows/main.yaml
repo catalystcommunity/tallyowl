@@ -32,6 +32,11 @@ jobs:
   tallyowl-audit:
     job_file: audit.yaml
 
+  # Only here, not in the pull-request workflow: it needs the `docker`
+  # capability, which no pull-request profile grants.
+  tallyowl-kind-check:
+    job_file: kind-check.yaml
+
 # Nothing is packaged here. A merge through a pull request starts the release
 # workflow, which runs these same gates and then cuts, builds, and publishes
 # the version the commits ask for. This workflow covers a direct push to main,

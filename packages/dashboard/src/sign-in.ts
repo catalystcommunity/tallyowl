@@ -32,6 +32,23 @@ export function heldSession(storage: Storage): string | undefined {
   return storage.getItem(SESSION_KEY) ?? undefined;
 }
 
+/// Whether this text has the shape of a TallyOwl session token.
+///
+/// `tallyowl-head session create` prints one, and it is the only way in for an
+/// installation that has no LinkKeys domain. The shape is checked so that a
+/// person who pasted an application key, which starts `tow_`, is told so here
+/// and not by a refusal that reads like an expired session.
+export function isSessionToken(text: string): boolean {
+  return /^tos_[0-9a-f]+_\S+$/.test(text.trim());
+}
+
+/// Hold a session token an operator issued, for this tab.
+export function holdSession(control: Control, storage: Storage, token: string): void {
+  const trimmed = token.trim();
+  storage.setItem(SESSION_KEY, trimmed);
+  control.withSession(trimmed);
+}
+
 export function forgetSession(storage: Storage): void {
   storage.removeItem(SESSION_KEY);
   storage.removeItem(PENDING_KEY);

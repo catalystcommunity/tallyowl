@@ -6411,3 +6411,334 @@ cluster cannot satisfy is a job that does not start at all.
 
 **Cost to change:** cheap.
 **Revisit:** no.
+
+## L191. An antagonistic review found defects that every suite passed, and the choices made to fix them
+
+**Phase:** after 0.2.1
+**Decision:** on 2026-09-20 the owner asked for an antagonistic review with an
+emphasis on scalability, stability, and ease of use for a developer or an
+administrator who wants to monitor an application. Eight reviewers each read
+one area and were told to prove each finding in the code. They reported about
+95 findings. Eleven agents then fixed them, each in its own set of files, and
+each fix has a test that fails without it. `docs/RELEASE_NOTES.md` lists what
+changed for an operator. This entry records the choices that the design did
+not make.
+
+**Why the suites did not find these.** Most of the defects need a peer that
+misbehaves in a specific way: it accepts a connection and does not answer, it
+returns after it lost its disk, or it sends a value that is legal on the wire
+and fatal when rendered. The suites had peers that answer or peers that are
+absent. Three reviews also found a defect of the class of L052 and L036: a
+function that exists, has a test, and has no caller. These were the three
+session and node reapers, the role-token rate limit, five store instruments,
+`transfer::copy_tablet`, and the whole mutual TLS transport.
+
+**Defects that the fix agents found and the review did not:**
+
+- The append log reused positions. A seal that covers each frame rewrites the
+  log with no frames. After a restart the positions started at 0, below the
+  checkpoint, so the next restart did not replay them and the next seal
+  reclaimed them. An idle installation that restarted lost its newest
+  acknowledged batch. `Wal::start_at_least` now sets a minimum position.
+- A tablet snapshot did not carry the erasures, so a replica that installed
+  one showed erased rows.
+- The downsample pass counted a rollup row again, because the row is on the
+  first instant of the next window.
+- A frame holds the RPC envelope and the credential as well as the batch. A
+  Go app driver batch of exactly the frame limit was refused.
+
+### Choices
+
+| Area | Choice | Why | Cost to change |
+| --- | --- | --- | --- |
+| App drivers | A sealed batch stays in the driver until the collector acknowledges it. Its bytes count against the unacknowledged limit together with the buffer | D5 said so, and the code dropped the batch on the first error. Memory stays bounded, and `Capture` refuses when the limit is reached (D19) | Cheap |
+| App drivers | `MaxBatchAttempts` counts only an attempt with an unknown result. The default is 5. An unreachable collector and a retryable refusal do not use an attempt | Three attempts with no wait ended in less than 1 ms, so a rolling restart of a collector lost each batch sealed during it. The count exists to stop one batch that a collector cannot survive from blocking the queue | Cheap |
+| App drivers | The wait between attempts is 100 ms, doubled to 30 s, with equal jitter. A call inside the wait returns a typed error immediately | D19 said "capped jitter". The driver does not sleep on the path of the host | Cheap |
+| App drivers | An opt-in sender: `Run` in Go, `spawn_flusher` in Rust, `start` in the browser package | L061 keeps the metric period with the host, and that stays true. Without a sender, a service that followed the runbook sent nothing until it stopped | Cheap |
+| App drivers | The Go app driver converts a browser item through the encoding (`FromBrowser`). It replaces the event ID with a hash of the session and the browser ID | The golden vectors prove that the two generated packages encode the same bytes, so each kind and each field arrives with no code for each kind. DELIVERY.md section 2 required the namespace, and no driver did it. The same browser item maps to the same ID, so a retry stays one event | Cheap |
+| RPC | Each client has a 30-second read and write deadline by default. A connection that timed out is not used again | One stalled peer held a mutex that intake, delivery, and the policy fetch shared, while readiness stayed correct. This is the stall of L131 | Cheap |
+| Collector | A pool of Corndogs connections with a deadline on the wait, not on the socket. A worker that stays stuck is replaced | The Corndogs client keeps its socket private. Delete `pool.rs` when Corndogs has transport timeouts | Cheap |
+| Collector | A breaker in the forwarder loop waits 1 to 30 s. A failed probe parks the task with no payload | Backoff for each task alone became a loop of claim, fail, rewrite, and warn for the length of an outage, on the device that holds the outage buffer. Corndogs keeps the stored payload when `UpdateTask` sends none | Cheap |
+| Collector | Only `MalformedEnvelope` and `FrameTooLarge` became permanent errors | An unknown operation and an unsupported version stay retryable, so a rolling upgrade never sends data to quarantine | Cheap |
+| Collector | A failed key check opens a jittered pause of 1 to 5 s. One caller for each credential asks the head | L150 tells an operator to raise `keyCacheGrace` for an outage. Without the pause, each batch in that time paid the connect timeout under a shared lock | Cheap |
+| Collector | A histogram has one count for each bound, checked at intake | The contract does not give the relation. The head, the Rust app driver, and the OTLP mapping all use equal lengths. A csilgen length constraint is better if csilgen can express one | Cheap |
+| Collector | The metric byte budget is the size of the active series | Revises L068. A cumulative count made a constant metric refuse each new series until a restart | Cheap |
+| Compatibility edge | A scraped point gets an `instance` label. An OTLP metric keeps `service.name` as a label. An OpenMetrics counter keeps `_total` | Series identity is the kind and the labels, so two replicas were one series and each scrape looked like a restart. **This changes the identity of stored scraped series** | Expensive: stored identity |
+| Compatibility edge | An offer fails as a whole only before the store keeps a batch | A retry after the store kept a part would make the same rows again with new IDs | Cheap |
+| Compatibility edge | The OTLP receiver has no decompressor and answers 415 | No gzip dependency is in the tree. Revisit if one enters it | Cheap |
+| Store | The log checkpoint is a catalog record that only a seal moves. A log position is never used again | A checkpoint derived from the manifests moved when a segment came from a different node. A catalog with no record replays the whole log one time | Moderate: on-disk |
+| Store | Append-log frame version 2 puts the header in the checksum. Damage before acknowledged frames refuses to open | An acknowledged frame after the damage is real loss, and truncation hid it. A version 1 log reads as before and converts at the next rewrite | Moderate: on-disk |
+| Store | A tombstone is retired after its horizon, a 24-hour margin, a complete pass, and a check that no earlier row was unsealed | Tail sampling writes one predicate for each dropped trace, and each read paid for all of them. **Open:** a segment copied from a replica that has not compacted can bring back a row after the local predicate is gone. The margin reduces the risk. A negative `tombstone_retire_after_ms` turns retirement off. The setting has no configuration key yet | Cheap |
+| Store | The erasure pass keeps a progress marker and uses the locator to find segments | Each pass rewrote each segment of a project with a standing predicate, for all time | Cheap |
+| Cluster | The machine state is written in the transaction that writes the applied position | The applied position was durable and the state was in memory, so a restart lost each committed controller command on that node | Cheap |
+| Cluster | A snapshot install copies the segments first and fails without them. `copied_through` filters an entry that arrives by copy and by log | Supersedes the statement in L099 that L097 gives the replica the other copy. Nothing called that copy | Moderate |
+| Cluster | A voter with no state asks its peers. If a peer holds data, the voter holds its vote until it is current. The openraft feature `loosen-follower-log-revert` is on | A marker file cannot tell a lost volume from a first installation. The vote hold removes the hazard that the feature name warns about | Moderate |
+| Cluster | Unsafe recovery is an offline rewrite of the membership, and it also recovers the controller group | openraft 0.9 has no forced membership, so the operation could not run in the case it exists for. Its test held no group, so it did not reach the consensus part. FAILURE_MODES.md section 6 said that the operation was built and tested | Moderate |
+| Cluster | The consensus gauges are sums for one node with no group label | The number of groups on a node has no design limit, so a group label is a cardinality defect in the monitoring of the operator | Cheap |
+| Cluster | A node address is `replication.advertise`, or `replication.listen` if that is empty. A name is `node.name`, or `node-` and the address. An entry in `replication.peers` that is this node is skipped | The chart gave each pod a bind address to advertise and one shared peer list, so three pods made three different membership maps | Cheap |
+| Head | Policy authorization follows the scope. Installation scope uses the authority of L050 | Authorization followed the shape of the ID. **Open:** no role above workspace Owner exists, so each workspace owner can set the installation kill switch | Cheap when an installation role exists |
+| Head | Renewal needs a verified peer identity | A node ID is in the log, in `list-nodes`, and in each certificate. L191 added `enrollment.allowUnverifiedRenewal` as a way out. L192 removed it, because the verified identity now exists | Cheap |
+| Head | The role-token rate is a fixed window of one hour on the token record, claimed before the signature and released on failure | One stored number stops an autoscaler in a loop. A short burst across a window limit is possible | Cheap |
+| Head | A setting that nothing reads refuses each value that is not its default | A setting that does nothing must not look as if it does something | Cheap |
+| Head | A webhook to an address that is not public is refused. `alerts.allowedPrivateTargets` lists the exceptions | The author of a rule is a tenant, and the request leaves from the head | Cheap |
+| Head | The head is not ready until it reaches Corndogs one time. A later sweep failure is degraded. A stale background loop is degraded | Ingest does not depend on the sweep, and a slow compaction must not remove the head from service | Cheap |
+| Head | A failed commit of the golden signals is an error to the collector | Reverses the comment that a lost rollup is acceptable. A redelivery deduplicated on the receipt, so the signals were never made | Cheap |
+| Head | The downsample watermark starts at the newest closed window, with no backfill | A backfill reads the history of each project at the first start after an upgrade | Cheap |
+| Head | List paging is a slice of a sorted full read, with a key as the cursor | It limits the reply with no change to the key layout. Each page still reads the table | Moderate |
+| Head | An export makes two passes over time windows and stops if a column changes type between them | The Parquet schema is fixed at the start, and a null with no report is a wrong answer | Cheap |
+| Charts | One `deployment` key holds each value of the pod | Three lists must agree for each new key otherwise | Cheap |
+| Charts | An administration verb in a cluster is a Job that stops the head. No backup CronJob ships | The running head holds the data-directory lock. A control operation on a running head needs a CSIL change | Cheap when that operation exists |
+| Tooling | The csilgen generators are installed in the repository and linked from `csil/.generators`. The binary proves its version. Only a 404 permits a different source | The 0.2.8 pin changed CI and left each workstation on 0.2.7. `~/.csilgen/generators` holds one version for the whole machine | Cheap |
+
+### Deferred, and why
+
+| Item | Why it was not done |
+| --- | --- |
+| Transport security on all three hops, and the checks that depend on a peer identity (renewal, `commit-batch`, the consensus sender) | `tallyowl-rpc` has mutual TLS for enrolled nodes. An application holds a key and not a node certificate, so the hop from an application to a collector needs a mode with server authentication only. The owner decided the design on 2026-09-26 in D62, and L192 records the build |
+| Control operations for a key, a member, an erasure, and an export on a running head | Each needs a new CSIL operation and a regeneration |
+| A memory limit for the segment cache, and page reads that do not hold the whole segment | A new design of the read path. Pruning before the open and I/O outside the store lock were done |
+| A multiplexed connection between consensus peers | The timeouts, the separate connection for a forwarded proposal, and the bounded queue for each peer remove the stall. The throughput limit stays |
+| A row limit in `Store::scan`, the missed tablets inside `Merged`, the segment digest in the manifest, and `Store::is_writable` with the space reserve | Each changes the `Store` trait while the store and the cluster changed at the same time |
+| A second roll-up of a window for a point that arrives after the grace | The derived batch ID deduplicates a second roll-up, so the old rollup rows must be replaced |
+| The identity cache key without tail-sampling tombstones | Needs a store generation that moves only for a tombstone that can hide an identity row |
+| Authentication, TLS, and discovery for scrape targets | Needs a TLS client in the collector. A configuration form is proposed in the report of the compatibility agent |
+| SHA-256 values for the downloads of the tooling | The table and the check exist. The table is empty, because a value that nobody downloaded and verified is an invented value. An unpinned download prints its digest |
+
+### Requests for other projects
+
+Filed on 2026-09-26, in the other repository in each case:
+
+- **Corndogs:** `tallyowl-update-requests.md` at the root of the corndogs
+  repository. Connect and I/O timeouts on the Rust transport. Counts for each
+  queue and state that do not read each live task. A way for `UpdateTask` to
+  keep the priority. A note that a nil payload keeps the stored payload.
+- **csilgen:** `docs/csilgen-requests/tally-owl-clamp-request.md`. A limit on
+  `Vec::with_capacity(n)` in the generated Rust decoder, where `n` comes from
+  the wire. The reservation is bounded by the remaining input and is not
+  bounded in what it amplifies: 32 bytes for each one-byte element. A length
+  relation between two lists of one record, if the language can express one.
+
+**Cost to change:** each row above gives its own.
+**Revisit:** yes, for the rows marked **Open** and for each deferred item.
+
+## L192. Transport security is built, on one port for the head, and csilgen is at 0.2.9
+
+**Phase:** after 0.2.1
+**Decision:** the owner decided transport security on 2026-09-26 (D62) and asked
+for it to be built with the csilgen pin moved to 0.2.9. Both are done. D62
+"As built" gives the points the decision text did not settle. This entry gives
+the reasons, and the defects the build found.
+
+### csilgen 0.2.9
+
+The pin moved in four places: the CLI and the generators (`deps.py`), the
+TypeScript transport (a release asset), the Go transport in both Go modules,
+and the Rust transport in `Cargo.toml`. The Rust transport never reserved from
+a length on the wire, and it moved anyway, so that one build uses one csilgen
+revision. The regenerated decoders differ only by the reservation clamp.
+
+The first three release assets now have SHA-256 pins. Each value was measured
+from two downloads that agreed. The release publishes no checksum file, so a
+pin proves that a later download is the file that was checked. It does not
+prove that the first download was genuine. The other platforms of the CLI are
+not measured and stay unpinned.
+
+`./tools.sh deps` found a workstation that still had csilgen 0.2.7 and fetched
+0.2.9, which is the fix of L191 working as intended.
+
+### Choices
+
+| Area | Choice | Why | Cost to change |
+| --- | --- | --- | --- |
+| Head | One port. `head.listen` is mutual TLS and also accepts a client with no certificate, as an anonymous peer | A collector has no certificate before its first enrollment. A second port for enrollment is a second listener, a second chart port, and a second rule. An operator's client proves itself with a session token and needs the same port. A client that shows a certificate is still verified, and a forged one is still refused | Cheap |
+| Head | `commit-batch`, `renew-node-certificate`, `resolve-key`, and `fetch-policy` refuse an anonymous peer | These are the operations that trust the peer. `resolve-key` answers which project a key belongs to, so an anonymous caller could test keys with it. Enrollment is still limited by the role token and its hourly rate (L191) | Cheap |
+| Identity | A collector checks a head against the name `head.tallyowl.internal`, not the address it dials | It proves "a head of this installation" through any Service name, address, or load balancer | Cheap |
+| Identity | A node certificate carries its node name as the common name and as a DNS name. `config check` refuses a `node.name` that cannot be a DNS name | rustls checks the DNS name and never the common name. Without the rule, a bad name passed validation and stopped the head's own certificate at start with a message about certificates | Cheap |
+| Identity | The signer is held in memory, loaded from the operator's files. The catalog no longer stores an authority key | D62. The head generated its own authority before, which one head can do and five cannot share | Cheap |
+| Identity | An issued chain is the leaf and the intermediates. The root stays out | Each service trusts the root through `installation.authorities` | Cheap |
+| Identity | A refused renewal leads to re-enrollment. A certificate that lapsed is presented as no identity | Revoking a node lasts until the collector restarts and enrolls again. Revoking its role token stops it | Cheap |
+| Identity | Both services read `installation.authorities` again on `tls.reloadInterval` | A new authority takes effect with no restart, which is how the authority rotates | Cheap |
+| RPC | Mutual TLS builds its configuration for each connection from the current identity and authorities | Renewal and authority rotation need no restart. The connections are long-lived, so the cost is small | Cheap |
+| RPC | A certificate or alert failure in a handshake is permanent. A close during a handshake stays retryable | A restarting peer closes a socket the same way a plaintext listener does. A permanent error there could make an app driver give up a batch | Cheap |
+| RPC | A client with no roots uses the operating system's trusted authorities (`rustls-native-certs`) | A corporate authority that an administrator installed on the host works with no TallyOwl setting. A bundled root list would not have it | Cheap |
+| App drivers | A failed handshake sends nothing, so it uses no batch attempt and loses nothing | The Go and the Rust app drivers treat it like an unreachable collector. The batch waits in the driver until a setting changes | Cheap |
+| Head | A collector may write only inside the scope of the role token that enrolled it (D32) | A collector that stamps a project it may not write is misconfigured, and a retry does not fix that. A batch with one such row is refused whole, and the refusal names the project | Cheap |
+| Cluster | Every peer client comes from one `PeerSecurity`, and checks the peer's node name | One setting decides the transport for consensus, proposals, reads, and segment copies | Cheap |
+| Services | A plaintext listener on a network address is refused by `config check` and by the listener itself. When certificates are configured, TLS is used even under `transport.allowPlaintext`. That setting does not lift the Corndogs or the dashboard rule | A process that skips validation still cannot serve plaintext on a network by mistake. The plaintext setting never makes a listener that can be secure less secure. Each D62 exception has its own reason and its own setting | Cheap |
+| RPC | Unix sockets are built on Unix only | The build machine has no Windows toolchain, and code that was never compiled can break the Windows build. D62 accepts Windows. This is a gap | Moderate: needs a Windows build in CI |
+
+### Defects the build found
+
+- **The recorded certificate serial was a hash of the leaf, not its X.509
+  serial.** A renewal check that compares serials could never pass. The
+  identity work made the recorded serial the real one.
+- **The Corndogs connection pool gave a slot back after it delivered the
+  answer.** A caller that asked again at once could find no idle slot and dial
+  a second connection, so a quiet process opened more connections than it
+  needed. The full test suite found it under load. The slot now goes back
+  before the answer is delivered. The race depends on timing, and the new
+  test does not prove that the old order fails.
+- **The new TLS tests left private keys in the system temporary directory.**
+  About fifteen directories for each run. Each test directory is now removed
+  when its test ends.
+- **The charts rendered listeners that the services' own validation refuses.**
+  `helm-check` rendered the templates and never ran `config check` on the
+  result. It now runs the real binary's `config check` on nine rendered
+  profiles, with the pod's environment and a clean host environment. The step
+  found a second defect at once: the loader reads every `TALLYOWL_*`
+  environment variable as a setting, so the charts' `TALLYOWL_API_KEY` and the
+  new role-token variable would each have stopped the service. They are now
+  `SECRET_TALLYOWL_API_KEY` and `SECRET_TALLYOWL_ROLE_TOKEN`.
+
+### Gaps the documentation work found, and what closed them
+
+The operator documents are written against the build, and four passages could
+only be made true by a code change:
+
+- **No command made a role token.** A Kubernetes install could not enroll a
+  collector without a generated control client. `tallyowl-head token
+  create|list|revoke` does it. A token gets a limit of 120 enrollments each
+  hour unless an operator sets another, which allows for an autoscaler and
+  for a pod that restarts in a loop. Its workspaces are the D32 scope.
+- **An enrollment failure was counted and not logged.** The counter gives how
+  often; the log line gives why. The node now writes a warning for each
+  failed attempt, with the reason and the head's message.
+- **A server that refused a TLS handshake left no trace.** It now counts each
+  one in `tallyowl_tls_handshakes_refused_total{listener}`. It does not log
+  one, because a stranger could write a line for each connection. A
+  connection that arrives before the node has an identity is not counted:
+  the peer did nothing wrong.
+- **The native alert callback was plaintext, and its comment said mutual
+  TLS.** It now follows D62: plaintext to a loopback or `unix:` receiver, and
+  TLS with the operating system's authorities to any other. The receiver is
+  an application service with no installation certificate, so the connection
+  proves nothing about the caller. The owner chose a signature. The receiver
+  is now declared in CSIL (`TallyOwlAlertReceiver.notify`, in the ingest
+  contract that an application already includes). Its request carries the
+  signing time, the signature, and the body as the exact bytes that were
+  signed, so a receiver verifies bytes and never a re-encoding. The head
+  signs with the webhook's keyed BLAKE3 scheme and the target's secret, and
+  refuses to write a callback rule with no secret. The Go and Rust app
+  drivers verify, with a five-minute window and a constant-time comparison.
+  The Go helper uses `lukechampine.com/blake3` (MIT). `golden/alert-callback.json`
+  is one vector that the head, the Go helper, and the Rust helper all agree on.
+  The work also found that the head counted any reply from a receiver as a
+  delivery, including a refusal. A `ServiceError` reply is now a refusal.
+
+One passage stays a documented limit: a change of the signing intermediate
+needs a restart of each head, because the head loads its signer at start. A
+rolling restart does it.
+
+**Cost to change:** each row above gives its own.
+### Corndogs moved to commit 23caaf1
+
+The four requests filed with Corndogs on 2026-09-26 landed there the same day.
+TallyOwl pins the client at commit `23caaf1`, with its `tls` feature, and the
+head chart's sidecar at image `0.7.5`. The Corndogs release job failed after it
+pushed that image, so no `v0.7.5` tag exists and chart 0.5.5 still names
+`appVersion 0.7.4`. A plain Docker test showed that image `0.7.5` serves TLS
+and presents the configured certificate. The tag appears in one place in the
+chart (`charts/tallyowl/values.yaml`), so a release with a different tag is a
+one-line change.
+
+| Choice | Why | Cost to change |
+| --- | --- | --- |
+| The pool of Corndogs connections is a plain bounded pool of clients, with the client's own whole-call deadline | The worker threads and the replacement of a stuck worker existed only because the client had no deadline (L191). They and `tallyowl_queue_connections_replaced_count` are removed | Cheap |
+| `park` and `quarantine` send no priority | Corndogs now keeps the stored priority when a request sends none, so a retried conversion keeps its place without TallyOwl copying the value | Cheap |
+| `corndogs.depthInterval` is 2 s again | Corndogs keeps a count for each queue and state, so the read no longer scans every task | Cheap |
+| The Corndogs hop uses TLS, and `corndogs.allowPlaintext` is removed | D62 said the exception goes when Corndogs has TLS. A configured `corndogs.tls.caFile` means TLS on loopback too, because Corndogs serves TLS on its only port | Cheap |
+
+On 2026-09-27 Corndogs released 0.7.6 (tag `corndogs/v0.7.6`, commit
+`21d0182`) and chart 0.5.7, whose `appVersion` is 0.7.6. The release job works
+again. TallyOwl pins the client at `21d0182` and the sidecar at image `0.7.6`.
+Between `23caaf1` and `21d0182` the Rust client changed only in its generated
+decoder, which gained the csilgen 0.2.9 reservation clamp.
+
+The upstream Corndogs chart is how a shared Corndogs is installed, for example
+for a head release with more than one replica: it is on the GitHub release page
+as `corndogs-0.5.7.tgz`. The head chart's sidecar stays for the home profile.
+
+**Revisit:** yes, for unix sockets on Windows.
+
+### The charts in a real cluster
+
+On 2026-09-26 the charts ran in a KinD cluster for the first time: one control
+plane and three workers in three zones, the image built from this tree, and
+Corndogs image `0.7.5`. DEPLOYMENT.md section 3a was followed as written.
+
+What worked:
+
+- `ca create`, the documented `openssl` commands, and the Secrets.
+- The head with a Corndogs sidecar. The head reached Corndogs over TLS. Its
+  first attempt failed while the sidecar started, and the background retry
+  connected 759 ms later.
+- The maintenance Job for `provision` and for `token create`.
+- The collector enrolled with its role token and got a 24-hour node
+  certificate. It reached Corndogs over TLS and served intake over TLS. Its
+  first policy fetch failed with "no enrolled identity yet", and intake did
+  not wait for enrollment.
+- An application sent 50 events over TLS. The collector accepted all 50 with
+  one durable copy, delivered the batch over mutual TLS, and the head
+  committed it.
+- An application that trusted a different authority got the message that
+  names `Transport.TLS.RootCAs`. The collector counted four refused
+  handshakes, and no batch crossed.
+- A three-replica head cell formed its controller group and its first tablet
+  group over mutual TLS, with one leader and no lag. With the leader deleted,
+  another head led both groups within seconds. The deleted head came back as
+  a follower with no lag.
+- A collector certificate replaced in its Secret was served 35 seconds later,
+  in the same pod, with no restart. The next 20 events used it.
+
+What it found, which every test and every render check had passed:
+
+- **`token` was not a verb the binary routed.** `main` hands a verb to the
+  administration module only when `admin::VERBS` names it, and the new verb
+  was missing from that list. Its test called the function directly. A test
+  now checks that every verb in the usage text is in `VERBS`.
+- **Kubernetes Service variables looked like settings.** Kubernetes puts a
+  variable for each Service into each pod. With a release named `tallyowl`,
+  they are `TALLYOWL_PORT`, `TALLYOWL_CORNDOGS_SERVICE_HOST`, and so on, and
+  the loader warned about 27 settings that do not exist at each start. The
+  pods now set `enableServiceLinks: false`.
+- **The install notes said the queue connection is plaintext.** They now say
+  which certificate the queue serves.
+
+The cell's heads stayed not ready in this run, because that release had no
+Corndogs, and a head is not ready until it reaches the queue one time. That is
+the designed behavior.
+
+On 2026-09-27 the same cluster moved to Corndogs 0.7.6. The three-replica cell
+now uses a shared Corndogs installed from `corndogs-0.5.7.tgz` with TLS and the
+file backend, as DEPLOYMENT.md section 7c "A shared Corndogs" describes. All
+three heads reached it, became ready, and re-formed both groups after they
+restarted together. The home release ran its sidecar at image `0.7.6`, and an
+application's 30 events were committed. The upgrade also reopened the head's
+storage with every row it had before.
+
+The chart needed one change for a shared Corndogs: the head trusted the
+installation authority for Corndogs only when the sidecar was on, so a head
+pointed at a shared Corndogs checked it against the system authorities and
+failed. The head now trusts the first authority for any Corndogs endpoint,
+except a sidecar with no certificate, which serves plaintext.
+
+### The procedure is a job
+
+`./tools.sh kind-check` runs the procedure above, and the `kind-check` job in
+the main workflow calls it (CI-CD.md section 5). It passed on its first run on
+a workstation on 2026-09-27.
+
+| Choice | Why | Cost to change |
+| --- | --- | --- |
+| The job runs in the main workflow only, with the `docker` capability | kind needs a container daemon, and no pull-request profile grants that capability | Cheap |
+| It is not known that kind can run nested in a job pod | kind talks to the capability's daemon, and `kubectl` must reach the API server that kind publishes on that daemon's host. The owner chose to try it. The first CI run tells | Unknown until then |
+| `kind` and `kubectl` are fetched, pinned, and checked against the digests their publishers post | The runner image has neither | Cheap |
+| The Corndogs chart archive is pinned by a digest measured from two downloads | The Corndogs release posts no checksum file | Cheap |
+| The cluster has its own kubeconfig, and is deleted at the end unless `--keep` | A check must not change the caller's kubeconfig or leave a cluster behind | Cheap |
+| The waits are real time, each with a bound | The owner keeps real-time waits out of unit tests and allows them in a live environment. What the check decides from what the cluster says is plain text, and `tools/tests/test_kindcheck.py` tests it | Cheap |
+| The application that sends is `testbed/cmd/tls-send`, and it reads its key from a file | The key does not appear in a process listing | Cheap |
+
+Not exercised in the cluster: a signed alert callback (the cross-language
+vector and the head's tests cover it), and a head outage longer than one third
+of a certificate lifetime.
+

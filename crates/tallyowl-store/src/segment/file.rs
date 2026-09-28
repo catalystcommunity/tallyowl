@@ -795,6 +795,21 @@ pub fn open(bytes: Vec<u8>, verify: bool) -> Result<Segment, FormatError> {
     })?)?;
     header.compressed_bytes = bytes.len() as u64;
 
+    // The description is not under a checksum of its own, and its row count
+    // sizes an allocation. The directory is, and it says how many rows each
+    // group holds, so the two have to agree before anything trusts the first.
+    let listed: u64 = footer
+        .row_groups
+        .iter()
+        .fold(0u64, |total, group| total.saturating_add(group.rows));
+    if header.row_count != listed {
+        return Err(FormatError::Damaged(format!(
+            "This stored file says it holds {} items and lists {listed}. \
+             We cannot say what it holds, so we did not answer from it.",
+            header.row_count
+        )));
+    }
+
     let mut content_address = [0u8; 32];
     content_address.copy_from_slice(&bytes[32..64]);
 
@@ -805,6 +820,29 @@ pub fn open(bytes: Vec<u8>, verify: bool) -> Result<Segment, FormatError> {
         content_address,
         cipher: None,
     })
+}
+
+/// Open bytes that arrived from somewhere else.
+///
+/// **Nothing is parsed until the whole file has proved it is the file it says
+/// it is.** A segment this node wrote is opened through its checksums; bytes a
+/// peer sent are checked against their content address first, so a description
+/// written to mislead is refused before anything reads it.
+pub fn open_received(bytes: Vec<u8>) -> Result<Segment, FormatError> {
+    if bytes.len() < PROLOGUE_BYTES + TRAILER_BYTES {
+        return Err(FormatError::Incomplete(
+            "This stored file is too short to be one of ours. It was probably not finished being written."
+                .to_string(),
+        ));
+    }
+    if content_address(&bytes[PROLOGUE_BYTES..]).as_slice() != &bytes[32..64] {
+        return Err(FormatError::Damaged(
+            "The stored file that arrived is not the file it says it is. \
+             Its contents changed after it was written."
+                .to_string(),
+        ));
+    }
+    open(bytes, true)
 }
 
 /// Open a protected segment.

@@ -180,9 +180,66 @@ export class Capture {
     return this;
   }
 
+  /** The same method under the name the Go app driver uses. */
+  withAnonymous(anonymousId: string): this {
+    return this.withAnonymousId(anonymousId);
+  }
+
+  /**
+   * Join this item to a trace, so a browser event lines up with the backend
+   * request that served it.
+   *
+   * `trace` is a 16-byte trace ID, its 32 hexadecimal characters, or a whole
+   * `traceparent` value. A value this package cannot read leaves the item with
+   * no trace: joining two unrelated traces is worse than joining none.
+   */
+  withTrace(trace: Uint8Array | string, spanId?: Uint8Array | string): this {
+    const parsed = parseTrace(trace);
+    if (parsed === undefined) return this;
+    this.item.envelope.traceId = parsed.traceId;
+    const span = spanId === undefined ? parsed.spanId : idBytes(spanId, 8);
+    if (span !== undefined) this.item.envelope.spanId = span;
+    return this;
+  }
+
   get eventId(): Uint8Array {
     return this.item.envelope.eventId;
   }
+}
+
+/**
+ * Read a trace ID, and a span ID when a `traceparent` value carries one.
+ *
+ * It returns `undefined` for anything it cannot read, which includes an ID of
+ * all zeros and a `traceparent` version other than `00`.
+ */
+export function parseTrace(
+  trace: Uint8Array | string,
+): { traceId: Uint8Array; spanId?: Uint8Array } | undefined {
+  if (typeof trace === "string" && trace.includes("-")) {
+    const parts = trace.trim().split("-");
+    if (parts.length < 4 || parts[0] !== "00") return undefined;
+    const traceId = idBytes(parts[1], 16);
+    const spanId = idBytes(parts[2], 8);
+    if (traceId === undefined || spanId === undefined) return undefined;
+    return { traceId, spanId };
+  }
+  const traceId = idBytes(trace, 16);
+  return traceId === undefined ? undefined : { traceId };
+}
+
+function idBytes(value: Uint8Array | string, length: number): Uint8Array | undefined {
+  let bytes: Uint8Array;
+  if (typeof value === "string") {
+    const hex = value.trim();
+    if (hex.length !== length * 2 || !/^[0-9a-fA-F]+$/.test(hex)) return undefined;
+    bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  } else {
+    if (value.length !== length) return undefined;
+    bytes = value;
+  }
+  return bytes.some((b) => b !== 0) ? bytes : undefined;
 }
 
 /** Which payload field an item carries. */

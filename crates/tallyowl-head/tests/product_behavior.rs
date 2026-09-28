@@ -1413,6 +1413,7 @@ fn a_head_with_no_policy_at_all_sends_none_rather_than_one_at_version_zero() {
             receipt_policy: tallyowl_collector_api::types::ReceiptPolicy::LocalOne,
             open_traces: None,
             policy: Some(Arc::clone(&policy)),
+            sources: None,
         }),
         enrollment: Arc::new(tallyowl_head::enrollment::EnrollmentService {
             store: Arc::clone(&segmented),

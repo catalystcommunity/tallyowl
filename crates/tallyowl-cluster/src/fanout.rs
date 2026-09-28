@@ -55,7 +55,7 @@ use tallyowl_store::{Scanned, StoreError, TimeBasis, Trend};
 
 use crate::groups::{GroupKey, GroupRegistry};
 use crate::query::{merge, Consistency, Merged, Partial, PartialKind, Plan};
-use crate::raft::network::{PeerConnections, REPLICATION_SERVICE};
+use crate::raft::network::REPLICATION_SERVICE;
 use crate::service::PartialSource;
 use crate::topology::Topology;
 
@@ -121,12 +121,26 @@ pub struct ClusterReads {
     /// over loopback would pay a connection and a codec for nothing, and would
     /// stop working the moment its own listener was busy.
     local: Arc<dyn PartialSource>,
-    connections: Arc<PeerConnections>,
+    /// One connection for each node this node reads from. They are not the
+    /// consensus connections: a read may run for as long as a query may, and
+    /// on a shared connection it would hold every heartbeat behind it.
+    reads: Mutex<std::collections::HashMap<String, Arc<Client>>>,
     max_fan_out: usize,
     max_rows_for_each_tablet: usize,
-    /// What the last read could not reach.
-    unreachable: Mutex<Vec<String>>,
+    /// How long one tablet has to answer. `query.maxRuntime`.
+    tablet_deadline: std::time::Duration,
+    /// What the last read **on each thread** could not reach. The head runs one
+    /// request on one thread, and asks after the read on the same thread. One
+    /// list for every thread let a refusal name the tablets another query
+    /// missed.
+    unreachable: Mutex<std::collections::HashMap<std::thread::ThreadId, Vec<String>>>,
 }
+
+/// How many tablets one read asks at the same time.
+const TABLETS_ASKED_AT_ONCE: usize = 8;
+
+/// How many threads' last misses are remembered before the list starts again.
+const REMEMBERED_THREADS: usize = 1024;
 
 impl ClusterReads {
     pub fn new(
@@ -138,11 +152,20 @@ impl ClusterReads {
             topology,
             registry,
             local,
-            connections: Arc::new(PeerConnections::new()),
+            reads: Mutex::new(std::collections::HashMap::new()),
             max_fan_out: crate::query::DEFAULT_MAX_FAN_OUT,
             max_rows_for_each_tablet: DEFAULT_MAX_ROWS_FOR_EACH_TABLET,
-            unreachable: Mutex::new(Vec::new()),
+            tablet_deadline: std::time::Duration::from_secs(30),
+            unreachable: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// How long one tablet has to answer before it counts as missing. A tablet
+    /// that does not answer in this time is named in the result; it does not
+    /// hold the query.
+    pub fn with_tablet_deadline(mut self, deadline: std::time::Duration) -> ClusterReads {
+        self.tablet_deadline = deadline.max(std::time::Duration::from_millis(1));
+        self
     }
 
     pub fn with_max_fan_out(mut self, max: usize) -> ClusterReads {
@@ -194,27 +217,58 @@ impl ClusterReads {
     }
 
     /// Ask every tablet, and merge.
+    ///
+    /// **A few at a time, and each against a deadline.** One after another, the
+    /// slowest tablet set the pace for all of them and one that never answered
+    /// held the query for ever.
     fn run(&self, plan: &Plan) -> Result<Merged, TallyOwlError> {
         let mut missed: Vec<String> = Vec::new();
         let mut parts: Vec<Partial> = Vec::with_capacity(plan.tablets.len());
-        for tablet in &plan.tablets {
-            match self.ask(plan, tablet) {
-                Ok(partial) => parts.push(partial),
-                Err(e) => {
-                    // A tablet that did not answer becomes a **named** missing
-                    // range. A caller that dropped it would get a smaller answer
-                    // marked complete, which is the failure FAILURE_MODES.md
-                    // section 2 ranks worst.
-                    missed.push(format!("`{tablet}` did not answer: {}", e.message));
-                    parts.push(Partial::unavailable(
-                        tablet.clone(),
-                        plan.range_start,
-                        plan.range_end,
-                    ));
+        for batch in plan.tablets.chunks(TABLETS_ASKED_AT_ONCE) {
+            let answers: Vec<Result<Partial, TallyOwlError>> = if batch.len() == 1 {
+                vec![self.ask(plan, &batch[0])]
+            } else {
+                std::thread::scope(|scope| {
+                    let asked: Vec<_> = batch
+                        .iter()
+                        .map(|tablet| scope.spawn(move || self.ask(plan, tablet)))
+                        .collect();
+                    asked
+                        .into_iter()
+                        .map(|answer| {
+                            answer.join().unwrap_or_else(|_| {
+                                Err(TallyOwlError::internal(
+                                    "The read of this tablet stopped unexpectedly.",
+                                ))
+                            })
+                        })
+                        .collect()
+                })
+            };
+            for (tablet, answer) in batch.iter().zip(answers) {
+                match answer {
+                    Ok(partial) => parts.push(partial),
+                    Err(e) => {
+                        // A tablet that did not answer becomes a **named**
+                        // missing range. A caller that dropped it would get a
+                        // smaller answer marked complete, which is the failure
+                        // FAILURE_MODES.md section 2 ranks worst.
+                        missed.push(format!("`{tablet}` did not answer: {}", e.message));
+                        parts.push(Partial::unavailable(
+                            tablet.clone(),
+                            plan.range_start,
+                            plan.range_end,
+                        ));
+                    }
                 }
             }
         }
-        *self.unreachable.lock().expect("unreachable") = missed;
+        let mut unreachable = self.unreachable.lock().expect("unreachable");
+        if unreachable.len() >= REMEMBERED_THREADS {
+            unreachable.clear();
+        }
+        unreachable.insert(std::thread::current().id(), missed);
+        drop(unreachable);
         merge(plan, parts)
     }
 
@@ -223,17 +277,47 @@ impl ClusterReads {
         if self.registry.holds(&GroupKey::Tablet(tablet.to_string())) {
             return self.local.partial(tablet, &request);
         }
-        let address = self.address_of(tablet)?;
-        let client = self.connections.to(&address);
-        self.call(&client, &address, &request)
+        // Every replica in turn. A tablet with one dead replica still has a
+        // healthy quorum, and asking only the first member made every tablet
+        // that listed the dead node first unreadable.
+        let mut last = None;
+        for address in self.addresses_of(tablet)? {
+            let client = self.reader(&address);
+            match self.call(&client, &address, &request) {
+                Ok(partial) => return Ok(partial),
+                // A replica that refuses for a reason every replica shares
+                // would refuse again. One that is unreachable, or behind, is a
+                // reason to ask the next.
+                Err(e) if e.code == ErrorCode::Unavailable || e.code == ErrorCode::NotFound => {
+                    last = Some(e)
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            TallyOwlError::unavailable(format!("`{tablet}` has no replica to read from."))
+        }))
     }
 
-    /// Where a tablet's answer comes from.
+    fn reader(&self, address: &str) -> Arc<Client> {
+        let mut reads = self.reads.lock().expect("read connections");
+        let security = self.registry.security();
+        Arc::clone(reads.entry(address.to_string()).or_insert_with(|| {
+            Arc::new(security.client(
+                address,
+                crate::raft::network::MAX_FRAME_BYTES,
+                crate::raft::network::CONSENSUS_CONNECT_TIMEOUT,
+                self.tablet_deadline,
+            ))
+        }))
+    }
+
+    /// Where a tablet's answer may come from, in the order to ask.
     ///
-    /// The leader when there is one, and any member otherwise. A read does not
-    /// need the leader — a replica that applied the entry holds the rows — so a
-    /// tablet whose leader is being replaced still answers.
-    fn address_of(&self, tablet: &str) -> Result<String, TallyOwlError> {
+    /// The leader first when this node knows it, and then every other member. A
+    /// read does not need the leader — a replica that applied the entry holds
+    /// the rows — so a tablet whose leader is being replaced still answers.
+    fn addresses_of(&self, tablet: &str) -> Result<Vec<String>, TallyOwlError> {
         let topology = self.topology.lock().expect("topology");
         let found = topology.tablet(tablet).ok_or_else(|| {
             TallyOwlError::new(
@@ -241,19 +325,22 @@ impl ClusterReads {
                 format!("No tablet is named `{tablet}`."),
             )
         })?;
+        let mut addresses: Vec<String> = Vec::with_capacity(found.members.len());
         let leader = self.registry.leader(&GroupKey::Tablet(tablet.to_string()));
-        if let Some(leader) = leader {
-            if let Some(member) = found.member(&leader) {
-                return Ok(member.address.clone());
+        if let Some(member) = leader.as_deref().and_then(|name| found.member(name)) {
+            addresses.push(member.address.clone());
+        }
+        for member in &found.members {
+            if !addresses.contains(&member.address) {
+                addresses.push(member.address.clone());
             }
         }
-        found
-            .members
-            .first()
-            .map(|member| member.address.clone())
-            .ok_or_else(|| {
-                TallyOwlError::unavailable(format!("`{tablet}` has no replica to read from."))
-            })
+        if addresses.is_empty() {
+            return Err(TallyOwlError::unavailable(format!(
+                "`{tablet}` has no replica to read from."
+            )));
+        }
+        Ok(addresses)
     }
 
     fn call(
@@ -273,8 +360,7 @@ impl ClusterReads {
             )
             .map_err(|e| {
                 // A broken connection is the ordinary case when a peer
-                // restarts. Drop it so the next read opens a fresh one.
-                self.connections.forget(address);
+                // restarts, and the client opens a fresh one on its next call.
                 TallyOwlError::unavailable(format!("{address} did not answer: {e}"))
             })?;
         if response.variant.as_deref() == Some(tallyowl_rpc::SERVICE_ERROR_VARIANT) {
@@ -465,6 +551,11 @@ impl TabletReads for ClusterReads {
     }
 
     fn unreadable(&self) -> Vec<String> {
-        self.unreachable.lock().expect("unreachable").clone()
+        self.unreachable
+            .lock()
+            .expect("unreachable")
+            .get(&std::thread::current().id())
+            .cloned()
+            .unwrap_or_default()
     }
 }

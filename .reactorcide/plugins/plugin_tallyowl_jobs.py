@@ -100,6 +100,16 @@ def helm_check(code_dir: Path) -> None:
     _tools(code_dir, "helm-check")
 
 
+def kind_check(code_dir: Path) -> None:
+    """Install both charts in a disposable kind cluster and prove them.
+
+    It needs a container daemon, which the job's `docker` capability gives.
+    Whether kind can run nested inside a job pod on this cluster is not known
+    yet; see docs/CI-CD.md.
+    """
+    _tools(code_dir, "kind-check")
+
+
 def dependency_audit(code_dir: Path) -> None:
     _tools(code_dir, "audit")
 
@@ -444,6 +454,7 @@ JOBS: Dict[str, Callable[[Path], None]] = {
     "test-go": test_go,
     "test-ts": test_ts,
     "helm-check": helm_check,
+    "kind-check": kind_check,
     "audit": dependency_audit,
     "package": package,
 }

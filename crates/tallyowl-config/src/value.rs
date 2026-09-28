@@ -169,6 +169,11 @@ pub fn parse_duration(text: &str) -> Result<i64, ParseFailure> {
     let amount: i64 = digits
         .parse()
         .map_err(|_| fail("its number is too large or is not whole"))?;
+    // No setting means anything with a time before now, and `-5m` used to
+    // parse for every one of them.
+    if amount < 0 {
+        return Err(fail("a length of time cannot be negative"));
+    }
     let multiplier = match unit {
         "ms" => 1,
         "s" => 1_000,

@@ -191,28 +191,49 @@ fn skip_value(bytes: &[char], from: usize) -> usize {
 
 /// `Bearer <credential>` and `Basic <credential>`.
 fn scrub_bearer(input: &str) -> String {
+    scrub_bearer_counted(input).0
+}
+
+/// The scrubbed text, and how many bytes the scan examined.
+///
+/// The scan is one pass. An earlier form searched the whole remainder four
+/// times for each match, so a value full of `Bearer x ` cost the square of its
+/// length, and one producer could spend a collector's processor with it. The
+/// count is here so a test holds the scan to a linear bound without a clock.
+fn scrub_bearer_counted(input: &str) -> (String, usize) {
+    const WORDS: [&str; 4] = ["Bearer ", "bearer ", "Basic ", "basic "];
+    let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    loop {
-        let found = ["Bearer ", "bearer ", "Basic ", "basic "]
-            .iter()
-            .filter_map(|word| rest.find(word).map(|at| (at, word.len())))
-            .min_by_key(|(at, _)| *at);
-        let Some((at, word_len)) = found else {
-            out.push_str(rest);
-            return out;
+    let mut examined = 0;
+    let mut copied = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        examined += 1;
+        // Every word starts with an ASCII letter, and an ASCII byte is never
+        // inside a longer character, so the slice below is on a boundary.
+        let word = match bytes[at] {
+            b'B' | b'b' => WORDS.iter().find(|word| input[at..].starts_with(**word)),
+            _ => None,
         };
-        let value_start = at + word_len;
-        out.push_str(&rest[..value_start]);
-        let value_end = rest[value_start..]
+        let Some(word) = word else {
+            at += 1;
+            continue;
+        };
+        let value_start = at + word.len();
+        let value_end = input[value_start..]
             .find(char::is_whitespace)
             .map(|offset| value_start + offset)
-            .unwrap_or(rest.len());
+            .unwrap_or(input.len());
+        examined += value_end - value_start;
+        out.push_str(&input[copied..value_start]);
         if value_end > value_start {
             out.push_str(REMOVED);
         }
-        rest = &rest[value_end..];
+        copied = value_end;
+        at = value_end;
     }
+    out.push_str(&input[copied..]);
+    (out, examined)
 }
 
 /// The password inside `scheme://user:password@host`.
@@ -297,6 +318,27 @@ mod tests {
         assert!(!is_protected("route"));
         assert!(!is_protected("release"));
         assert!(!is_protected("status"));
+    }
+
+    #[test]
+    fn a_value_full_of_bearer_words_is_scrubbed_in_one_pass() {
+        // 64 KiB of `Bearer x `. The old scan searched the remainder four
+        // times for each of the 7,000 matches.
+        let input = "Bearer x ".repeat(64 * 1024 / 9);
+        let (out, examined) = scrub_bearer_counted(&input);
+        assert!(
+            examined <= input.len(),
+            "the scan examined {examined} bytes of {}",
+            input.len()
+        );
+        assert_eq!(out, format!("Bearer {REMOVED} ").repeat(64 * 1024 / 9));
+        // A word with no credential after it, and a character wider than one
+        // byte next to a word.
+        assert_eq!(scrub_bearer("Bearer  é basic"), "Bearer  é basic");
+        assert_eq!(
+            scrub_bearer("éBasic dXNlcg== é"),
+            format!("éBasic {REMOVED} é")
+        );
     }
 
     #[test]

@@ -99,12 +99,31 @@ struct Family {
     samples: Vec<Sample>,
 }
 
-/// Read one exposition document.
+/// Which of the two text formats a document is in.
+///
+/// The two agree on almost everything and disagree on one thing that cannot be
+/// read from the text: a sample's timestamp is **milliseconds** in the
+/// Prometheus format and **seconds** in OpenMetrics. `1609459200` is a moment in
+/// 2021 in one and a moment in January 1970 in the other. The target says which
+/// format it sent in its `Content-Type`, so the scraper carries that here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Format {
+    #[default]
+    Prometheus,
+    OpenMetrics,
+}
+
+/// Read one exposition document in the Prometheus text format.
 ///
 /// `now_ms` is the scrape time, which becomes `end_at` for a sample that
 /// carries no time of its own. A scrape is an observation at the moment it
 /// happened, and a target that publishes no timestamp is saying "now".
 pub fn parse(text: &str, now_ms: i64) -> Parsed {
+    parse_as(text, now_ms, Format::Prometheus)
+}
+
+/// Read one exposition document in the format its target declared.
+pub fn parse_as(text: &str, now_ms: i64, format: Format) -> Parsed {
     let mut families: BTreeMap<String, Family> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut faults = Vec::new();
@@ -138,7 +157,7 @@ pub fn parse(text: &str, now_ms: i64) -> Parsed {
             continue;
         }
 
-        match sample(line) {
+        match sample(line, format) {
             Ok(sample) => {
                 let family_name = family_of(&sample.name, &families);
                 entry(&mut families, &mut order, &family_name)
@@ -188,16 +207,31 @@ fn entry<'a>(
 /// summary publishes `name` with a `quantile` label plus `name_sum` and
 /// `name_count`. The `# TYPE` line names the family, so a sample matches by
 /// stripping a known suffix and checking whether that family was declared.
+///
+/// A family declared under the sample's own name wins, and a suffix only joins
+/// a family whose type publishes that suffix. Without both rules a gauge named
+/// `queue_count` declared beside a counter `queue` would be folded into the
+/// counter, and its value would arrive as a reading of the wrong series.
 fn family_of(sample_name: &str, families: &BTreeMap<String, Family>) -> String {
+    if families
+        .get(sample_name)
+        .is_some_and(|family| family.declared.is_some())
+    {
+        return sample_name.to_string();
+    }
     for suffix in ["_bucket", "_sum", "_count", "_created", "_total"] {
         if let Some(base) = sample_name.strip_suffix(suffix) {
-            if let Some(family) = families.get(base) {
-                if matches!(
-                    family.declared,
-                    Some(Declared::Histogram) | Some(Declared::Summary) | Some(Declared::Counter)
-                ) {
-                    return base.to_string();
-                }
+            let declared = families.get(base).and_then(|family| family.declared);
+            let publishes = matches!(
+                (declared, suffix),
+                (
+                    Some(Declared::Histogram),
+                    "_bucket" | "_sum" | "_count" | "_created"
+                ) | (Some(Declared::Summary), "_sum" | "_count" | "_created")
+                    | (Some(Declared::Counter), "_total" | "_created")
+            );
+            if publishes {
+                return base.to_string();
             }
         }
     }
@@ -220,8 +254,19 @@ fn build_scalars(
             continue;
         }
         let end_at = sample.timestamp_ms.unwrap_or(now_ms);
+        // OpenMetrics declares a counter family as `name` and publishes its
+        // value as `name_total`; the Prometheus format declares and publishes
+        // `name_total`. The scraper asks for OpenMetrics first, so one target
+        // can answer in either. The series is named by what the target
+        // published, which is the same text in both, so a chart does not lose
+        // its metric when a target changes the format it answers in.
+        let metric_name = if counter && sample.name.ends_with("_total") {
+            sample.name.as_str()
+        } else {
+            name
+        };
         out.push(MetricPointPayload {
-            metric_name: name.to_string(),
+            metric_name: metric_name.to_string(),
             metric_kind: if counter {
                 MetricKind::Counter
             } else {
@@ -379,7 +424,7 @@ fn parse_bound(text: &str) -> f64 {
 /// where everything after the `#` is an OpenMetrics exemplar. A label value may
 /// hold a brace and a `#`, so the brace group is found by scanning rather than
 /// by searching for the last `}`.
-fn sample(line: &str) -> Result<Sample, String> {
+fn sample(line: &str, format: Format) -> Result<Sample, String> {
     let bytes: Vec<char> = line.chars().collect();
     let mut index = 0;
     while index < bytes.len() && !bytes[index].is_whitespace() && bytes[index] != '{' {
@@ -416,7 +461,7 @@ fn sample(line: &str) -> Result<Sample, String> {
         .ok_or_else(|| format!("`{name}` has no value"))?;
     let value = parse_number(value_text)
         .ok_or_else(|| format!("`{name}` has the value `{value_text}`, which is not a number"))?;
-    let timestamp_ms = read_timestamp(fields.next());
+    let timestamp_ms = read_timestamp(fields.next(), format);
 
     // An exemplar's own labels never become the sample's labels. Only its trace
     // is kept, because that is the link a reader follows from a chart.
@@ -440,13 +485,20 @@ fn sample(line: &str) -> Result<Sample, String> {
     })
 }
 
-/// Prometheus writes a timestamp in milliseconds and OpenMetrics writes seconds
-/// with a fraction. A value with a decimal point is therefore seconds.
-fn read_timestamp(text: Option<&str>) -> Option<i64> {
-    match text? {
-        text if text.contains('.') => text.parse::<f64>().ok().map(|s| (s * 1000.0) as i64),
-        text => text.parse::<i64>().ok(),
+/// Prometheus writes a timestamp in milliseconds and OpenMetrics writes
+/// seconds, with or without a fraction. The format decides. A value with a
+/// decimal point is seconds in either, because no producer writes a fraction of
+/// a millisecond.
+fn read_timestamp(text: Option<&str>, format: Format) -> Option<i64> {
+    let text = text?;
+    if format == Format::OpenMetrics || text.contains('.') {
+        return text
+            .parse::<f64>()
+            .ok()
+            .filter(|seconds| seconds.is_finite())
+            .map(|seconds| (seconds * 1000.0) as i64);
     }
+    text.parse::<i64>().ok()
 }
 
 /// The `}` that closes the group opened at `open`, skipping any inside a quoted
@@ -688,6 +740,72 @@ latency_seconds_bucket{le=\"+Inf\"} 1
     }
 
     #[test]
+    fn an_openmetrics_timestamp_in_whole_seconds_is_not_read_as_milliseconds() {
+        // Read as milliseconds this is a moment in January 1970, and the point
+        // lands outside every query anybody runs.
+        let text = "# TYPE x counter\nx_total 5 1609459200\n# EOF\n";
+        let parsed = parse_as(text, 1, Format::OpenMetrics);
+        assert_eq!(parsed.points[0].end_at, 1_609_459_200_000);
+        // The same digits from a Prometheus target are milliseconds already.
+        let parsed = parse_as(
+            "# TYPE x_total counter\nx_total 5 1609459200000\n",
+            1,
+            Format::Prometheus,
+        );
+        assert_eq!(parsed.points[0].end_at, 1_609_459_200_000);
+    }
+
+    #[test]
+    fn a_gauge_whose_name_ends_in_a_suffix_is_not_folded_into_a_counter_beside_it() {
+        let text = "\
+# TYPE queue counter
+# TYPE queue_count gauge
+queue_total 7
+queue_count 3
+";
+        let parsed = parse(text, 1);
+        assert!(parsed.faults.is_empty());
+        let counter = parsed
+            .points
+            .iter()
+            .find(|p| p.metric_name == "queue_total")
+            .expect("the counter");
+        assert_eq!(counter.number_value, Some(7.0));
+        let gauge = parsed
+            .points
+            .iter()
+            .find(|p| p.metric_name == "queue_count")
+            .expect("the gauge keeps its own name");
+        assert_eq!(gauge.metric_kind, MetricKind::Gauge);
+        assert_eq!(gauge.number_value, Some(3.0));
+    }
+
+    #[test]
+    fn a_count_suffix_does_not_join_a_counter_family() {
+        // `_count` is a histogram's and a summary's suffix. A counter family
+        // publishes `_total` and `_created` and nothing else.
+        let parsed = parse("# TYPE jobs counter\njobs_count 4\n", 1);
+        assert_eq!(parsed.points.len(), 1);
+        assert_eq!(parsed.points[0].metric_name, "jobs_count");
+        assert_eq!(parsed.points[0].metric_kind, MetricKind::Gauge);
+    }
+
+    #[test]
+    fn one_counter_has_one_name_in_both_formats() {
+        let prometheus = parse("# TYPE hits_total counter\nhits_total 2\n", 1);
+        let open_metrics = parse_as(
+            "# TYPE hits counter\nhits_total 2\n# EOF\n",
+            1,
+            Format::OpenMetrics,
+        );
+        assert_eq!(
+            prometheus.points[0].metric_name,
+            open_metrics.points[0].metric_name
+        );
+        assert!(open_metrics.points[0].monotonic);
+    }
+
+    #[test]
     fn an_openmetrics_total_suffix_belongs_to_its_family() {
         let text = "\
 # TYPE http_requests counter
@@ -699,7 +817,9 @@ http_requests_created 1609459200.0
         let parsed = parse(text, 1);
         // The created time is a separate fact and not a value of the series.
         assert_eq!(parsed.points.len(), 1);
-        assert_eq!(parsed.points[0].metric_name, "http_requests");
+        // The name a target published is the name of the series, in both
+        // formats. See `build_scalars`.
+        assert_eq!(parsed.points[0].metric_name, "http_requests_total");
         assert_eq!(parsed.points[0].number_value, Some(3.0));
     }
 

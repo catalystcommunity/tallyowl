@@ -2,11 +2,25 @@
 // Source: <csil spec>
 // Target: typescript-client
 
-import type { CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, CollectorHealth, CommitBatchRequest, CommitBatchResponse, FetchPolicyRequest, FetchPolicyResponse, HealthRequest, PolicyVersionRequest, PolicyVersionResponse, ResolveKeyRequest, ResolveKeyResponse, SubmitBatchRequest, SubmitBatchResponse } from "./types.gen.ts";
-import { fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromCollectorHealthCbor, fromCommitBatchResponseCbor, fromFetchPolicyResponseCbor, fromPolicyVersionResponseCbor, fromResolveKeyResponseCbor, fromSubmitBatchResponseCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, toCommitBatchRequestCbor, toFetchPolicyRequestCbor, toHealthRequestCbor, toPolicyVersionRequestCbor, toResolveKeyRequestCbor, toSubmitBatchRequestCbor } from "./codec.gen.ts";
+import type { AlertNotifyRequest, AlertNotifyResponse, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, CollectorHealth, CommitBatchRequest, CommitBatchResponse, FetchPolicyRequest, FetchPolicyResponse, HealthRequest, PolicyVersionRequest, PolicyVersionResponse, ResolveKeyRequest, ResolveKeyResponse, SubmitBatchRequest, SubmitBatchResponse } from "./types.gen.ts";
+import { fromAlertNotifyResponseCbor, fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromCollectorHealthCbor, fromCommitBatchResponseCbor, fromFetchPolicyResponseCbor, fromPolicyVersionResponseCbor, fromResolveKeyResponseCbor, fromSubmitBatchResponseCbor, toAlertNotifyRequestCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, toCommitBatchRequestCbor, toFetchPolicyRequestCbor, toHealthRequestCbor, toPolicyVersionRequestCbor, toResolveKeyRequestCbor, toSubmitBatchRequestCbor } from "./codec.gen.ts";
 
 export interface ServiceTransport {
   call(service: string, op: string, req: Uint8Array): Uint8Array;
+}
+
+export class TallyOwlAlertReceiverClient {
+  constructor(private readonly t: ServiceTransport) {}
+
+  /**
+   * Take one signed alert notification.
+   * @throws {ServiceError} when the API returns an error response
+   * @throws transport errors (network, timeout) raised by the transport
+   */
+  notify(req: AlertNotifyRequest): AlertNotifyResponse {
+    const csilResp = this.t.call("TallyOwlAlertReceiver", "notify", toAlertNotifyRequestCbor(req));
+    return fromAlertNotifyResponseCbor(csilResp);
+  }
 }
 
 export class TallyOwlCollectorClient {
@@ -99,9 +113,11 @@ export class TallyOwlIngestClient {
 }
 
 export class ApiClient {
+  readonly tallyOwlAlertReceiver: TallyOwlAlertReceiverClient;
   readonly tallyOwlCollector: TallyOwlCollectorClient;
   readonly tallyOwlIngest: TallyOwlIngestClient;
   constructor(t: ServiceTransport) {
+    this.tallyOwlAlertReceiver = new TallyOwlAlertReceiverClient(t);
     this.tallyOwlCollector = new TallyOwlCollectorClient(t);
     this.tallyOwlIngest = new TallyOwlIngestClient(t);
   }

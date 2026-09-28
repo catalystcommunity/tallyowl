@@ -78,3 +78,20 @@ pub mod tally_owl_ingest_wire_ids {
     pub const OP_CAPTURE_CRITICAL: u64 = 1;
     pub const OP_POLICY_VERSION: u64 = 2;
 }
+
+/// TallyOwlAlertReceiver service trait
+pub trait TallyOwlAlertReceiver {
+    type Context;
+    /// Take one signed alert notification.
+    fn notify(
+        &self,
+        ctx: &Self::Context,
+        input: AlertNotifyRequest,
+    ) -> Result<AlertNotifyResponse, ServiceError>;
+}
+
+/// Wire-id ordinals for the TallyOwlAlertReceiver service (transport compact profiles).
+pub mod tally_owl_alert_receiver_wire_ids {
+    pub const SERVICE: u64 = 6;
+    pub const OP_NOTIFY: u64 = 0;
+}

@@ -134,13 +134,44 @@ openraft cluster.
 | Minority partition | The minority accepts no write and commits nothing. No split brain. | Blocked 3 s, no commit |
 | Voter rejoins | It catches up from the leader's log | 528 ms |
 | Membership change | A learner is added and promoted without a write outage | 4 ms each |
-| Voter disk exhausted | The voter fails readiness and stops accepting appends. Quorum continues without it. | Not measured. **Built and covered by a test**, Phase 7 |
+| Voter disk exhausted | The voter fails readiness. It answers a heartbeat and refuses an append that carries entries, so it is not counted in a quorum for a batch that it cannot hold. Quorum continues without it. When space is free again, the voter catches up without operator action. | Not measured. **Built and covered by a test** |
+| A replica cannot apply a committed entry | The failure belongs to one replica, for example a device error. The group stops on that node and the node reports the group as stopped. The replica does not skip the entry. After a restart, the replica applies the entry again. | Not measured. **Built and covered by a test** |
+| A replica is behind the purged log | Section 6.3 | Not measured. **Built and covered by a test** over real sockets |
+| A voter returns with no consensus state | Section 6.4 | Not measured. **Built and covered by a test** over real sockets |
+| A node restarts | The node restores the controller topology, the directory, and the tablet marks from the record that it wrote with the applied position. | Not measured. **Built and covered by a test** |
+| A snapshot cannot be prepared | The group continues. The node counts the failure, keeps the previous snapshot, and does not purge the log. The node tries again after 30 seconds. | Not measured. **Built and covered by a test** |
 | **Node alive but slow** | Section 6.1 | Not measured. **Built and covered by tests**, Phase 7, including every cause and `unknown` |
-| **Quorum lost permanently** | Section 6.2 | Not measured. **Unsafe recovery is built and covered by tests**, Phase 7. Restore is the documented path and the command refuses; see IMPLEMENTATION_LOG.md L090 |
+| **Quorum lost permanently** | Section 6.2 | Not measured. **Unsafe recovery is built and covered by a test** in which two of three voters are stopped. Restore is the documented path; see IMPLEMENTATION_LOG.md L090 |
 
 "Not measured" and "covered by a test" are different claims and both are kept.
 A test proves the behaviour happens; a measurement would say how long it takes,
-and none of these three has one. See [PHASE7_REPORT.md](PHASE7_REPORT.md).
+and none of these rows has one. See [PHASE7_REPORT.md](PHASE7_REPORT.md).
+
+**Two operations are not built.** `split-tablet` and `move-tablet` record a
+change, and no component does the work that follows the change. On a node that
+runs a tablet as a consensus group, each operation refuses and changes nothing.
+To put a replica on a different node, use `add-replica` and then
+`remove-replica`. `assign-project` also refuses on such a node when the node
+does not run the global directory group, because the node would keep the
+assignment in memory only.
+
+**What an operator sees.** Each node publishes these gauges. Each gauge is a
+sum across the groups on the node, because a node can hold hundreds of groups
+and one series for each group is too many.
+
+| Instrument | Reports |
+| --- | --- |
+| `tallyowl_consensus_groups_count` | The groups that this node runs |
+| `tallyowl_consensus_groups_led_count` | The groups that this node leads |
+| `tallyowl_consensus_groups_leaderless_count` | The groups with no known leader. A write to such a tablet is refused |
+| `tallyowl_consensus_groups_stopped_count` | The groups that stopped on this node after a storage failure. Restart the node after you examine its data volume |
+| `tallyowl_consensus_groups_lagging_count` | The groups that this node leads in which a replica is behind the purged log |
+| `tallyowl_consensus_replication_lag_count` | The log entries that the slowest replica is behind |
+| `tallyowl_consensus_apply_lag_count` | The log entries that this node holds and has not applied |
+| `tallyowl_consensus_snapshot_failures_total` | The snapshots that the node could not prepare. While this value increases, the consensus log grows |
+
+The node writes one error log line with the group name when it first finds a
+stopped group.
 
 ### 6.1 A node that is alive but slow
 
@@ -218,6 +249,70 @@ Therefore:
 A fast path that hides its cost becomes the habitual path. This one cannot hide
 its cost.
 
+**How the command does it.** A voter set changes when the group commits the
+change, and a group without a quorum commits nothing. Therefore the command does
+not ask the group. It stops the group on the surviving node. It writes a voter
+set that contains only that node into the durable state of the node. It removes
+each voter-set change that the node did not apply, together with the log entries
+after it. It keeps all other log entries, and the surviving node commits them
+alone. Then it starts the group again and the node elects itself.
+
+If the controller quorum was on the lost nodes too, the audit record and the
+degraded mark cannot commit. The command then recovers the controller group on
+the surviving node in the same way, and writes the record.
+
+Do not start a lost voter again with its old data after this command. The lost
+voter has a different voter set, and two leaders are then possible. Erase its
+data directory first. Then add it as a learner.
+
+### 6.3 A replica that is behind the purged log
+
+A leader purges the log behind a snapshot. A replica that needs a purged entry
+receives the snapshot. A tablet snapshot holds the marks and the standing
+erasures. It does not hold rows, because the rows of a tablet are too large for
+one message.
+
+The replica gets the rows before it installs the snapshot:
+
+1. The replica asks each member of the group for its sealed segments.
+2. A member seals its store before it answers. Thus each row at or below the
+   position that the member reports is in a segment.
+3. The replica copies from a member only if that member reports a position at or
+   after the snapshot position.
+4. The replica applies the erasures that the snapshot holds.
+5. Only then does the replica record the snapshot position.
+
+If no member can supply the rows, the install fails and the group stops on that
+replica. The replica continues to report the position that it really holds. It
+does not count in a quorum, and it does not answer a read as a complete replica.
+
+The copy can include entries that arrive again through the log. For those
+entries, the replica commits only the rows that it does not hold.
+
+### 6.4 A voter that returns with no consensus state
+
+A node with no consensus state cannot tell a first installation from a lost
+volume. At start, such a node asks each configured peer if the peer holds
+committed data.
+
+- If no peer holds data, this is a first installation. The node creates the
+  voter set from its configuration.
+- If a peer holds data, the cell exists. The node creates nothing and holds its
+  vote.
+
+A node that holds its vote refuses each vote request. It accepts entries from
+the leader. The hold ends when the node holds each entry that the leader has
+committed. The node keeps the hold across a restart.
+
+This prevents the loss of an acknowledged write. A node with an empty log finds
+each candidate to be up to date. Without the hold, such a node can give its vote
+to a replica that does not have a committed write, and the new leader then
+removes that write from the replica that has it.
+
+While the hold is in force, the group needs a quorum from the other voters. If
+the other voters cannot make a quorum, the tablet accepts no write. This is
+correct: the alternative is a silent loss.
+
 ## 7. The catalog
 
 STORAGE.md section 3.3 says a repair command rebuilds the segment catalog by
@@ -237,6 +332,12 @@ catalog holds.
 | Saved dashboards, queries, cohorts, funnels, and alerts | **No** |
 | Collection policy, at every one of its five levels | **No** |
 | Backup and export snapshots and audit records | **No** |
+
+The installation authority is not in the catalog (D62). The operator keeps the
+intermediate and the root in files, so a lost catalog does not lose them. A
+lost node record costs less than the table suggests: a collector enrolls again
+at its next start, and a head issues its own certificate again from the
+intermediate.
 
 Two of those are not merely inconvenient:
 
@@ -555,22 +656,35 @@ THREAT_MODEL.md section 8 because procedures 3 and 5 restore cold data.
 ## 13. What the system reports
 
 An operator cannot act on a failure that produces no signal, and an alert
-cannot exist without a measurement. Each state below has an instrument.
+cannot exist without a measurement. The design gives each state below an
+instrument. The last column says what this release has. An alert on an
+instrument that is not built can never fire, so do not write one.
 
-| Instrument | Reports |
-| --- | --- |
-| `tallyowl_integrity_pages_verified_total` | Pages checked, labelled by mode |
-| `tallyowl_integrity_failures_total` | Failed checksums, labelled by tier |
-| `tallyowl_segments_damaged` | Segments currently marked damaged |
-| `tallyowl_segments_repaired_total` | Segments repaired from another copy |
-| `tallyowl_scrub_progress_ratio` | Fraction of one pass completed |
-| `tallyowl_catalog_snapshot_age_seconds` | Age of the newest catalog snapshot |
-| `tallyowl_tablet_degraded` | Tablets marked degraded by unsafe recovery |
-| `tallyowl_node_slow` | Nodes in the slow state, labelled by cause |
-| `tallyowl_generation_pins` | Manifest generations pinned by a running query |
-| `tallyowl_generation_pin_age_seconds` | Age of the oldest pin |
-| `tallyowl_compaction_restarts_total` | Compactions restarted by a tombstone move |
-| `tallyowl_storage_reserve_bytes` | Space held back for recovery |
+| Instrument | Reports | In this release |
+| --- | --- | --- |
+| `tallyowl_integrity_pages_verified_total` | Pages checked, labelled by mode | Registered |
+| `tallyowl_integrity_failures_total` | Failed checksums, labelled by tier | Registered |
+| `tallyowl_segments_damaged_count` | Segments currently marked damaged | Registered |
+| `tallyowl_segments_repaired_total` | Segments repaired from another copy | Registered. No scrub runs, so nothing repairs a segment and the value stays at zero |
+| `tallyowl_scrub_progress_ratio` | Fraction of one pass completed | **Not built.** No scrub runs |
+| `tallyowl_catalog_snapshot_age_seconds` | Age of the newest catalog snapshot | Registered. No periodic catalog snapshot is made, so it reports nothing |
+| `tallyowl_tablet_degraded` | Tablets marked degraded by unsafe recovery | **Not built** |
+| `tallyowl_node_slow` | Nodes in the slow state, labelled by cause | **Not built.** No code measures a slow node |
+| `tallyowl_generation_pins_count` | Manifest generations pinned by a running query | Registered |
+| `tallyowl_generation_pin_age_seconds` | Age of the oldest pin | Registered |
+| `tallyowl_compaction_restarts_total` | Compactions restarted by a tombstone move | Registered |
+| `tallyowl_storage_reserve_bytes` | Space held back for recovery | Registered |
+
+"Registered" means that the service publishes the name at `/metrics`. The
+integrity, damaged-segment, compaction, and erased-row instruments did not
+change in releases up to 0.2.1, because no code path moved them. They change
+now, and a test makes each failure occur and reads the instrument. Before you
+write an alert on a different counter, make the failure occur in a test
+installation and see the counter change. `deploy/monitoring/` holds the rules
+that the project ships.
+
+Section 6 gives the consensus gauges. They are sums for one node and have no
+group label.
 
 Two are the early warnings that matter most, because each one predicts a
 failure rather than reporting one:

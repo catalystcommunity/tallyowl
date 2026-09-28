@@ -2,7 +2,7 @@
 // Source: <csil spec>
 // Target: typescript-server
 
-import type { CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, PolicyVersionRequest, PolicyVersionResponse, ServiceError } from "./types.gen.ts";
+import type { AlertNotifyRequest, AlertNotifyResponse, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, PolicyVersionRequest, PolicyVersionResponse, ServiceError } from "./types.gen.ts";
 
 // The consumer-defined context carries auth, request id, etc. It is opaque to
 // generated code; the adapter defines its shape.
@@ -14,6 +14,20 @@ export interface Codec {
   decode<T>(bytes: Uint8Array): T;
   encode(value: unknown): Uint8Array;
 }
+
+export interface TallyOwlAlertReceiverHandlers {
+  /**
+   * Take one signed alert notification.
+   */
+  notify(req: AlertNotifyRequest, ctx: RequestContext): Promise<AlertNotifyResponse>;
+}
+
+export const TallyOwlAlertReceiverWireIds = {
+  service: 6,
+  ops: {
+    notify: 0,
+  },
+} as const;
 
 export interface TallyOwlIngestHandlers {
   /**
@@ -40,6 +54,7 @@ export const TallyOwlIngestWireIds = {
 } as const;
 
 export interface ServerHandlers {
+  tallyOwlAlertReceiver: TallyOwlAlertReceiverHandlers;
   tallyOwlIngest: TallyOwlIngestHandlers;
 }
 
@@ -57,6 +72,17 @@ export async function dispatch(
   ctx: RequestContext,
 ): Promise<Uint8Array> {
   switch (service) {
+    case "TallyOwlAlertReceiver": {
+      switch (method) {
+        case "notify": {
+          const req = codec.decode<AlertNotifyRequest>(reqBytes);
+          const res = await handlers.tallyOwlAlertReceiver.notify(req, ctx);
+          return codec.encode(res);
+        }
+        default:
+          throw { code: 404, message: `unknown method ${service}.${method}` } satisfies ServiceError;
+      }
+    }
     case "TallyOwlIngest": {
       switch (method) {
         case "capture": {
@@ -99,6 +125,17 @@ export async function dispatchCompact(
   ctx: RequestContext,
 ): Promise<Uint8Array> {
   switch (service) {
+    case 6: {
+      switch (method) {
+        case 0: {
+          const req = codec.decode<AlertNotifyRequest>(reqBytes);
+          const res = await handlers.tallyOwlAlertReceiver.notify(req, ctx);
+          return codec.encode(res);
+        }
+        default:
+          throw { code: 404, message: `unknown ordinal ${service}.${method}` } satisfies ServiceError;
+      }
+    }
     case 1: {
       switch (method) {
         case 0: {

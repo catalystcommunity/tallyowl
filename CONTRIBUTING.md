@@ -141,6 +141,23 @@ start its siblings would have a development code path.
 Then run `tallyowl-head` in your debugger. No container indirection, and no
 attach dance.
 
+### Transport security on a workstation
+
+The home profile listens on loopback only, so it uses plaintext and needs no
+certificate (D62). To test TLS on a workstation, make an authority and point
+the services at it:
+
+```sh
+tallyowl-head ca create /tmp/tallyowl-authority
+```
+
+The command prints the settings for each service. Bind a listener to an
+address that is not loopback, or the services keep plaintext. Delete the
+directory when you finish: it holds private keys.
+
+`./tools.sh helm-check` runs the `config check` of each service on each chart
+profile. Run it when you change a setting or a chart.
+
 ## Configuration
 
 One name for one setting, in every place it appears:

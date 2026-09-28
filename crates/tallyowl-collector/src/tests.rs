@@ -797,6 +797,301 @@ fn a_delivered_batch_carries_its_attempt_number_to_the_head() {
 }
 
 // ---------------------------------------------------------------------------
+// The delivery loop: pacing, liveness, and the age it reports
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_head_outage_is_probed_at_a_growing_interval_rather_than_in_a_hot_loop() {
+    // With a backlog there was always another ready batch, so the loop claimed,
+    // failed, rewrote the payload, and warned as fast as the durable store
+    // allowed, for the whole outage.
+    use crate::forwarder::Breaker;
+    let queue = FakeQueue::new();
+    let head = FakeHead::new();
+    head.set(Outcome::Retryable("The head is not answering.".into()));
+    for _ in 0..5 {
+        queue_one_batch(&queue);
+    }
+    let (forwarder, _) = forwarder_with(Arc::clone(&queue), Arc::clone(&head));
+    let mut breaker = Breaker::new();
+
+    // The first failure opens the breaker for at least a second.
+    let mut now = 1_000_000;
+    forwarder.delivery_tick(&mut breaker, now);
+    assert_eq!(head.call_count(), 1);
+    let first_wait = breaker.wait_ms(now);
+    assert!((1_000..=1_250).contains(&first_wait), "{first_wait}");
+
+    // While it is open, a turn reaches neither the head nor the queue, however
+    // many batches are ready.
+    for step in 1..=9 {
+        forwarder.delivery_tick(&mut breaker, now + step * 100);
+    }
+    assert_eq!(
+        head.call_count(),
+        1,
+        "nothing was sent while the breaker was open"
+    );
+    assert_eq!(queue.depth(), 4, "the backlog stayed queued and untouched");
+
+    // Each probe that fails doubles the wait, up to thirty seconds.
+    let mut waits = vec![first_wait];
+    for _ in 0..7 {
+        now += breaker.wait_ms(now);
+        // The sweep returns a parked batch when its delay expires.
+        queue.release_parked();
+        forwarder.delivery_tick(&mut breaker, now);
+        waits.push(breaker.wait_ms(now));
+    }
+    assert_eq!(head.call_count(), 8, "one probe for each wait");
+    assert!(waits[1] >= 2_000 && waits[2] >= 4_000, "{waits:?}");
+    let longest = *waits.last().unwrap();
+    assert!((30_000..=37_500).contains(&longest), "{waits:?}");
+
+    // The first success closes it, and the backlog drains at full speed.
+    head.set(Outcome::Commit);
+    queue.release_parked();
+    now += breaker.wait_ms(now);
+    let mut turns = 0;
+    while queue.completed().len() < 5 && turns < 20 {
+        let pause = forwarder.delivery_tick(&mut breaker, now);
+        assert!(pause.is_zero() || queue.completed().len() == 5 || queue.depth() == 0);
+        turns += 1;
+    }
+    assert_eq!(queue.completed().len(), 5);
+    assert!(!breaker.is_tripped());
+}
+
+#[test]
+fn a_probe_that_fails_does_not_write_the_batch_again() {
+    // The attempt count lives in the payload, so counting an attempt rewrites
+    // up to 512 KiB and syncs it. During an outage that write competes with
+    // intake for the one thing still protecting data.
+    use crate::forwarder::Breaker;
+    let queue = FakeQueue::new();
+    let head = FakeHead::new();
+    head.set(Outcome::Retryable("The head is not answering.".into()));
+    queue_one_batch(&queue);
+    let (forwarder, _) = forwarder_with(Arc::clone(&queue), Arc::clone(&head));
+    let mut breaker = Breaker::new();
+
+    let mut now = 1_000_000;
+    forwarder.delivery_tick(&mut breaker, now);
+    queue.release_parked();
+    assert_eq!(
+        queued_task(&queue).attempts,
+        1,
+        "the first failure is counted"
+    );
+
+    now += breaker.wait_ms(now);
+    forwarder.delivery_tick(&mut breaker, now);
+    assert_eq!(head.call_count(), 2, "the probe reached the head");
+    assert_eq!(queue.parked_count(), 1, "and the batch was parked again");
+    queue.release_parked();
+    assert_eq!(
+        queued_task(&queue).attempts,
+        1,
+        "the probe said nothing new about the batch, so the payload was left alone"
+    );
+}
+
+#[test]
+fn a_durable_store_that_cannot_be_claimed_from_opens_the_breaker_too() {
+    // A claim error used to retry every 25 ms with a warning each time.
+    use crate::forwarder::Breaker;
+    let queue = FakeQueue::new();
+    let (forwarder, _) = forwarder_with(Arc::clone(&queue), FakeHead::new());
+    let mut breaker = Breaker::new();
+    queue.refuse(true);
+    forwarder.delivery_tick(&mut breaker, 1_000_000);
+    assert!(breaker.wait_ms(1_000_000) >= 1_000);
+}
+
+#[test]
+fn the_oldest_waiting_age_falls_when_the_oldest_batch_is_delivered() {
+    // It kept the minimum it had ever seen and cleared only at a depth of zero,
+    // which a busy queue never reads. The gauge rose for ever, long after the
+    // batch it described had committed.
+    let queue = FakeQueue::new();
+    let head = FakeHead::new();
+    let (forwarder, _) = forwarder_with(Arc::clone(&queue), Arc::clone(&head));
+
+    let seal_at = |accepted_at: i64, id: u8| {
+        let batch = Batch {
+            batch_id: vec![id; 16],
+            items: vec![item(1, "checkout-started")],
+            common_properties: None,
+            sealed_at: 1,
+            compression: None,
+        };
+        let payload = crate::task::encode(&crate::task::seal(&batch, &[7; 16], accepted_at));
+        queue.submit(QUEUE, payload, 0).unwrap();
+    };
+    let now = tallyowl_obs::time::now_ms();
+    seal_at(now - 60_000, 1);
+    seal_at(now - 5_000, 2);
+
+    // Both fail once, so both are known and waiting.
+    head.set(Outcome::Retryable("later".into()));
+    assert!(forwarder.deliver_one());
+    assert!(forwarder.deliver_one());
+    assert_eq!(
+        forwarder.state.oldest_waiting_at.load(Ordering::Relaxed),
+        now - 60_000
+    );
+
+    // The old one is delivered. The queue is not empty, and the age still falls.
+    head.set(Outcome::Commit);
+    queue.release_parked();
+    assert!(forwarder.deliver_one());
+    assert_eq!(queue.completed().len(), 1);
+    assert_eq!(
+        forwarder.state.oldest_waiting_at.load(Ordering::Relaxed),
+        now - 5_000,
+        "the age now describes the batch that is still waiting"
+    );
+
+    assert!(forwarder.deliver_one());
+    assert_eq!(forwarder.state.oldest_waiting_at.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_quarantined_batch_stops_being_the_oldest_waiting_batch() {
+    let queue = FakeQueue::new();
+    let head = FakeHead::new();
+    head.set(Outcome::Permanent("This batch is not valid.".into()));
+    queue_one_batch(&queue);
+    let (forwarder, _) = forwarder_with(Arc::clone(&queue), Arc::clone(&head));
+    assert!(forwarder.deliver_one());
+    assert_eq!(queue.quarantined().len(), 1);
+    assert_eq!(forwarder.state.oldest_waiting_at.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn readiness_fails_when_the_delivery_loop_stops_turning() {
+    // The sweep kept readiness green while a delivery thread sat inside one
+    // call for two days. Nothing judged the delivery loop, and the delivery
+    // loop was the only judge of the sweep.
+    use crate::forwarder::DELIVERY_CHECK;
+    let queue = FakeQueue::new();
+    let (forwarder, health) = forwarder_with(Arc::clone(&queue), FakeHead::new());
+    forwarder.sweep_once();
+    health.declare(DELIVERY_CHECK, "not yet");
+
+    let turned_at = 1_000_000;
+    forwarder
+        .state
+        .last_delivery_loop_ms
+        .store(turned_at, Ordering::Relaxed);
+    forwarder.check_delivery_age(turned_at + 1_000);
+    assert!(
+        health.is_ready(),
+        "a loop that turned a second ago is running"
+    );
+
+    forwarder.check_delivery_age(turned_at + 10 * 60 * 1_000);
+    assert!(!health.is_ready());
+    assert!(health.report().summary().contains("stopped turning"));
+
+    // And it recovers when the loop turns again.
+    forwarder
+        .state
+        .last_delivery_loop_ms
+        .store(turned_at + 10 * 60 * 1_000, Ordering::Relaxed);
+    forwarder.check_delivery_age(turned_at + 10 * 60 * 1_000 + 500);
+    assert!(health.is_ready());
+}
+
+#[test]
+fn a_slow_depth_count_cannot_make_a_sweep_that_ran_look_stopped() {
+    // The sweep time was stamped and then the count ran on the same thread. A
+    // count that outlasted the staleness window failed readiness while the
+    // sweep was running.
+    let queue = FakeQueue::new();
+    let (forwarder, _) = forwarder_with(Arc::clone(&queue), FakeHead::new());
+    queue_one_batch(&queue);
+    assert!(forwarder.sweep_only());
+    assert!(forwarder.state.last_sweep_ms.load(Ordering::Relaxed) > 0);
+    assert_eq!(
+        forwarder.state.queue_depth.load(Ordering::Relaxed),
+        0,
+        "the sweep alone does not count"
+    );
+    forwarder.count_once();
+    assert_eq!(forwarder.state.queue_depth.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_retried_conversion_is_claimed_before_an_ordinary_event_that_arrived_later() {
+    // The durable store writes whatever priority an update names. The park
+    // named zero, so after one failed delivery a conversion went behind every
+    // ordinary event, which is the reverse of DELIVERY.md section 8.
+    let queue = FakeQueue::new();
+    let head = FakeHead::new();
+    head.set(Outcome::Retryable("later".into()));
+    let (forwarder, _) = forwarder_with(Arc::clone(&queue), Arc::clone(&head));
+
+    let payload_for = |id: u8| {
+        let batch = Batch {
+            batch_id: vec![id; 16],
+            items: vec![item(1, "purchase")],
+            common_properties: None,
+            sealed_at: 1,
+            compression: None,
+        };
+        crate::task::encode(&crate::task::seal(
+            &batch,
+            &[7; 16],
+            tallyowl_obs::time::now_ms(),
+        ))
+    };
+    let conversion = queue.submit(QUEUE, payload_for(1), 5).unwrap();
+    assert!(forwarder.deliver_one());
+    assert_eq!(queue.priority_of(&conversion), Some(5));
+
+    queue.submit(QUEUE, payload_for(2), 2).unwrap();
+    queue.release_parked();
+    let next = queue.claim(QUEUE, 30).unwrap().expect("a task");
+    assert_eq!(next.uuid, conversion);
+}
+
+#[test]
+fn a_head_that_accepts_a_connection_and_never_answers_costs_one_deadline() {
+    // This is the wedge that held a delivery thread for two days. The error has
+    // to be retryable, because the batch is fine and the head may only be slow.
+    use crate::head_client::{HeadClient, RemoteHead};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            held.push(stream);
+        }
+    });
+
+    let metrics = Registry::new();
+    RemoteHead::declare_metrics(&metrics);
+    let head = RemoteHead::new(&address, 1024 * 1024)
+        .with_call_timeout(std::time::Duration::from_millis(40))
+        .with_metrics(Arc::clone(&metrics));
+    let failure = head.commit_batch(vec![0xa0]).expect_err("no answer");
+    assert!(failure.retryable);
+    assert!(
+        failure.message.contains("did not answer"),
+        "{}",
+        failure.message
+    );
+    assert_eq!(
+        metrics.counter_value(
+            "tallyowl_head_call_failures_total",
+            &labels(&[("op", "commit-batch")])
+        ),
+        1
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The scrubber
 //
 // AGENTS.md: "Never record secrets, credentials, request bodies, claim values,
@@ -1003,6 +1298,90 @@ fn metric_item(id: u8, name: &str, route: &str, value: f64) -> TelemetryItem {
         exemplar_trace_id: None,
     });
     item
+}
+
+fn histogram_item(id: u8, bounds: &[f64], counts: &[u64]) -> TelemetryItem {
+    use tallyowl_collector_api::types::{HistogramValue, MetricKind};
+    let mut item = metric_item(id, "request_seconds", "/a", 0.0);
+    let point = item.metric_point.as_mut().expect("a metric point");
+    point.metric_kind = MetricKind::Histogram;
+    point.monotonic = false;
+    point.number_value = None;
+    point.histogram_value = Some(HistogramValue {
+        count: counts.iter().sum(),
+        sum: 1.0,
+        bounds: bounds.to_vec(),
+        counts: counts.to_vec(),
+    });
+    item
+}
+
+#[test]
+fn a_histogram_whose_counts_do_not_match_its_bounds_is_rejected_by_identifier() {
+    // Two delta points of one series, the second with more counts than bounds.
+    // Merging them once read past the end of the first and stopped the worker,
+    // and the driver then sent the same batch again for ever.
+    let queue = FakeQueue::new();
+    let intake = intake_with(Arc::clone(&queue), Registry::new());
+
+    let accepted = intake
+        .submit(
+            "key-a",
+            batch(
+                1,
+                vec![
+                    histogram_item(1, &[0.1, 0.5], &[1, 2]),
+                    histogram_item(2, &[0.1, 0.5], &[1, 2, 3, 4]),
+                    histogram_item(3, &[0.1, 0.5], &[1]),
+                ],
+            ),
+        )
+        .expect("the batch commits around the two bad shapes");
+
+    assert_eq!(accepted.response.accepted, 1);
+    let rejected = accepted.response.rejected.expect("two items were refused");
+    assert_eq!(
+        rejected.iter().map(|r| r.event_id[0]).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(
+        rejected[0].code,
+        tallyowl_collector_api::types::ErrorCode::InvalidArgument
+    );
+    assert!(
+        rejected[0].message.contains("4 bucket counts") && rejected[0].message.contains("2 bounds"),
+        "the message gives both numbers: {}",
+        rejected[0].message
+    );
+    assert_eq!(stored_batch(&queue).items.len(), 1);
+}
+
+#[test]
+fn a_batch_whose_every_item_is_rejected_writes_nothing_to_the_durable_store() {
+    // DELIVERY.md section 3: validation runs before the enqueue so a poison
+    // payload does not consume the delivery queue. An empty task is a queue
+    // write, a claim, a head call, and a completion, all for nothing.
+    let queue = FakeQueue::new();
+    let metrics = Registry::new();
+    let intake = intake_with(Arc::clone(&queue), Arc::clone(&metrics));
+
+    let mut no_time = item(1, "checkout-started");
+    no_time.envelope.occurred_at = 0;
+    let mut no_id = item(2, "checkout-started");
+    no_id.envelope.event_id = vec![2u8; 3];
+
+    let accepted = intake
+        .submit("key-a", batch(1, vec![no_time, no_id]))
+        .expect("the receipt still names what was rejected");
+
+    assert_eq!(accepted.response.accepted, 0);
+    assert_eq!(accepted.response.rejected.map(|r| r.len()), Some(2));
+    assert_eq!(queue.depth(), 0, "nothing reached the durable store");
+    assert!(accepted.task_uuid.is_empty());
+    assert_eq!(
+        metrics.counter_value("tallyowl_batches_accepted_total", &labels(&[])),
+        0
+    );
 }
 
 fn narrow_intake(queue: Arc<FakeQueue>, metrics: Arc<Registry>, series: u64) -> Intake {
@@ -1627,4 +2006,297 @@ mod protocol_window {
             1
         );
     }
+}
+
+#[test]
+fn an_exact_number_with_an_absurd_exponent_is_rejected_by_identifier_and_never_queued() {
+    // A few bytes here. The head renders the value, so there it was a terabyte
+    // of zeros, a stopped process, and the same durable batch again after every
+    // restart. The head now refuses it too. Refusing it here names the item to
+    // its sender, and keeps it out of the durable queue.
+    use tallyowl_collector_api::types::{
+        CsilDecimal, Property, PropertyOrigin, TypedValue, TypedValueKind,
+    };
+    let queue = FakeQueue::new();
+    let intake = intake_with(Arc::clone(&queue), Registry::new());
+
+    let decimal = |exponent: i64| Property {
+        key: "price".into(),
+        value: TypedValue {
+            kind: TypedValueKind::Decimal,
+            bool_value: None,
+            int_value: None,
+            uint_value: None,
+            float_value: None,
+            decimal_value: Some(CsilDecimal {
+                exponent,
+                mantissa: 1,
+            }),
+            text_value: None,
+            bytes_value: None,
+        },
+        origin: PropertyOrigin::Client,
+    };
+    let mut ordinary = item(1, "priced");
+    ordinary.envelope.properties.push(decimal(-2));
+    let mut huge = item(2, "priced");
+    huge.envelope.properties.push(decimal(1_000_000_000_000));
+    let mut tiny = item(3, "priced");
+    tiny.envelope.properties.push(decimal(i64::MIN));
+
+    let accepted = intake
+        .submit("key-a", batch(1, vec![ordinary, huge, tiny]))
+        .expect("the batch commits around the two bad numbers");
+
+    assert_eq!(accepted.response.accepted, 1);
+    let rejected = accepted.response.rejected.expect("two items were refused");
+    assert_eq!(
+        rejected.iter().map(|r| r.event_id[0]).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert!(
+        rejected[0].message.contains("exponent"),
+        "the refusal should say what is wrong: {}",
+        rejected[0].message
+    );
+    assert_eq!(stored_batch(&queue).items.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// D62: how an application reaches intake
+// ---------------------------------------------------------------------------
+
+fn transport_service(queue: Arc<FakeQueue>) -> Arc<crate::service::CollectorService> {
+    Arc::new(crate::service::CollectorService {
+        intake: Arc::new(intake_with(queue, Registry::new())),
+        health: Health::new(),
+        logger: Arc::new(Logger::new("tallyowl-collector", "test", Severity::Error)),
+        forwarder_state: ForwarderState::new(),
+        credential: "key-a".into(),
+        roles: vec!["intake".into()],
+        policy: None,
+    })
+}
+
+fn submit_over(
+    client: &tallyowl_rpc::Client,
+) -> Result<tallyowl_rpc::Response, tallyowl_obs::error::TallyOwlError> {
+    client.call(
+        "TallyOwlCollector",
+        "submit-batch",
+        tallyowl_collector_api::codec::encode_submit_batch_request(&batch(
+            7,
+            vec![item(1, "over-the-wire")],
+        )),
+    )
+}
+
+#[test]
+fn an_application_on_the_same_host_reaches_intake_on_a_unix_socket() {
+    let queue = FakeQueue::new();
+    let dir = crate::transport::tests::scratch("unix-intake");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let address = format!("unix:{}", dir.join("intake.sock").display());
+    let (server, exposure) = crate::transport::serve_intake(
+        &address,
+        transport_service(Arc::clone(&queue)),
+        tallyowl_rpc::ServerOptions::new(1024 * 1024),
+        None,
+        false,
+    )
+    .expect("intake listens on a unix socket");
+    assert_eq!(exposure, crate::transport::Exposure::Local);
+
+    let client = tallyowl_rpc::Client::new(&address, 1024 * 1024).with_credential("key-a");
+    let reply = submit_over(&client).expect("a receipt");
+    assert_ne!(
+        reply.variant.as_deref(),
+        Some(tallyowl_rpc::SERVICE_ERROR_VARIANT)
+    );
+    assert_eq!(stored_batch(&queue).items.len(), 1);
+    server.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn intake_on_a_network_address_serves_tls_and_the_batch_still_reaches_the_durable_store() {
+    let queue = FakeQueue::new();
+    let now = tallyowl_rpc::material::now_ms();
+    let dir = crate::transport::tests::scratch("tls-intake");
+    let authority = crate::transport::tests::write_pair(
+        &dir,
+        now - crate::transport::tests::HOUR_MS,
+        2 * crate::transport::tests::HOUR_MS,
+    );
+    let certificates =
+        crate::transport::application_certificates(&[dir.display().to_string()], now)
+            .expect("loads")
+            .expect("a set");
+    let (server, exposure) = crate::transport::serve_intake(
+        "0.0.0.0:0",
+        transport_service(Arc::clone(&queue)),
+        tallyowl_rpc::ServerOptions::new(1024 * 1024),
+        Some(certificates),
+        false,
+    )
+    .expect("intake listens");
+    assert_eq!(exposure, crate::transport::Exposure::Tls);
+    let port = server.local_address().port();
+    let address = format!("127.0.0.1:{port}");
+
+    let secure = tallyowl_rpc::Client::server_auth(
+        &address,
+        1024 * 1024,
+        "127.0.0.1",
+        Some(vec![authority]),
+    )
+    .expect("a client")
+    .with_credential("key-a");
+    let reply = submit_over(&secure).expect("a receipt over TLS");
+    assert_ne!(
+        reply.variant.as_deref(),
+        Some(tallyowl_rpc::SERVICE_ERROR_VARIANT)
+    );
+    assert_eq!(queue.depth(), 1);
+
+    // A client that does not use TLS reaches nothing, and nothing is stored.
+    let plain = tallyowl_rpc::Client::new(&address, 1024 * 1024).with_credential("key-a");
+    assert!(
+        submit_over(&plain).is_err(),
+        "a plaintext client was served by a TLS listener"
+    );
+    assert_eq!(
+        queue.depth(),
+        1,
+        "a plaintext batch reached the durable store"
+    );
+    assert_eq!(stored_batch(&queue).items.len(), 1);
+    server.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_network_intake_with_no_certificate_does_not_listen_at_all() {
+    let refused = crate::transport::serve_intake(
+        "0.0.0.0:0",
+        transport_service(FakeQueue::new()),
+        tallyowl_rpc::ServerOptions::new(1024 * 1024),
+        None,
+        false,
+    )
+    .err()
+    .expect("refused");
+    assert!(
+        refused.message.contains("tls.certificateDirectories"),
+        "{}",
+        refused.message
+    );
+}
+
+/// A sink that keeps nothing and says so honestly.
+struct Nothing;
+impl tallyowl_compat::receiver::Sink for Nothing {
+    fn accept(
+        &self,
+        _items: Vec<TelemetryItem>,
+    ) -> Result<tallyowl_compat::receiver::Kept, String> {
+        Ok(tallyowl_compat::receiver::Kept::default())
+    }
+}
+
+#[test]
+fn an_opentelemetry_push_crosses_tls_with_the_intake_certificate() {
+    use std::io::{Read, Write};
+    let now = tallyowl_rpc::material::now_ms();
+    let dir = crate::transport::tests::scratch("tls-otlp");
+    let authority = crate::transport::tests::write_pair(
+        &dir,
+        now - crate::transport::tests::HOUR_MS,
+        2 * crate::transport::tests::HOUR_MS,
+    );
+    let certificates =
+        crate::transport::application_certificates(&[dir.display().to_string()], now)
+            .expect("loads")
+            .expect("a set");
+    let (tls, exposure) = crate::transport::receiver_tls("0.0.0.0:0", Some(&certificates), false)
+        .expect("a TLS configuration");
+    assert_eq!(exposure, crate::transport::Exposure::Tls);
+    let receiver = tallyowl_compat::receiver::start_secured("0.0.0.0:0", Arc::new(Nothing), tls)
+        .expect("the receiver listens");
+    let port = receiver.local_address().port();
+
+    tallyowl_rpc::tls::install_crypto_provider();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(authority))
+        .expect("the authority");
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from("127.0.0.1").expect("a name");
+    let session = rustls::ClientConnection::new(Arc::new(config), name).expect("a session");
+    let socket = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let mut stream = rustls::StreamOwned::new(session, socket);
+    stream
+        .write_all(b"POST /v1/metrics HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\n\r\n")
+        .expect("send");
+    let mut answer = String::new();
+    let _ = stream.read_to_string(&mut answer);
+    assert!(
+        answer.starts_with("HTTP/1.1 200"),
+        "the answer over TLS was {answer:?}"
+    );
+
+    // Plaintext to a TLS receiver gets no HTTP answer.
+    let mut plain = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    plain
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .expect("deadline");
+    let _ = plain.write_all(b"POST /v1/metrics HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
+    let mut reply = String::new();
+    let _ = plain.read_to_string(&mut reply);
+    assert!(
+        !reply.starts_with("HTTP/1.1 200"),
+        "a plaintext push was served: {reply:?}"
+    );
+    receiver.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_collector_with_no_identity_yet_still_acknowledges_into_the_durable_store() {
+    // The enrollment has not finished, so the head cannot be reached. Intake
+    // needs no identity, so a batch is still made durable, and the head call
+    // fails as retryable, which the forwarder's breaker waits out.
+    let queue = FakeQueue::new();
+    let intake = intake_with(Arc::clone(&queue), Registry::new());
+    let accepted = intake
+        .submit("key-a", batch(9, vec![item(1, "before-enrollment")]))
+        .expect("intake does not wait for the collector's identity");
+    assert_eq!(accepted.response.accepted, 1);
+    assert_eq!(queue.depth(), 1);
+
+    let no_identity = Arc::new(tallyowl_rpc::material::SwappableIdentity::new(None));
+    let trust = Arc::new(tallyowl_rpc::trust::StaticTrust(Vec::new()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let head = crate::head_client::RemoteHead::mutual(
+        &listener.local_addr().expect("address").to_string(),
+        1024 * 1024,
+        "head.tallyowl.internal",
+        no_identity,
+        trust,
+    )
+    .with_call_timeout(std::time::Duration::from_secs(2));
+    let outcome = crate::head_client::HeadClient::commit_batch(&head, vec![0u8; 4]);
+    let refused = outcome.expect_err("a head call with no identity must not succeed");
+    assert!(
+        refused.retryable,
+        "a head call with no identity must be retried later: {}",
+        refused.message
+    );
+    assert_eq!(
+        queue.depth(),
+        1,
+        "the batch stays durable while the forwarder waits"
+    );
 }

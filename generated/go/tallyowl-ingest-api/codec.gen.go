@@ -224,6 +224,12 @@ func cborReadArg(b []byte, pos *int, low byte) (uint64, error) {
 	}
 }
 
+// csilCborPreallocLimit bounds the elements a decoded array or map reserves before
+// it reads them. The declared length is checked against the remaining input, but one
+// input byte can become a much larger value, so reserving the full declared length
+// lets a small frame reserve a large multiple of its size at every nesting level.
+const csilCborPreallocLimit = 1024
+
 func cborDec(b []byte, pos *int, depth int) (cborValue, error) {
 	if depth > 64 {
 		return nil, fmt.Errorf("csil cbor: nesting limit exceeded")
@@ -298,7 +304,11 @@ func cborDec(b []byte, pos *int, depth int) (cborValue, error) {
 			return nil, fmt.Errorf("csil cbor: array length exceeds remaining input")
 		}
 		n := int(arg)
-		items := make(cborArray, 0, n)
+		reserve := n
+		if reserve > csilCborPreallocLimit {
+			reserve = csilCborPreallocLimit
+		}
+		items := make(cborArray, 0, reserve)
 		for i := 0; i < n; i++ {
 			item, err := cborDec(b, pos, depth+1)
 			if err != nil {
@@ -312,7 +322,11 @@ func cborDec(b []byte, pos *int, depth int) (cborValue, error) {
 			return nil, fmt.Errorf("csil cbor: map length exceeds remaining input")
 		}
 		n := int(arg)
-		entries := make(cborMap, 0, n)
+		reserve := n
+		if reserve > csilCborPreallocLimit {
+			reserve = csilCborPreallocLimit
+		}
+		entries := make(cborMap, 0, reserve)
 		for i := 0; i < n; i++ {
 			k, err := cborDec(b, pos, depth+1)
 			if err != nil {
@@ -2649,6 +2663,99 @@ func DecodePolicyVersionResponse(csilData []byte) (PolicyVersionResponse, error)
 		return csilZero, csilErr
 	}
 	return csilDecPolicyVersionResponse(csilRoot)
+}
+
+// csilEncAlertNotifyRequest builds the canonical CBOR value tree for a AlertNotifyRequest.
+func csilEncAlertNotifyRequest(csilV AlertNotifyRequest) cborValue {
+	csilEntries := make(cborMap, 0, 3)
+	csilEntries = append(csilEntries, cborEntry{cborText("body"), cborBytes(csilV.Body)})
+	csilEntries = append(csilEntries, cborEntry{cborText("signature"), cborText(csilV.Signature)})
+	csilEntries = append(csilEntries, cborEntry{cborText("signed_at"), cborInt(csilV.SignedAt)})
+	return csilEntries
+}
+
+// csilDecAlertNotifyRequest reconstructs a AlertNotifyRequest from a decoded CBOR value tree.
+func csilDecAlertNotifyRequest(csilRoot cborValue) (AlertNotifyRequest, error) {
+	var csilOut AlertNotifyRequest
+	{
+		csilField, csilErr := cborRequire(csilRoot, "signed_at")
+		if csilErr != nil {
+			return csilOut, csilErr
+		}
+		csilVal, csilErr := (func(csilV cborValue) (Timestamp, error) {
+			csilInner, csilErr := (cborAsI64)(csilV)
+			return Timestamp(csilInner), csilErr
+		})(csilField)
+		if csilErr != nil {
+			return csilOut, csilErr
+		}
+		csilOut.SignedAt = csilVal
+	}
+	{
+		csilField, csilErr := cborRequire(csilRoot, "signature")
+		if csilErr != nil {
+			return csilOut, csilErr
+		}
+		csilVal, csilErr := (cborAsText)(csilField)
+		if csilErr != nil {
+			return csilOut, csilErr
+		}
+		csilOut.Signature = csilVal
+	}
+	{
+		csilField, csilErr := cborRequire(csilRoot, "body")
+		if csilErr != nil {
+			return csilOut, csilErr
+		}
+		csilVal, csilErr := (cborAsBytes)(csilField)
+		if csilErr != nil {
+			return csilOut, csilErr
+		}
+		csilOut.Body = csilVal
+	}
+	return csilOut, nil
+}
+
+// EncodeAlertNotifyRequest encodes a AlertNotifyRequest to canonical CSIL CBOR bytes.
+func EncodeAlertNotifyRequest(csilV AlertNotifyRequest) []byte {
+	return cborEncode(csilEncAlertNotifyRequest(csilV))
+}
+
+// DecodeAlertNotifyRequest decodes canonical CSIL CBOR bytes into a AlertNotifyRequest.
+func DecodeAlertNotifyRequest(csilData []byte) (AlertNotifyRequest, error) {
+	csilRoot, csilErr := cborDecode(csilData)
+	if csilErr != nil {
+		var csilZero AlertNotifyRequest
+		return csilZero, csilErr
+	}
+	return csilDecAlertNotifyRequest(csilRoot)
+}
+
+// csilEncAlertNotifyResponse builds the canonical CBOR value tree for a AlertNotifyResponse.
+func csilEncAlertNotifyResponse(csilV AlertNotifyResponse) cborValue {
+	csilEntries := make(cborMap, 0, 0)
+	return csilEntries
+}
+
+// csilDecAlertNotifyResponse reconstructs a AlertNotifyResponse from a decoded CBOR value tree.
+func csilDecAlertNotifyResponse(csilRoot cborValue) (AlertNotifyResponse, error) {
+	var csilOut AlertNotifyResponse
+	return csilOut, nil
+}
+
+// EncodeAlertNotifyResponse encodes a AlertNotifyResponse to canonical CSIL CBOR bytes.
+func EncodeAlertNotifyResponse(csilV AlertNotifyResponse) []byte {
+	return cborEncode(csilEncAlertNotifyResponse(csilV))
+}
+
+// DecodeAlertNotifyResponse decodes canonical CSIL CBOR bytes into a AlertNotifyResponse.
+func DecodeAlertNotifyResponse(csilData []byte) (AlertNotifyResponse, error) {
+	csilRoot, csilErr := cborDecode(csilData)
+	if csilErr != nil {
+		var csilZero AlertNotifyResponse
+		return csilZero, csilErr
+	}
+	return csilDecAlertNotifyResponse(csilRoot)
 }
 
 // csilEncTypedValue builds the canonical CBOR value tree for a TypedValue.

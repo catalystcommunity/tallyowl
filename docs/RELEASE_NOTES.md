@@ -8,6 +8,215 @@ repository here uses starts an untagged repository at 0.1.0.
 
 This is a first release. Read the limits before you install it.
 
+## Not released yet — changes after 0.2.1
+
+An antagonistic review on 2026-09-20 examined the scalability, the stability,
+and the ease of use of TallyOwl. These are its results.
+[IMPLEMENTATION_LOG.md](IMPLEMENTATION_LOG.md) L191 gives the reasons. The
+release that contains these changes gets its version number from its commits.
+
+### Read this before you upgrade
+
+Each item below changes what an installation does with a configuration that
+worked before.
+
+- **A setting that does nothing now refuses a value that is not its default.**
+  The settings are `integrity.mode: scrub`, `integrity.scrub.*`,
+  `catalog.snapshots.*`, `storage.coldTier.enabled`,
+  `placement.slowNode.factor`, `placement.slowNode.duration`, and
+  `retention.audit`. Run `config check` before you upgrade.
+  `integrity.mode: none` now stops verification. Before, it only wrote a log
+  line.
+- **Validation refuses more values.** It refuses a negative duration, a host
+  name in a `*.listen` setting, `retention.detailed: 0s` together with a
+  `retention.rollup` above zero, a `linkkeys.sessionLifetime` below one
+  minute, and a `sampling.tail.keepPercent` that is not from 0 to 100. It
+  refuses a `dashboard.callbackPath` that is different from the path of
+  `linkkeys.callbackUrl`.
+- **An unknown setting writes a warning at start.** The service still starts.
+  An unknown `--a.b` flag is now an unknown setting. Before, the head read it
+  as a verb.
+- **Every network connection uses TLS (D62).** A listener on a loopback
+  address or a unix socket can stay plaintext. A listener on a network address
+  needs TLS material, and `config check` refuses it without that material. On
+  one host, the services need no certificates. For a network installation:
+  - Make an authority with `tallyowl-head ca create <directory>`. Give its
+    intermediate to each head (`installation.signingCertificate`,
+    `installation.signingKey`) and its root to each service
+    (`installation.authorities`).
+  - Give each collector a certificate for applications
+    (`tls.certificateDirectories`) and a role token (`enrollment.roleToken`).
+    A collector enrolls for its node certificate at each start.
+  - `transport.allowPlaintext: true` permits plaintext on a network address.
+    Use it only on a network that something else protects.
+  - The hop to Corndogs uses TLS. TallyOwl needs Corndogs release 0.7.6 or
+    later. Set `corndogs.tls.caFile` to the authority of the Corndogs
+    certificate. The head chart needs `corndogsDeployment.tlsSecret` for its
+    Corndogs sidecar.
+  - A dashboard on a network address needs `dashboard.allowPlaintext: true`,
+    because the Gateway ends TLS in front of it.
+  - A renewal, a `commit-batch`, and a consensus message each need the proved
+    identity of the node that sends it. `enrollment.allowUnverifiedRenewal`
+    is removed.
+- **The charts need their security values.** Neither chart renders with its
+  default values. The head chart needs `deployment.tls.signingSecret` and
+  `deployment.tls.authorities`. The collector chart needs
+  `deployment.tls.certificateSecrets`, `deployment.tls.authorities`, and
+  `deployment.tls.roleTokenSecret`. Set `transport.allowPlaintext` instead
+  only on a network that something else protects. The environment variables
+  that carry secrets are now `SECRET_TALLYOWL_API_KEY` and
+  `SECRET_TALLYOWL_ROLE_TOKEN`, because the loader reads each `TALLYOWL_*`
+  variable as a setting.
+- **The native alert callback is signed.** A rule with a `csil-callback`
+  target needs a `secret_ref`. The receiver implements
+  `TallyOwlAlertReceiver.notify` from the ingest contract and verifies each
+  call with `VerifyAlertCallback` (Go) or `verify_alert_callback` (Rust). The
+  request shape changed: it was a raw JSON payload.
+- **The Corndogs sidecar has its own pull policy.**
+  `corndogsDeployment.imagePullPolicy` in the head chart. Empty, the default,
+  means `image.pullPolicy`, as before.
+- **`tallyowl-head token create|list|revoke`** makes, lists, and stops the
+  role tokens that collectors enroll with.
+- **The app drivers use TLS by default.** The Go and the Rust app drivers use
+  TLS with the trusted authorities of the operating system for a network
+  address, and plaintext for a loopback or `unix:` address. A collector whose
+  certificate comes from a private authority needs that authority in the
+  driver's `Transport` setting. Plaintext to a network address needs
+  `AllowPlaintext`.
+- **csilgen moved to 0.2.9.** A generated decoder reserves at most 1,024
+  elements from a length on the wire. Before, a small frame could reserve 32
+  times its own size.
+- **A webhook to a private, loopback, or link-local address is refused.** Put
+  the host in `alerts.allowedPrivateTargets`. An installation on one host that
+  sends a webhook to a local receiver must do this.
+- **The head refuses a batch from a source that it did not issue**, and rejects
+  an item whose project is not the project of its source.
+  `ingest.requireKnownSource: false` restores the old behavior.
+- **Intake refuses a frame larger than `collector.maxFrameBytes` (4 MiB).**
+  Before, the limit was `corndogs.maxPayloadBytes` (16 MiB). Intake closes a
+  connection that is idle for `collector.idleTimeout` (5 minutes), and the app
+  driver connects again.
+- **A scraped series has a new identity.** Each scraped series gets an
+  `instance` label with the host and port of its target. A counter from an
+  OpenMetrics target keeps its `_total` suffix. Without the label, two replicas
+  of one application were one series, and each scrape looked like a restart.
+  Queries on old scraped series and on new scraped series give two series.
+- **`metrics.maxBytesForEachMetric` is now the size of the active series.**
+  Before, it was the bytes since the collector started. A constant metric
+  filled it in some hours, and then each new series was refused.
+- **`split-tablet`, `move-tablet`, and `assign-project` refuse on a node that
+  runs consensus groups.** No code did the work after the topology changed.
+- **The store refuses to open an append log that has damage before
+  acknowledged frames.** Before, it removed all frames after the damage and
+  wrote nothing. The message gives the file, the position, and the procedure.
+- **The collector chart does not render with its default values.** Set
+  `corndogs.endpoint` and `head.endpoint`. The loopback defaults made a pod
+  that stopped at each start.
+- **Both services stop on SIGTERM.** They fail readiness, stop their
+  listeners, complete the requests in progress, and exit with code 0. The
+  charts set `terminationGracePeriodSeconds`.
+- **The Go app driver and the Rust app driver keep a batch that was not
+  acknowledged.** `MaxBatchAttempts` changes from 3 to 5 and counts only an
+  attempt with an unknown result. `Flush` can send more than one batch and
+  returns one receipt for all of them. In the browser package,
+  `attachUnloadFlush` now returns a function that removes the listeners.
+
+### Data that could be lost, and is not lost now
+
+- An acknowledged batch that was not in a segment was lost when the append log
+  was empty at a restart. The log started its positions at 0 again, below the
+  checkpoint.
+- A seal that failed for a reason other than disk space lost its rows.
+- A segment from a different node moved the local checkpoint, and the next
+  seal removed local frames that no segment held.
+- A replica that was behind the purged log installed a snapshot with no rows
+  and reported that it was current. It now copies the segments first. A
+  snapshot also carries the erasures.
+- A restart lost the committed controller commands, because the node kept the
+  applied position on disk and the state in memory.
+- A follower with a full disk skipped an entry permanently. It now stops.
+- A voter that returned with an empty disk could vote, and a majority could
+  then remove an acknowledged write. It now holds its vote until it is
+  current.
+- An app driver discarded a sealed batch when a send failed, and `Shutdown`
+  then reported 0 items.
+- A scrape lost most of its points. The event IDs of the compatibility edge
+  repeated each 16 counts, and the head removes a repeated event ID.
+
+### Isolation between tenants
+
+- `put-policy` authorizes on the scope. Before, a person with no role could
+  set the installation kill switch.
+- An alert rule can read only its own project.
+- An export writes a plain file name below `exports/<project>/` and does not
+  replace a file. Before, the caller gave a path, and the head truncated that
+  file.
+- `list-notifications` returns the notifications of one project.
+- The role-token rate limit is enforced. A revocation is not lost when an
+  enrollment occurs at the same time.
+
+### One stalled peer, and one bad value
+
+- Each RPC client has a read deadline and a write deadline of 30 seconds.
+  Before, a peer that accepted a connection and did not answer held the caller
+  with no limit, and readiness stayed correct.
+- The collector uses a pool of Corndogs connections, and a separate head
+  connection for delivery and for key checks. A watchdog fails readiness when
+  the delivery loop does not turn.
+- The forwarder waits from 1 to 30 seconds between probes of a head that does
+  not answer. Before, it claimed, failed, and wrote each batch again with no
+  wait.
+- A retried batch keeps its priority.
+- A panic in a request handler, a background loop, or a scrape is contained,
+  counted, and written to the log.
+- A decimal with an exponent outside -38 to 38 rejects one item. Before, the
+  head tried to allocate the zeros, stopped, and received the same durable
+  batch again after each restart.
+- A query checks its deadline inside its loops. Each project has a limit on
+  concurrent queries. A query tree has a depth limit in the executor.
+- An alert rule with `sustained_ms` or `for_ms` above zero now fires. Before, it
+  could not.
+- Two projects can each have a rule with the same name. Before, one of them
+  was not evaluated.
+- The downsample pass follows a durable watermark and does not skip a window.
+  It no longer counts a rollup row a second time.
+
+### Easier to use
+
+- README has an installation path and a list of the ways to monitor an
+  application.
+- Each app driver and the browser package has a README with a complete first
+  program, a table of failures, and the defaults.
+- The Go app driver has `Run`, `Stats`, `OnError`, `DryRun`, `StartSpan`,
+  `Middleware`, `ErrorFrom`, and `FromBrowser`. The Rust app driver has the
+  equivalent functions, a quick-start example, and the constructors that only
+  the Go app driver had.
+- The head has `member add`, `member remove`, and `member list`. `provision`
+  gives the operators the new workspace. The dashboard accepts a session
+  token.
+- The head chart has a maintenance Job for the administration verbs, Secret
+  and environment values, resource requests, a container security context,
+  and an optional NetworkPolicy and ServiceMonitor. A replicated installation
+  gives each pod its own `replication.advertise` address.
+- `deploy/monitoring/` has alert rules for TallyOwl itself. A test fails when
+  a rule names an instrument that no service registers.
+- A scrape target that is down gives an `up` series with the value 0. The
+  OpenTelemetry receiver refuses a body that it cannot read. Before, it
+  answered 200.
+
+### What is not in these changes
+
+- **Unix sockets on Windows.** A `unix:` address works on Linux and macOS. On
+  Windows it is refused with a message.
+- A control operation for a key, a member, an erasure, or an export on a head
+  that runs. Each of these needs a new CSIL operation.
+- A limit on the memory of the segment cache. An opened segment stays in
+  memory.
+- Authentication, TLS, and service discovery for scrape targets.
+- A multiplexed connection between consensus peers.
+- A second roll-up of a window when a point arrives after
+  `metrics.downsampleLatenessGrace`.
+
 ## 0.2.0 — 2026-08-12
 
 The first published release. It is the first build of TallyOwl with package

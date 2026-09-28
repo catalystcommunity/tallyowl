@@ -2,11 +2,25 @@
 // Source: <csil spec>
 // Target: typescript-client
 
-import type { CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, PolicyVersionRequest, PolicyVersionResponse } from "./types.gen.ts";
-import { fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromPolicyVersionResponseCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, toPolicyVersionRequestCbor } from "./codec.gen.ts";
+import type { AlertNotifyRequest, AlertNotifyResponse, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, PolicyVersionRequest, PolicyVersionResponse } from "./types.gen.ts";
+import { fromAlertNotifyResponseCbor, fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromPolicyVersionResponseCbor, toAlertNotifyRequestCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, toPolicyVersionRequestCbor } from "./codec.gen.ts";
 
 export interface AsyncServiceTransport {
   call(service: string, op: string, req: Uint8Array): Promise<Uint8Array>;
+}
+
+export class TallyOwlAlertReceiverAsyncClient {
+  constructor(private readonly t: AsyncServiceTransport) {}
+
+  /**
+   * Take one signed alert notification.
+   * @throws {ServiceError} when the API returns an error response
+   * @throws transport errors (network, timeout) raised by the transport
+   */
+  async notify(req: AlertNotifyRequest): Promise<AlertNotifyResponse> {
+    const csilResp = await this.t.call("TallyOwlAlertReceiver", "notify", toAlertNotifyRequestCbor(req));
+    return fromAlertNotifyResponseCbor(csilResp);
+  }
 }
 
 export class TallyOwlIngestAsyncClient {
@@ -44,8 +58,10 @@ export class TallyOwlIngestAsyncClient {
 }
 
 export class AsyncApiClient {
+  readonly tallyOwlAlertReceiver: TallyOwlAlertReceiverAsyncClient;
   readonly tallyOwlIngest: TallyOwlIngestAsyncClient;
   constructor(t: AsyncServiceTransport) {
+    this.tallyOwlAlertReceiver = new TallyOwlAlertReceiverAsyncClient(t);
     this.tallyOwlIngest = new TallyOwlIngestAsyncClient(t);
   }
 }

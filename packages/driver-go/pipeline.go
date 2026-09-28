@@ -35,8 +35,11 @@ type Pipeline struct {
 	address        string
 	credential     *string
 	connectTimeout time.Duration
-	maxFrameBytes  int
-	window         int
+	// callTimeout bounds one send and one wait for a reply. Zero means no bound.
+	callTimeout   time.Duration
+	maxFrameBytes int
+	window        int
+	security      Transport
 
 	conn     net.Conn
 	carrier  *transport.StreamCarrier
@@ -67,6 +70,21 @@ func (p *Pipeline) WithCredential(credential string) *Pipeline {
 	return p
 }
 
+// WithCallTimeout bounds each send and each wait for a reply.
+func (p *Pipeline) WithCallTimeout(timeout time.Duration) *Pipeline {
+	p.callTimeout = timeout
+	return p
+}
+
+// SetCallTimeout changes the bound for every later send and receive.
+func (p *Pipeline) SetCallTimeout(timeout time.Duration) { p.callTimeout = timeout }
+
+// WithTransport reaches the peer by the given transport. See Transport.
+func (p *Pipeline) WithTransport(security Transport) *Pipeline {
+	p.security = security
+	return p
+}
+
 // Address is the peer this pipeline reaches.
 func (p *Pipeline) Address() string { return p.address }
 
@@ -80,9 +98,9 @@ func (p *Pipeline) Window() int { return p.window }
 func (p *Pipeline) HasRoom() bool { return p.inFlight < p.window }
 
 func (p *Pipeline) connect() error {
-	conn, err := net.DialTimeout("tcp", p.address, p.connectTimeout)
+	conn, err := dial(p.address, p.security, dialTimeout(p.connectTimeout, p.callTimeout))
 	if err != nil {
-		return fmt.Errorf("we could not reach %s. %w", p.address, err)
+		return err
 	}
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
@@ -116,6 +134,9 @@ func (p *Pipeline) Send(service, op string, payload []byte) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("the request could not be encoded: %w", err)
 	}
+	if p.callTimeout > 0 {
+		_ = p.conn.SetWriteDeadline(time.Now().Add(p.callTimeout))
+	}
 	if err := p.carrier.SendFrame(frame); err != nil {
 		// Every outstanding call on this connection now has an unknown fate.
 		// The caller retries them by their stable IDs.
@@ -137,6 +158,9 @@ func (p *Pipeline) Recv() (uint64, *transport.RpcResponse, error) {
 		p.Reset()
 		return 0, nil, fmt.Errorf(
 			"the connection to %s closed with replies outstanding", p.address)
+	}
+	if p.callTimeout > 0 {
+		_ = p.conn.SetReadDeadline(time.Now().Add(p.callTimeout))
 	}
 	frame, err := p.carrier.RecvFrame()
 	if err != nil {

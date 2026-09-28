@@ -33,8 +33,9 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use csilgen_transport::rpc::{RpcRequest, RpcResponse};
 use tallyowl_obs::log::Logger;
@@ -47,6 +48,42 @@ use crate::service::CONTROL_SERVICE;
 /// A query tree is small and a sign-in callback is a few kilobytes. Anything
 /// larger is a mistake or an attempt, and both are refused before allocation.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// The most bytes the request line and the headers may take together.
+///
+/// A browser sends a few hundred. A line with no end used to grow a `String`
+/// until the head, which also does ingest, ran out of memory.
+const MAX_HEAD_BYTES: u64 = 16 * 1024;
+
+/// The most headers one request may carry.
+const MAX_HEADERS: usize = 64;
+
+/// What bounds one connection, and how many there may be.
+///
+/// **This surface faces a browser and shares a process with ingest**, so a
+/// client that does nothing must cost nothing for long. Every connection has
+/// one deadline for the whole request, not one for each read: a read timeout
+/// alone lets a client that sends one byte every few seconds hold a thread for
+/// days.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// How long a client has to send its whole request.
+    pub request_deadline: Duration,
+    /// How long one write of the reply may wait on a client that is not reading.
+    pub write_timeout: Duration,
+    /// How many connections are served at one time. One more is answered 503.
+    pub max_connections: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits {
+            request_deadline: Duration::from_secs(10),
+            write_timeout: Duration::from_secs(10),
+            max_connections: 256,
+        }
+    }
+}
 
 /// A running dashboard surface. Dropping the handle asks it to stop.
 pub struct DashboardServer {
@@ -81,6 +118,10 @@ pub struct Settings {
     /// a sign-in. It is a path rather than a whole URL, because the whole URL is
     /// `linkkeys.callbackUrl` and the two must not drift.
     pub callback_path: String,
+    /// `dashboard.allowPlaintext`. The dashboard serves plaintext and carries
+    /// session tokens, so a network address needs a gateway that ends TLS in
+    /// front of it, and this setting says that one is there. D62.
+    pub allow_plaintext: bool,
 }
 
 impl Default for Settings {
@@ -89,8 +130,19 @@ impl Default for Settings {
             assets: PathBuf::from("packages/dashboard/dist"),
             health: None,
             callback_path: "/sign-in/callback".to_string(),
+            allow_plaintext: false,
         }
     }
+}
+
+/// Whether an address to listen on is loopback, so nothing crosses a network.
+fn is_loopback(address: &str) -> bool {
+    let host = address.rsplit_once(':').map_or(address, |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Start the dashboard surface.
@@ -100,11 +152,31 @@ pub fn start(
     settings: Settings,
     logger: Arc<Logger>,
 ) -> std::io::Result<DashboardServer> {
+    start_with(address, dispatcher, settings, Limits::default(), logger)
+}
+
+/// Start the dashboard surface with its own limits.
+pub fn start_with(
+    address: &str,
+    dispatcher: Arc<dyn Dispatcher>,
+    settings: Settings,
+    limits: Limits,
+    logger: Arc<Logger>,
+) -> std::io::Result<DashboardServer> {
+    if !settings.allow_plaintext && !is_loopback(address) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "`dashboard.listen` is `{address}`, which is reached over a network, and the dashboard serves plaintext and carries session tokens. Put it behind a gateway that ends TLS and set `dashboard.allowPlaintext: true`, or listen on a loopback address."
+            ),
+        ));
+    }
     let listener = TcpListener::bind(address)?;
     let local_address = listener.local_addr()?;
     let stopping = Arc::new(AtomicBool::new(false));
     let loop_stopping = Arc::clone(&stopping);
     let settings = Arc::new(settings);
+    let open = Arc::new(AtomicUsize::new(0));
 
     std::thread::Builder::new()
         .name("tallyowl-dashboard".into())
@@ -113,13 +185,33 @@ pub fn start(
                 if loop_stopping.load(Ordering::Relaxed) {
                     break;
                 }
-                let Ok(stream) = stream else { continue };
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_write_timeout(Some(limits.write_timeout));
+                // The count rises here and not in the thread, so the limit is
+                // on threads that exist and not on threads that have started.
+                if open.fetch_add(1, Ordering::SeqCst) >= limits.max_connections {
+                    open.fetch_sub(1, Ordering::SeqCst);
+                    let _ = write_response(
+                        &mut stream,
+                        503,
+                        "text/plain; charset=utf-8",
+                        b"The dashboard is serving as many connections as it permits. Try again.",
+                    );
+                    continue;
+                }
+                let served = Served(Arc::clone(&open));
                 let dispatcher = Arc::clone(&dispatcher);
                 let settings = Arc::clone(&settings);
                 let logger = Arc::clone(&logger);
-                std::thread::spawn(move || {
-                    serve_one(stream, &dispatcher, &settings, &logger);
-                });
+                let spawned = std::thread::Builder::new()
+                    .name("tallyowl-dashboard-request".into())
+                    .spawn(move || {
+                        let _served = served;
+                        serve_one(stream, &dispatcher, &settings, limits, &logger);
+                    });
+                // A thread the system would not start drops its closure, and
+                // the count with it.
+                drop(spawned);
             }
         })?;
 
@@ -129,20 +221,59 @@ pub fn start(
     })
 }
 
+/// One served connection. Dropping it gives the place back, whether the thread
+/// returned or unwound.
+struct Served(Arc<AtomicUsize>);
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A socket that stops answering reads at one moment.
+///
+/// Each read gets the time that is left, so the deadline is for the whole
+/// request whatever the client's pace.
+struct Deadlined<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl Read for Deadlined<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(buffer)
+    }
+}
+
 fn serve_one(
     mut stream: TcpStream,
     dispatcher: &Arc<dyn Dispatcher>,
     settings: &Settings,
+    limits: Limits,
     logger: &Logger,
 ) {
-    let Some(request) = read_request(&mut stream) else {
-        let _ = write_response(
-            &mut stream,
-            400,
-            "text/plain; charset=utf-8",
-            b"Bad request.",
-        );
-        return;
+    let read = read_request(Deadlined {
+        stream: &stream,
+        until: Instant::now() + limits.request_deadline,
+    });
+    let request = match read {
+        Ok(request) => request,
+        Err(refusal) => {
+            let _ = write_response(
+                &mut stream,
+                refusal.status(),
+                "text/plain; charset=utf-8",
+                refusal.message().as_bytes(),
+            );
+            return;
+        }
     };
 
     let path = request.path.as_str();
@@ -199,7 +330,12 @@ fn serve_one(
             }
         }
         ("GET", _) if path == "/" || is_callback => {
-            let _ = write_response(&mut stream, 200, "text/html; charset=utf-8", DOCUMENT);
+            let _ = write_response(
+                &mut stream,
+                200,
+                "text/html; charset=utf-8",
+                &document(&settings.callback_path),
+            );
         }
         _ => {
             let _ = write_response(
@@ -275,13 +411,72 @@ pub struct HttpRequest {
     pub body: Vec<u8>,
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
+/// Why a request was not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unread {
+    /// It was not an HTTP request, or the client went away.
+    Malformed,
+    /// The request line and headers passed [`MAX_HEAD_BYTES`] or
+    /// [`MAX_HEADERS`].
+    HeadTooLarge,
+    /// The body is larger than [`MAX_BODY_BYTES`].
+    BodyTooLarge,
+    /// The whole request did not arrive inside the deadline.
+    TooSlow,
+}
+
+impl Unread {
+    fn status(self) -> u16 {
+        match self {
+            Unread::Malformed => 400,
+            Unread::HeadTooLarge => 431,
+            Unread::BodyTooLarge => 413,
+            Unread::TooSlow => 408,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Unread::Malformed => "Bad request.",
+            Unread::HeadTooLarge => "The request headers are larger than this address reads.",
+            Unread::BodyTooLarge => "The request body is larger than this address reads.",
+            Unread::TooSlow => "The request did not arrive in time.",
+        }
+    }
+}
+
+fn unread(error: std::io::Error) -> Unread {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => Unread::TooSlow,
+        _ => Unread::Malformed,
+    }
+}
+
+/// Read one line of the head, and take it out of what the head has left.
+///
+/// The read is through `take`, so a line with no end stops at the budget and
+/// never grows past it.
+fn read_head_line(reader: &mut impl BufRead, left: &mut u64) -> Result<String, Unread> {
     let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
+    let taken = reader
+        .by_ref()
+        .take(*left)
+        .read_line(&mut line)
+        .map_err(unread)? as u64;
+    *left -= taken.min(*left);
+    if !line.ends_with('\n') && taken > 0 && *left == 0 {
+        return Err(Unread::HeadTooLarge);
+    }
+    Ok(line)
+}
+
+pub fn read_request(stream: impl Read) -> Result<HttpRequest, Unread> {
+    let mut reader = BufReader::new(stream);
+    let mut left = MAX_HEAD_BYTES;
+    let line = read_head_line(&mut reader, &mut left)?;
     let mut parts = line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let target = parts.next()?.to_string();
+    let method = parts.next().ok_or(Unread::Malformed)?.to_string();
+    let target = parts.next().ok_or(Unread::Malformed)?.to_string();
     // The query string belongs to the document, not to the router.
     let path = target
         .split_once('?')
@@ -290,14 +485,16 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
 
     let mut content_length = 0usize;
     let mut authorization = None;
+    let mut headers = 0;
     loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header).ok()? == 0 {
-            break;
-        }
+        let header = read_head_line(&mut reader, &mut left)?;
         let header = header.trim_end();
         if header.is_empty() {
             break;
+        }
+        headers += 1;
+        if headers > MAX_HEADERS {
+            return Err(Unread::HeadTooLarge);
         }
         if let Some((name, value)) = header.split_once(':') {
             let value = value.trim();
@@ -320,14 +517,14 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     // The limit is checked before the allocation, so an oversized body never
     // reaches memory.
     if content_length > MAX_BODY_BYTES {
-        return None;
+        return Err(Unread::BodyTooLarge);
     }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader.read_exact(&mut body).ok()?;
+        reader.read_exact(&mut body).map_err(unread)?;
     }
 
-    Some(HttpRequest {
+    Ok(HttpRequest {
         method,
         path,
         authorization,
@@ -346,6 +543,9 @@ fn write_response(
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
+        408 => "Request Timeout",
+        413 => "Content Too Large",
+        431 => "Request Header Fields Too Large",
         503 => "Service Unavailable",
         _ => "Error",
     };
@@ -450,11 +650,23 @@ fn json_text(value: &str) -> String {
 ///
 /// It carries no logic and no data. Everything it shows arrives over the
 /// carrier, so this file never needs to change when a view does.
-const DOCUMENT: &[u8] = br#"<!doctype html>
+///
+/// The one value it does carry is where a sign-in returns to. The document used
+/// to assume `/sign-in/callback`, and an installation that set
+/// `dashboard.callbackPath` to anything else had every sign-in refused with
+/// "That is not this installation's sign-in address".
+fn document(callback_path: &str) -> Vec<u8> {
+    let callback_path = callback_path
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;");
+    format!(
+        r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="tallyowl-callback-path" content="{callback_path}">
 <title>TallyOwl</title>
 </head>
 <body>
@@ -462,7 +674,10 @@ const DOCUMENT: &[u8] = br#"<!doctype html>
 <script type="module" src="/assets/packages/dashboard/src/boot.js"></script>
 </body>
 </html>
-"#;
+"#
+    )
+    .into_bytes()
+}
 
 #[cfg(test)]
 mod tests {
@@ -569,5 +784,168 @@ mod tests {
             response.status,
             csilgen_transport::Status::MalformedEnvelope
         );
+    }
+
+    // ---- The HTTP reader, and what bounds it ------------------------------
+
+    #[test]
+    fn a_header_line_with_no_end_stops_at_the_limit() {
+        // The reader is endless. A `read_line` with no bound would never come
+        // back, and on a socket it grew a `String` until the head ran out of
+        // memory. This one reads 16 KiB and refuses.
+        let endless = b"GET / HTTP/1.1\r\nX-Fill: ".chain(std::io::repeat(b'a'));
+        assert_eq!(read_request(endless).err(), Some(Unread::HeadTooLarge));
+
+        let endless_first_line = std::io::repeat(b'G');
+        assert_eq!(
+            read_request(endless_first_line).err(),
+            Some(Unread::HeadTooLarge)
+        );
+    }
+
+    #[test]
+    fn too_many_headers_and_too_large_a_body_are_refused_before_they_are_held() {
+        let mut many = b"GET / HTTP/1.1\r\n".to_vec();
+        for index in 0..=MAX_HEADERS {
+            many.extend_from_slice(format!("X-{index}: v\r\n").as_bytes());
+        }
+        many.extend_from_slice(b"\r\n");
+        assert_eq!(read_request(&many[..]).err(), Some(Unread::HeadTooLarge));
+
+        let large = format!(
+            "POST /api/rpc HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        assert_eq!(
+            read_request(large.as_bytes()).err(),
+            Some(Unread::BodyTooLarge)
+        );
+    }
+
+    #[test]
+    fn an_ordinary_request_still_reads() {
+        let request = read_request(
+            &b"POST /api/rpc?x=1 HTTP/1.1\r\nAuthorization: Bearer tos_a_b\r\nContent-Length: 3\r\n\r\nabc"[..],
+        )
+        .expect("reads");
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/api/rpc");
+        assert_eq!(request.authorization.as_deref(), Some("tos_a_b"));
+        assert_eq!(request.body, b"abc");
+    }
+
+    fn surface(limits: Limits) -> DashboardServer {
+        start_with(
+            "127.0.0.1:0",
+            echo(),
+            Settings {
+                callback_path: "/auth/return".into(),
+                ..Settings::default()
+            },
+            limits,
+            Arc::new(Logger::new(
+                "tallyowl-head",
+                "0.0.0",
+                tallyowl_obs::log::Severity::Error,
+            )),
+        )
+        .expect("the dashboard listens")
+    }
+
+    fn reply_to(mut client: TcpStream) -> String {
+        let mut reply = String::new();
+        let _ = client.read_to_string(&mut reply);
+        reply
+    }
+
+    #[test]
+    fn a_client_that_never_finishes_its_request_is_answered_and_let_go() {
+        // The deadline is for the whole request. The client here sends part of
+        // a request and then only listens, so the test waits on the server's
+        // deadline and on nothing else.
+        let server = surface(Limits {
+            request_deadline: Duration::from_millis(40),
+            ..Limits::default()
+        });
+        let mut client = TcpStream::connect(server.local_address()).expect("connects");
+        client
+            .write_all(b"GET / HTTP/1.1\r\nX-Slow: ")
+            .expect("writes");
+        let reply = reply_to(client);
+        assert!(reply.starts_with("HTTP/1.1 408 "), "{reply}");
+    }
+
+    #[test]
+    fn one_connection_past_the_limit_is_told_to_try_again() {
+        let server = surface(Limits {
+            max_connections: 1,
+            ..Limits::default()
+        });
+        // The first connection sends nothing, so it holds the one place.
+        let holding = TcpStream::connect(server.local_address()).expect("connects");
+        let refused = TcpStream::connect(server.local_address()).expect("connects");
+        let reply = reply_to(refused);
+        assert!(reply.starts_with("HTTP/1.1 503 "), "{reply}");
+
+        // The place comes back when the first connection ends.
+        let mut holding = holding;
+        holding
+            .write_all(b"GET /nothing HTTP/1.1\r\n\r\n")
+            .expect("writes");
+        assert!(reply_to(holding).starts_with("HTTP/1.1 404 "));
+    }
+
+    #[test]
+    fn the_document_names_the_configured_callback_path() {
+        let server = surface(Limits::default());
+        let mut client = TcpStream::connect(server.local_address()).expect("connects");
+        client
+            .write_all(b"GET /auth/return?token=x HTTP/1.1\r\n\r\n")
+            .expect("writes");
+        let reply = reply_to(client);
+        assert!(reply.starts_with("HTTP/1.1 200 "), "{reply}");
+        assert!(
+            reply.contains(r#"<meta name="tallyowl-callback-path" content="/auth/return">"#),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn a_dashboard_on_a_network_address_needs_the_gateway_setting() {
+        let logger = || {
+            Arc::new(Logger::new(
+                "tallyowl-head",
+                "0.0.0",
+                tallyowl_obs::log::Severity::Error,
+            ))
+        };
+        let refused = start_with(
+            "0.0.0.0:0",
+            echo(),
+            Settings::default(),
+            Limits::default(),
+            logger(),
+        )
+        .err()
+        .expect("a network address with no gateway is refused");
+        assert!(
+            refused.to_string().contains("dashboard.allowPlaintext"),
+            "{refused}"
+        );
+
+        let behind_a_gateway = start_with(
+            "0.0.0.0:0",
+            echo(),
+            Settings {
+                allow_plaintext: true,
+                ..Settings::default()
+            },
+            Limits::default(),
+            logger(),
+        )
+        .expect("a gateway in front is the operator's statement");
+        behind_a_gateway.stop();
+        assert!(is_loopback("127.0.0.1:5120") && is_loopback("[::1]:5120"));
+        assert!(!is_loopback("10.0.0.4:5120"));
     }
 }

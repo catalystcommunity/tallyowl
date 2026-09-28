@@ -170,6 +170,13 @@ fn cbor_read_arg(b: &[u8], pos: &mut usize, low: u8) -> Result<u64, CsilCborErro
     Ok(v)
 }
 
+/// The most elements a decoded array or map reserves before it reads them. The
+/// declared length is checked against the remaining input, but one input byte can
+/// become a much larger value, so reserving the full declared length lets a small
+/// frame reserve a large multiple of its size at every nesting level. Past this
+/// bound, the vector grows only as elements are actually read.
+const CSIL_CBOR_PREALLOC_LIMIT: usize = 1024;
+
 fn cbor_dec(b: &[u8], pos: &mut usize, depth: usize) -> Result<CsilCborValue, CsilCborError> {
     if depth > 64 {
         return Err(CsilCborError(
@@ -253,7 +260,7 @@ fn cbor_dec(b: &[u8], pos: &mut usize, depth: usize) -> Result<CsilCborValue, Cs
                 ));
             }
             let n = arg as usize;
-            let mut items = Vec::with_capacity(n);
+            let mut items = Vec::with_capacity(n.min(CSIL_CBOR_PREALLOC_LIMIT));
             for _ in 0..n {
                 items.push(cbor_dec(b, pos, depth + 1)?);
             }
@@ -266,7 +273,7 @@ fn cbor_dec(b: &[u8], pos: &mut usize, depth: usize) -> Result<CsilCborValue, Cs
                 ));
             }
             let n = arg as usize;
-            let mut entries = Vec::with_capacity(n);
+            let mut entries = Vec::with_capacity(n.min(CSIL_CBOR_PREALLOC_LIMIT));
             for _ in 0..n {
                 let k = cbor_dec(b, pos, depth + 1)?;
                 let val = cbor_dec(b, pos, depth + 1)?;

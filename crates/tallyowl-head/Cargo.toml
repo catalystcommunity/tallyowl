@@ -26,6 +26,8 @@ tallyowl-driver-rust = { workspace = true }
 tallyowl-wire = { workspace = true }
 tallyowl-config = { workspace = true }
 tallyowl-rpc = { workspace = true }
+# The node identity for mutual TLS. D62.
+tallyowl-identity = { workspace = true }
 # The dashboard carrier reads and writes CSIL-RPC frames directly, because a
 # browser cannot open a socket and the frame is what every other hop carries.
 csilgen-transport = { workspace = true }
@@ -53,6 +55,8 @@ rustls-native-certs = { workspace = true }
 webpki-roots = { workspace = true }
 getrandom = { workspace = true }
 serde_json = { workspace = true }
+# The stop signal. See `shutdown` in src/main.rs.
+libc = { workspace = true }
 tallyowl-collector-api = { workspace = true }
 tallyowl-control-api = { workspace = true }
 
@@ -61,3 +65,6 @@ tallyowl-control-api = { workspace = true }
 # certificate request, and read back the certificate the head signed.
 rcgen = { workspace = true }
 x509-parser = { workspace = true }
+# The alert-callback test verifies what the head signs with the app driver's
+# own helper, so the two cannot drift apart.
+tallyowl-driver-rust = { workspace = true }

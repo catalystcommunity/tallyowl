@@ -44,10 +44,11 @@
 //! sound rather than a trick.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
 use rustls::Connection;
+
+use crate::address::Socket;
 
 /// How many raw bytes one socket read takes. A TLS record is at most 16 KiB of
 /// plaintext plus its overhead, so this holds a whole record most of the time
@@ -57,7 +58,7 @@ const RAW_READ_BYTES: usize = 32 * 1024;
 /// The socket's read direction, and whatever it carried that rustls has not
 /// taken yet.
 struct Input {
-    socket: TcpStream,
+    socket: Socket,
     /// Raw bytes read from the socket and not yet given to the connection.
     /// Almost always empty; it fills only when the caller is behind.
     waiting: Vec<u8>,
@@ -72,7 +73,7 @@ struct Session {
     input: Mutex<Input>,
     /// The socket, for writing. Held across "take the records out" and "put
     /// them on the socket", so records keep their order.
-    output: Mutex<TcpStream>,
+    output: Mutex<Socket>,
 }
 
 fn poisoned(what: &str) -> io::Error {
@@ -81,8 +82,16 @@ fn poisoned(what: &str) -> io::Error {
     ))
 }
 
+/// The rustls error travels inside the I/O error, so a caller can tell a
+/// certificate the peer refused from a connection that dropped. See
+/// [`rustls_error`].
 fn tls_error(e: rustls::Error) -> io::Error {
-    io::Error::other(format!("The secure connection failed: {e}"))
+    io::Error::other(e)
+}
+
+/// The TLS failure inside an I/O error, when there is one.
+pub fn rustls_error(error: &io::Error) -> Option<&rustls::Error> {
+    error.get_ref()?.downcast_ref::<rustls::Error>()
 }
 
 /// What one turn of the input pump achieved.
@@ -108,7 +117,8 @@ impl TlsDuplex {
     ///
     /// The handshake is not run here. It runs on the first read or write, or
     /// when a host calls [`TlsDuplex::handshake`].
-    pub fn new(connection: Connection, socket: TcpStream) -> io::Result<TlsDuplex> {
+    pub fn new(connection: Connection, socket: impl Into<Socket>) -> io::Result<TlsDuplex> {
+        let socket = socket.into();
         let output = socket.try_clone()?;
         Ok(TlsDuplex {
             session: Arc::new(Session {
@@ -206,7 +216,7 @@ impl TlsDuplex {
             input.waiting = raw;
         }
 
-        let taken = {
+        let (taken, processed) = {
             let mut connection = self
                 .session
                 .connection
@@ -220,11 +230,17 @@ impl TlsDuplex {
             }
             let mut rest = &input.waiting[..];
             let taken = connection.read_tls(&mut rest)?;
-            connection.process_new_packets().map_err(tls_error)?;
-            taken
+            (taken, connection.process_new_packets())
         };
         input.waiting.drain(..taken);
         drop(input);
+        if let Err(e) = processed {
+            // rustls queued an alert that says why, for example that the peer's
+            // certificate is not trusted. Send it, so the peer reads a reason
+            // rather than a dropped connection.
+            let _ = self.flush_records();
+            return Err(tls_error(e));
+        }
 
         // A handshake message or a key update needs an answer, and the peer
         // waits for it. Sending it here is what keeps a connection alive that is

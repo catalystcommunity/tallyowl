@@ -14,11 +14,9 @@
 package api
 
 import (
-	"fmt"
 	"net"
 	"sync"
 
-	collector "github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api"
 	ingest "github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-ingest-api"
 	tallyowl "github.com/CatalystCommunity/tallyowl/packages/driver-go"
 	transport "github.com/catalystcommunity/csilgen/transports/go"
@@ -221,94 +219,14 @@ func (b *Backend) Close() int {
 	return b.driver.Shutdown()
 }
 
-// fromIngest converts a browser item into the shape the collector takes.
+// fromIngest hands a browser item to the app driver's own conversion, which
+// takes every kind and every envelope field the browser package produces and
+// discards what a browser has no standing to claim.
 //
-// The two packages hold their own copies of the same shared types, so this is a
-// field-by-field copy rather than a cast. The golden vectors prove the copies
-// encode identically; this is where a drift would show up as a compile failure
-// instead of as a wrong byte.
+// The driver namespaces a browser's event ID by default, because a browser is
+// not trusted. This backend keeps the ID, because the test bed's ledger names
+// it and the simulator is the producer. A real application does not pass
+// KeepBrowserEventID. See DELIVERY.md section 2.
 func fromIngest(item ingest.TelemetryItem) (*tallyowl.Capture, error) {
-	envelope := item.Envelope
-	var capture *tallyowl.Capture
-
-	switch {
-	case item.Event != nil:
-		capture = tallyowl.Event(item.Event.Name)
-	case item.PageView != nil:
-		capture = tallyowl.PageView(item.PageView.Route)
-	case item.Conversion != nil:
-		var value *tallyowl.Value
-		if item.Conversion.Value != nil {
-			v := tallyowl.Value{Kind: tallyowl.KindDecimal, Decimal: toCollectorDecimal(*item.Conversion.Value)}
-			value = &v
-		}
-		currency := ""
-		if item.Conversion.Currency != nil {
-			currency = *item.Conversion.Currency
-		}
-		capture = tallyowl.Conversion(item.Conversion.Goal, value, currency)
-	case item.Error != nil:
-		capture = tallyowl.Error(item.Error.ErrorType, item.Error.Message, item.Error.Handled)
-	case item.SessionStart != nil:
-		capture = tallyowl.SessionStart(sessionOf(envelope))
-	case item.SessionEnd != nil:
-		capture = tallyowl.SessionEnd(sessionOf(envelope), item.SessionEnd.Reason)
-	default:
-		return nil, fmt.Errorf(
-			"the backend does not forward a %s item yet", envelope.Kind)
-	}
-
-	// A browser supplies an untrusted identifier. The app driver namespaces or
-	// replaces it before it seals a batch; here the backend keeps it, because
-	// the test bed's ledger names it and the simulator is the producer. A real
-	// application replaces it. See DELIVERY.md section 2.
-	capture = capture.WithEventID(envelope.EventId).At(int64(envelope.OccurredAt))
-	if envelope.SessionId != nil {
-		capture = capture.WithSession(string(*envelope.SessionId))
-	}
-	if envelope.RequestId != nil {
-		capture = capture.WithRequest(*envelope.RequestId)
-	}
-	if envelope.Release != nil {
-		capture = capture.WithRelease(*envelope.Release)
-	}
-	for _, property := range envelope.Properties {
-		value, err := tallyowl.ReadValue(collector.TypedValue{
-			Kind:         collector.TypedValueKind(property.Value.Kind),
-			BoolValue:    property.Value.BoolValue,
-			IntValue:     property.Value.IntValue,
-			UintValue:    property.Value.UintValue,
-			FloatValue:   property.Value.FloatValue,
-			DecimalValue: optionalDecimal(property.Value.DecimalValue),
-			TextValue:    property.Value.TextValue,
-			BytesValue:   property.Value.BytesValue,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("the property `%s` could not be read: %w", property.Key, err)
-		}
-		capture = capture.WithProperty(property.Key, value)
-	}
-	return capture, nil
-}
-
-// The two generated packages each carry their own copy of the exact-decimal
-// type. The value is the same integers either way, so the conversion is exact
-// and no digit is lost.
-func toCollectorDecimal(value ingest.CsilDecimal) collector.CsilDecimal {
-	return collector.CsilDecimal{Exponent: value.Exponent, Mantissa: value.Mantissa}
-}
-
-func optionalDecimal(value *ingest.CsilDecimal) *collector.CsilDecimal {
-	if value == nil {
-		return nil
-	}
-	out := toCollectorDecimal(*value)
-	return &out
-}
-
-func sessionOf(envelope ingest.Envelope) string {
-	if envelope.SessionId == nil {
-		return ""
-	}
-	return string(*envelope.SessionId)
+	return tallyowl.FromBrowser(item, tallyowl.KeepBrowserEventID())
 }

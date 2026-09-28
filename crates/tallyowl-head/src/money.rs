@@ -175,50 +175,94 @@ impl Amount {
             units: total,
             scale,
         } = working;
+        if weights.is_empty() {
+            return Vec::new();
+        }
 
+        // **The division is integer arithmetic from here on.** It was floating
+        // point: `floor(magnitude as f64 * share)`, and then one unit at a time
+        // for whatever was left. An `f64` holds 15 digits, so for a 28-digit
+        // amount the floors missed the total by about ten to the thirteenth,
+        // and the loop that handed the difference out one unit at a time ran
+        // for that many turns. One conversion with a long value, sent by an
+        // end user, kept every attribution query of its project spinning.
+        //
+        // A weight becomes a whole number of parts in `WEIGHT_PARTS`, which is
+        // all the precision an `f64` weight has. Every part below is then an
+        // exact floor, and what is left over is less than one unit for each
+        // weight.
+        const WEIGHT_PARTS: f64 = 1e15;
         let cleaned: Vec<f64> = weights
             .iter()
             .map(|w| if w.is_finite() && *w > 0.0 { *w } else { 0.0 })
             .collect();
         let sum: f64 = cleaned.iter().sum();
-        let shares: Vec<f64> = if sum > 0.0 {
-            cleaned.iter().map(|w| w / sum).collect()
+        let mut whole: Vec<u128> = if sum > 0.0 && sum.is_finite() {
+            cleaned
+                .iter()
+                .map(|w| (w / sum * WEIGHT_PARTS).round() as u128)
+                .collect()
         } else {
-            vec![1.0 / cleaned.len() as f64; cleaned.len()]
+            vec![1; cleaned.len()]
         };
+        if whole.iter().all(|w| *w == 0) {
+            whole = vec![1; cleaned.len()];
+        }
+        let all: u128 = whole.iter().sum();
 
         // The sign travels with the total rather than through the division, so
         // a refund divides the same way a sale does.
-        let magnitude = total.unsigned_abs() as f64;
+        let magnitude = total.unsigned_abs();
         let sign: i128 = if total < 0 { -1 } else { 1 };
-        let mut parts: Vec<i128> = shares
+
+        // `magnitude * weight / all` without the product, which does not fit.
+        // With `magnitude = q * all + r`, the quotient is `q * weight` plus
+        // `r * weight / all`, and `r * weight` fits because both are small.
+        let (quotient, rest) = (magnitude / all, magnitude % all);
+        let mut parts: Vec<u128> = Vec::with_capacity(whole.len());
+        let mut remainders: Vec<u128> = Vec::with_capacity(whole.len());
+        for weight in &whole {
+            let fine = rest.saturating_mul(*weight);
+            parts.push(quotient.saturating_mul(*weight).saturating_add(fine / all));
+            remainders.push(fine % all);
+        }
+        let handed_out: u128 = parts
             .iter()
-            .map(|share| (magnitude * share).floor() as i128)
-            .collect();
-        let handed_out: i128 = parts.iter().sum();
-        let mut left = total.unsigned_abs() as i128 - handed_out;
+            .fold(0u128, |sum, part| sum.saturating_add(*part));
+        let left = magnitude.saturating_sub(handed_out);
 
         // The remainders, largest first. A tie goes to the earlier touch, which
         // is a rule rather than whatever the sort happened to do.
         let mut order: Vec<usize> = (0..parts.len()).collect();
+        // Between equal remainders the larger weight comes first. Two weights
+        // closer than one part in `WEIGHT_PARTS` have equal remainders here, and
+        // the one a person wrote as larger must not lose the unit to its place
+        // in the list.
         order.sort_by(|a, b| {
-            let remainder = |index: usize| magnitude * shares[index] - parts[index] as f64;
-            remainder(*b)
-                .partial_cmp(&remainder(*a))
-                .unwrap_or(std::cmp::Ordering::Equal)
+            remainders[*b]
+                .cmp(&remainders[*a])
+                .then(
+                    cleaned[*b]
+                        .partial_cmp(&cleaned[*a])
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
                 .then(a.cmp(b))
         });
-        let mut at = 0;
-        while left > 0 && !order.is_empty() {
-            parts[order[at % order.len()]] += 1;
-            left -= 1;
-            at += 1;
+        // What is left is less than one unit for each weight, so this is one
+        // unit each for the largest remainders. It is a division and not a
+        // loop over units, so its cost never follows the amount.
+        let count = order.len() as u128;
+        let (each, extra) = (left / count, (left % count) as usize);
+        for (rank, index) in order.iter().enumerate() {
+            parts[*index] = parts[*index]
+                .saturating_add(each)
+                .saturating_add(u128::from(rank < extra));
         }
 
         parts
             .into_iter()
             .map(|units| Amount {
-                units: units * sign,
+                units: i128::try_from(units).unwrap_or(i128::MAX) * sign,
                 scale,
             })
             .collect()
@@ -228,6 +272,32 @@ impl Amount {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_amount_longer_than_a_float_can_hold_divides_at_once_and_adds_up() {
+        // 28 digits. The floating-point division missed this total by about
+        // ten to the thirteenth units and then handed them out one at a time.
+        let amount = Amount::parse("1234567890123456789012345678").unwrap();
+        let parts = amount.split(&[0.4, 0.4, 0.2]);
+        let sum = parts
+            .iter()
+            .fold(Amount::ZERO, |sum, part| sum.add(part).expect("it adds"));
+        assert_eq!(
+            sum.to_text(),
+            amount.to_text(),
+            "the parts do not add up to the amount"
+        );
+        // The shares are what the weights say, to the precision a weight has.
+        assert_eq!(&parts[0].to_text()[..10], "4938271560");
+        assert_eq!(parts[0], parts[1]);
+
+        // The largest amount there is, and a refund of it.
+        for units in [i128::MAX, i128::MIN + 1] {
+            let parts = Amount::new(units, 0).split(&[1.0, 1.0, 1.0]);
+            let sum: i128 = parts.iter().map(|part| part.units).sum();
+            assert_eq!(sum, units);
+        }
+    }
 
     #[test]
     fn text_survives_a_round_trip_without_growing_zeros() {

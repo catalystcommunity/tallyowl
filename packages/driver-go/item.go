@@ -310,6 +310,12 @@ func (c *Capture) WithAnonymous(anonymousID string) *Capture {
 	return c
 }
 
+// WithAnonymousID is WithAnonymous under the name the Rust app driver and the
+// browser package use, so one spelling works in all three.
+func (c *Capture) WithAnonymousID(anonymousID string) *Capture {
+	return c.WithAnonymous(anonymousID)
+}
+
 // Error records an error occurrence. The producer never supplies a group; the
 // projector computes the fingerprint. See D39.
 func Error(errorType, message string, handled bool) *Capture {

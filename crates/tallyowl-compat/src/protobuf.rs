@@ -83,11 +83,23 @@ pub struct Field<'a> {
 pub struct Reader<'a> {
     data: &'a [u8],
     at: usize,
+    faulted: bool,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(data: &'a [u8]) -> Reader<'a> {
-        Reader { data, at: 0 }
+        Reader {
+            data,
+            at: 0,
+            faulted: false,
+        }
+    }
+
+    /// Whether this reader stopped on something malformed rather than at the
+    /// end of its message. The receiver reads it for the request message, so a
+    /// body that is not a message at all is answered as one.
+    pub fn faulted(&self) -> bool {
+        self.faulted
     }
 
     /// The next field, or `None` at the end and on anything malformed.
@@ -95,11 +107,19 @@ impl<'a> Reader<'a> {
     /// Stopping on a malformed field rather than reporting it is deliberate:
     /// this is a compatibility edge, and half a valid message is worth more
     /// than a refusal of the whole push. What was read before the fault still
-    /// reaches storage, and the receiver counts the short read.
+    /// reaches storage, and [`Reader::faulted`] says the read was short.
     pub fn next_field(&mut self) -> Option<Field<'a>> {
         if self.at >= self.data.len() {
             return None;
         }
+        let field = self.read_field();
+        if field.is_none() {
+            self.faulted = true;
+        }
+        field
+    }
+
+    fn read_field(&mut self) -> Option<Field<'a>> {
         let tag = self.varint()?;
         let number = (tag >> 3) as u32;
         if number == 0 {

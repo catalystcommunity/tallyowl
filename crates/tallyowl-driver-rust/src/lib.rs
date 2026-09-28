@@ -10,7 +10,15 @@
 //! and that acknowledgement means Corndogs durably accepted the batch. Nothing
 //! here reports success for data it discarded.
 //!
-//! When the unacknowledged bound is reached, a durable send returns a typed
+//! **`capture` alone sends nothing.** A host either starts the flusher with
+//! [`Driver::spawn_flusher`], or calls `submit` and `drain` on a period of its
+//! own. See `README.md` in this crate.
+//!
+//! A sealed batch is retained until the collector acknowledges it. A failed
+//! attempt keeps the batch and its ID, and the next attempt sends the same
+//! batch. See the `driver` module for the whole life of a batch.
+//!
+//! When the unacknowledged bound is reached, `capture` returns a typed
 //! backpressure error. It does not silently become best effort. See D19 and
 //! `docs/DELIVERY.md` section 8.
 //!
@@ -26,30 +34,32 @@
 //! | Maximum ordinary frame | 1 MiB |
 //! | Unacknowledged data on one connection | 8 MiB |
 //! | Shutdown flush deadline | 2 s |
+//! | Deadline for one send or one reply | 10 s |
+//! | First wait after a failed attempt | 100 ms |
+//! | Longest wait between attempts | 30 s |
+//! | Attempts with no answer before a batch is given up | 5 |
 //!
 //! A critical event seals the current batch immediately, because the events
 //! worth waiting for are the ones worth not losing.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
-use tallyowl_collector_api::codec::{
-    decode_service_error, decode_submit_batch_response, encode_batch, encode_submit_batch_request,
-    encode_telemetry_item,
-};
 use tallyowl_collector_api::types::{
-    Batch, ConversionPayload, Envelope, ErrorPayload, EventPayload, PageViewPayload,
-    PropertyOrigin, SessionEndPayload, SessionEndPayload_reason, SessionStartPayload, SpanKind,
-    SpanPayload, SubmitBatchRequest, TelemetryItem, TelemetryKind,
+    AliasPayload, CampaignCostPayload, CampaignParameters, CampaignTouchPayload, Consent,
+    ConversionPayload, CsilDecimal, Envelope, ErrorPayload, EventPayload, GroupPayload,
+    IdentifyPayload, PageViewPayload, PropertyOrigin, SessionEndPayload, SessionStartPayload,
+    SpanPayload, TelemetryItem, TelemetryKind,
 };
-use tallyowl_obs::error::{ErrorCode, TallyOwlError};
 use tallyowl_obs::time::now_ms;
-use tallyowl_rpc::{Client, SERVICE_ERROR_VARIANT};
-use tallyowl_wire::{collector as wire, collector_items_bridge as items, Value};
+use tallyowl_wire::{collector as wire, collector_items_bridge as items};
 
+pub mod alerts;
+#[cfg(test)]
+mod delivery_tests;
+mod driver;
+mod instrument;
 pub mod metrics;
+mod transport;
 
 pub const SDK_NAME: &str = "tallyowl-driver-rust";
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -58,73 +68,23 @@ pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// collector and the head each accept it and the version before it. See
 /// `tallyowl_wire::protocol` and D31.
 pub use tallyowl_wire::protocol::PROTOCOL_VERSION;
-const SERVICE: &str = "TallyOwlCollector";
 
-/// Driver settings. The defaults are D19's.
-#[derive(Debug, Clone)]
-pub struct Settings {
-    pub collector_address: String,
-    pub credential: String,
-    pub max_items: usize,
-    pub max_batch_bytes: usize,
-    pub linger: Duration,
-    pub max_frame_bytes: usize,
-    pub max_unacknowledged_bytes: usize,
-    pub shutdown_flush_deadline: Duration,
-    /// How many sealed batches may be outstanding at one time on the pipelined
-    /// path. `docs/DELIVERY.md` section 3 permits "a configured number of
-    /// correlated batch calls"; this is that number.
-    ///
-    /// One reproduces the synchronous behaviour. The default is four, which is
-    /// what `submit` needs to stop being bounded by the round trip.
-    pub max_in_flight_batches: usize,
-    /// How many times a batch is sent again after a connection failure before
-    /// the driver reports it as lost.
-    pub max_batch_attempts: u32,
-    /// Properties this driver adds to every item. Their origin is `driver`.
-    pub properties: Vec<(String, String)>,
-}
+pub use alerts::{verify_alert_callback, AlertCallbackError, ALERT_CALLBACK_WINDOW_MS};
+pub use driver::{
+    retry_after, Driver, DryRun, ErrorHook, Flusher, Receipt, Rejected, Settings, Stats,
+};
+pub use instrument::{capture_panics, ActiveSpan};
+pub use transport::{TlsSettings, Transport};
 
-impl Settings {
-    pub fn new(collector_address: impl Into<String>, credential: impl Into<String>) -> Settings {
-        Settings {
-            collector_address: collector_address.into(),
-            credential: credential.into(),
-            max_items: 256,
-            max_batch_bytes: 512 * 1024,
-            linger: Duration::from_millis(100),
-            max_frame_bytes: 1024 * 1024,
-            max_unacknowledged_bytes: 8 * 1024 * 1024,
-            shutdown_flush_deadline: Duration::from_secs(2),
-            max_in_flight_batches: tallyowl_rpc::DEFAULT_CLIENT_WINDOW,
-            max_batch_attempts: 3,
-            properties: Vec::new(),
-        }
-    }
-
-    /// How many sealed batches may be outstanding at one time. One reproduces
-    /// the synchronous behaviour of `flush`.
-    pub fn with_max_in_flight_batches(mut self, batches: usize) -> Settings {
-        self.max_in_flight_batches = batches.max(1);
-        self
-    }
-
-    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Settings {
-        self.properties.push((key.into(), value.into()));
-        self
-    }
-}
-
-/// What one flush produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Receipt {
-    pub batch_id: [u8; 16],
-    pub accepted: u64,
-    /// The durable copies the collector reported. A caller that needs a
-    /// stronger boundary reads this rather than assuming one.
-    pub durable_copies: u64,
-    pub rejected: Vec<(Vec<u8>, String)>,
-}
+// One dependency line is enough. Every type a caller of this driver names comes
+// from here, so an application does not also declare the wire, the generated
+// interface, and the error crate.
+pub use tallyowl_collector_api::types::{
+    AlertNotifyRequest, AlertNotifyResponse, ConsentState, SessionEndPayload_reason,
+    SessionEndPayload_reason as SessionEndReason, SpanKind,
+};
+pub use tallyowl_obs::error::{ErrorCode, TallyOwlError};
+pub use tallyowl_wire::Value;
 
 /// A telemetry item, before the driver seals it into a batch.
 pub struct Capture {
@@ -387,6 +347,164 @@ impl Capture {
         self
     }
 
+    /// A measurement on this item. A measurement holds a number and an optional
+    /// unit; a value that is not a number is refused rather than converted.
+    pub fn with_measurement(
+        mut self,
+        key: &str,
+        value: Value,
+        unit: Option<&str>,
+    ) -> Result<Capture, TallyOwlError> {
+        let measurement = wire::measurement(key, value, unit)
+            .map_err(|e| TallyOwlError::invalid_argument(e.message))?;
+        self.item
+            .envelope
+            .measurements
+            .get_or_insert_with(Vec::new)
+            .push(measurement);
+        Ok(self)
+    }
+
+    /// The known end-user identifier this item belongs to.
+    pub fn with_end_user(mut self, end_user_id: &str) -> Capture {
+        self.item.envelope.end_user_id = Some(end_user_id.to_string());
+        self
+    }
+
+    /// The project-scoped anonymous identifier.
+    ///
+    /// An anonymous identifier is random and belongs to one project. The same
+    /// text in two projects is two different people, and TallyOwl treats it
+    /// that way.
+    pub fn with_anonymous_id(mut self, anonymous_id: &str) -> Capture {
+        self.item.envelope.anonymous_id = Some(anonymous_id.to_string());
+        self
+    }
+
+    /// The consent state this item was collected under.
+    ///
+    /// TallyOwl stores it and does not act on it by default. D30: consent
+    /// applies to personal data, TallyOwl does not guess a jurisdiction, and the
+    /// applicable collection policy decides what a denial means. Storing the
+    /// state is what lets a later policy act on data that arrived before it.
+    pub fn with_consent(mut self, marketing: ConsentState, analytics: ConsentState) -> Capture {
+        self.item.envelope.consent = Some(Consent {
+            marketing,
+            analytics,
+            policy_version: None,
+        });
+        self
+    }
+
+    /// Link an anonymous timeline to a known end user, from this point.
+    ///
+    /// The trusted app backend supplies the known identifier; TallyOwl never
+    /// derives one. `docs/DATA_MODEL.md` section 3.5.
+    ///
+    /// The anonymous identifier goes on the envelope, because that is what the
+    /// link is from: an identify with no anonymous identifier links nothing,
+    /// and the caller attaches one with `with_anonymous_id`.
+    pub fn identify(end_user_id: &str) -> Capture {
+        Capture {
+            item: items::identify(
+                envelope(TelemetryKind::Identify),
+                IdentifyPayload {
+                    end_user_id: end_user_id.to_string(),
+                },
+            ),
+            critical: false,
+        }
+        .with_end_user(end_user_id)
+    }
+
+    /// Merge two known identifiers.
+    ///
+    /// It is an explicit, auditable merge edge and it does not rewrite raw
+    /// events. A query follows the edge; the stored rows keep what they were
+    /// sent with.
+    pub fn alias(from_id: &str, to_id: &str) -> Capture {
+        Capture {
+            item: items::alias(
+                envelope(TelemetryKind::Alias),
+                AliasPayload {
+                    from_id: from_id.to_string(),
+                    to_id: to_id.to_string(),
+                },
+            ),
+            critical: false,
+        }
+    }
+
+    /// Associate the current end user with an organization, account, or team.
+    pub fn group(group_id: &str, group_kind: Option<&str>) -> Capture {
+        Capture {
+            item: items::group(
+                envelope(TelemetryKind::Group),
+                GroupPayload {
+                    group_id: group_id.to_string(),
+                    group_kind: group_kind.map(|kind| kind.to_string()),
+                },
+            ),
+            critical: false,
+        }
+    }
+
+    /// One campaign touch: somebody arrived from somewhere.
+    ///
+    /// A touch with no campaign and no referrer is a direct arrival, and it is
+    /// worth sending: an attribution model that skips direct touches can only
+    /// skip one it was told about.
+    pub fn campaign_touch(campaign: &Campaign) -> Capture {
+        Capture {
+            item: items::campaign_touch(
+                envelope(TelemetryKind::CampaignTouch),
+                CampaignTouchPayload {
+                    campaign: campaign.parameters(),
+                    referrer: campaign.referrer.clone(),
+                    referrer_domain: None,
+                    landing_route: campaign.landing.clone(),
+                },
+            ),
+            critical: false,
+        }
+    }
+
+    /// What a campaign cost over a period.
+    ///
+    /// It is a separate typed import rather than a property on an event,
+    /// because a return query must not need a cost value on every conversion.
+    /// `docs/DATA_MODEL.md` section 3.6. Money travels as an exact decimal and
+    /// never as a float, so the cost arrives as its canonical text and is
+    /// refused if it is not a number.
+    pub fn campaign_cost(
+        campaign: &str,
+        platform: Option<&str>,
+        cost: &str,
+        currency: &str,
+        period_start: i64,
+        period_end: i64,
+    ) -> Result<Capture, TallyOwlError> {
+        let Some(Value::Decimal { exponent, mantissa }) = Value::decimal_from_text(cost) else {
+            return Err(TallyOwlError::invalid_argument(format!(
+                "A campaign cost is an exact number, and `{cost}` is not one. Send the cost as text such as `125.50`."
+            )));
+        };
+        Ok(Capture {
+            item: items::campaign_cost(
+                envelope(TelemetryKind::CampaignCost),
+                CampaignCostPayload {
+                    campaign: campaign.to_string(),
+                    platform: platform.map(|p| p.to_string()),
+                    cost: CsilDecimal { exponent, mantissa },
+                    currency: currency.to_string(),
+                    period_start,
+                    period_end,
+                },
+            ),
+            critical: false,
+        })
+    }
+
     pub fn event_id(&self) -> Vec<u8> {
         self.item.envelope.event_id.clone()
     }
@@ -436,496 +554,6 @@ pub(crate) fn envelope(kind: TelemetryKind) -> Envelope {
         sdk_version: SDK_VERSION.to_string(),
         properties: Vec::new(),
         measurements: None,
-    }
-}
-
-/// The app driver.
-pub struct Driver {
-    settings: Settings,
-    client: Client,
-    buffer: Mutex<Buffer>,
-    sequence: AtomicU64,
-    /// The pipelined path. It opens on the first `submit` and stays closed for
-    /// an application that only ever calls `flush`, so an application keeps one
-    /// connection either way.
-    outbox: Mutex<Option<Outbox>>,
-}
-
-#[derive(Default)]
-struct Buffer {
-    items: Vec<TelemetryItem>,
-    bytes: usize,
-    opened_at: Option<Instant>,
-    seal_now: bool,
-}
-
-/// One sealed batch, retained until it is acknowledged.
-///
-/// D5: "The app retains the stable batch until that acknowledgement, then moves
-/// on." Retaining the encoded frame is what lets a connection failure be a
-/// resend rather than a loss, and the batch ID does not change across it, so
-/// final storage still deduplicates to one logical commit.
-struct Pending {
-    batch_id: [u8; 16],
-    encoded: Vec<u8>,
-    /// How many items this batch holds, so a shutdown reports unsent items
-    /// rather than unsent batches.
-    items: usize,
-    attempts: u32,
-}
-
-/// The pipelined connection and everything outstanding on it.
-struct Outbox {
-    pipeline: tallyowl_rpc::Pipeline,
-    pending: HashMap<u64, Pending>,
-}
-
-/// What a batch that never reached the durable boundary cost.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LostBatch {
-    pub batch_id: [u8; 16],
-    pub attempts: u32,
-}
-
-impl Driver {
-    pub fn new(settings: Settings) -> Driver {
-        // The credential rides on the connection, so every batch carries it.
-        // The collector resolves tenancy from it and stamps the result; the
-        // driver never sends a workspace, a project, or a source.
-        let client = Client::new(settings.collector_address.clone(), settings.max_frame_bytes)
-            .with_credential(settings.credential.clone());
-        Driver {
-            settings,
-            client,
-            buffer: Mutex::new(Buffer::default()),
-            sequence: AtomicU64::new(0),
-            outbox: Mutex::new(None),
-        }
-    }
-
-    pub fn settings(&self) -> &Settings {
-        &self.settings
-    }
-
-    /// Buffer one item. This does not reach the collector, and it makes no
-    /// durability claim.
-    ///
-    /// It returns a typed backpressure error rather than accepting data it would
-    /// then drop, because a driver that reports success for a discarded event
-    /// makes every count downstream wrong in a way nobody can find.
-    pub fn capture(&self, capture: Capture) -> Result<(), TallyOwlError> {
-        let mut item = capture.item;
-        item.envelope.sequence = Some(self.sequence.fetch_add(1, Ordering::Relaxed));
-        for (key, value) in &self.settings.properties {
-            item.envelope.properties.push(wire::property(
-                key,
-                Value::Text(value.clone()),
-                PropertyOrigin::Driver,
-            ));
-        }
-
-        let size = encode_telemetry_item(&item).len();
-        let mut buffer = self.buffer.lock().expect("driver lock");
-
-        if buffer.bytes + size > self.settings.max_unacknowledged_bytes {
-            return Err(TallyOwlError::new(
-                ErrorCode::ResourceExhausted,
-                "This application is producing telemetry faster than TallyOwl is accepting it. The event was not recorded. Send fewer events, or give the collector more capacity.",
-            )
-            .retryable(true));
-        }
-
-        if buffer.opened_at.is_none() {
-            buffer.opened_at = Some(Instant::now());
-        }
-        buffer.bytes += size;
-        buffer.items.push(item);
-        if capture.critical {
-            buffer.seal_now = true;
-        }
-        Ok(())
-    }
-
-    /// Take one snapshot of a meter and buffer every point it produced.
-    ///
-    /// A host calls this on its own period. The driver does not own a timer,
-    /// because a host that already has one would then have two, and the two
-    /// would disagree about when a period ended.
-    ///
-    /// Returns how many points were buffered. A point refused for backpressure
-    /// stops the snapshot and returns the error: the rest of the snapshot is
-    /// still in the meter, and a cumulative meter reports it whole in the next
-    /// period. That is why cumulative is the default.
-    pub fn publish_metrics(&self, meter: &metrics::Meter) -> Result<usize, TallyOwlError> {
-        let mut published = 0;
-        for capture in meter.snapshot() {
-            self.capture(capture)?;
-            published += 1;
-        }
-        Ok(published)
-    }
-
-    /// Whether the buffer has reached a seal condition.
-    pub fn should_flush(&self) -> bool {
-        let buffer = self.buffer.lock().expect("driver lock");
-        seal_reached(&buffer, &self.settings)
-    }
-
-    pub fn buffered(&self) -> usize {
-        self.buffer.lock().expect("driver lock").items.len()
-    }
-
-    /// Send everything buffered and wait for the durable acknowledgement.
-    ///
-    /// Returns `Ok(None)` when there was nothing to send.
-    pub fn flush(&self) -> Result<Option<Receipt>, TallyOwlError> {
-        let Some(batch) = self.seal()? else {
-            return Ok(None);
-        };
-        let response = self.client.call(SERVICE, "submit-batch", batch.encoded)?;
-        read_receipt(batch.batch_id, &response).map(Some)
-    }
-
-    /// Seal the buffer and take the encoded frame, or nothing when the buffer
-    /// is empty.
-    fn seal(&self) -> Result<Option<Pending>, TallyOwlError> {
-        let items = {
-            let mut buffer = self.buffer.lock().expect("driver lock");
-            if buffer.items.is_empty() {
-                return Ok(None);
-            }
-            let items = std::mem::take(&mut buffer.items);
-            buffer.bytes = 0;
-            buffer.opened_at = None;
-            buffer.seal_now = false;
-            items
-        };
-
-        // The batch keeps this ID across every retry and across a lost
-        // connection, so final storage deduplicates it to one logical commit.
-        let batch_id = new_batch_id();
-        let item_count = items.len();
-        let request = SubmitBatchRequest {
-            batch: Batch {
-                batch_id: batch_id.to_vec(),
-                items,
-                common_properties: None,
-                sealed_at: now_ms(),
-                compression: None,
-            },
-            policy_version: None,
-            // What this driver speaks. A collector and the head each accept
-            // the current version and the one before it, so an application
-            // that upgrades after the installation keeps being accepted.
-            protocol_version: Some(PROTOCOL_VERSION),
-        };
-
-        let encoded = encode_submit_batch_request(&request);
-        if encoded.len() > self.settings.max_frame_bytes {
-            return Err(TallyOwlError::over_limit(
-                "Batch",
-                &format!("{} KiB", encoded.len() / 1024),
-                &format!("{} KiB", self.settings.max_frame_bytes / 1024),
-                "Seal a smaller batch, or raise the frame limit for this driver.",
-            ));
-        }
-        Ok(Some(Pending {
-            batch_id,
-            encoded,
-            items: item_count,
-            attempts: 0,
-        }))
-    }
-
-    /// Seal the buffer and send it without waiting for its acknowledgement.
-    ///
-    /// This is the pipelined path, and it is the one an application with a
-    /// single telemetry worker wants. `flush` waits for the durable receipt of
-    /// the batch it sealed, so one worker is bounded by the round trip rather
-    /// than by anything in TallyOwl: at the D19 defaults that is about 5,400
-    /// events each second against a measured ceiling of 36,525. See
-    /// `docs/ALPHA_REPORT.md` section 3.3.
-    ///
-    /// The returned receipts are for batches that finished while this one was
-    /// making room in the window. It is normal for the list to be empty, and it
-    /// is normal for a receipt to arrive for a batch sealed several calls ago.
-    /// Nothing here reports a batch acknowledged before the collector did.
-    pub fn submit(&self) -> Result<Vec<Receipt>, TallyOwlError> {
-        let Some(batch) = self.seal()? else {
-            return Ok(Vec::new());
-        };
-
-        let mut guard = self.outbox.lock().expect("driver lock");
-        let outbox = guard.get_or_insert_with(|| Outbox {
-            pipeline: tallyowl_rpc::Pipeline::new(
-                self.settings.collector_address.clone(),
-                self.settings.max_frame_bytes,
-                self.settings.max_in_flight_batches,
-            )
-            .with_credential(self.settings.credential.clone()),
-            pending: HashMap::new(),
-        });
-
-        let mut receipts = Vec::new();
-        // Make room in the window before adding to it. Collecting a receipt is
-        // what frees a slot, so a caller that never collects never sends.
-        while !outbox.pipeline.has_room() {
-            receipts.push(self.collect_one(outbox)?);
-        }
-        self.send_pending(outbox, batch)?;
-        Ok(receipts)
-    }
-
-    /// Wait for every outstanding batch and return its receipt.
-    pub fn drain(&self) -> Result<Vec<Receipt>, TallyOwlError> {
-        let mut guard = self.outbox.lock().expect("driver lock");
-        let Some(outbox) = guard.as_mut() else {
-            return Ok(Vec::new());
-        };
-        let mut receipts = Vec::new();
-        while !outbox.pending.is_empty() {
-            receipts.push(self.collect_one(outbox)?);
-        }
-        Ok(receipts)
-    }
-
-    /// How many sealed batches are waiting for an acknowledgement.
-    pub fn outstanding(&self) -> usize {
-        self.outbox
-            .lock()
-            .expect("driver lock")
-            .as_ref()
-            .map(|outbox| outbox.pending.len())
-            .unwrap_or(0)
-    }
-
-    /// How many items sit in batches that are waiting for an acknowledgement.
-    pub fn outstanding_items(&self) -> usize {
-        self.outbox
-            .lock()
-            .expect("driver lock")
-            .as_ref()
-            .map(|outbox| outbox.pending.values().map(|p| p.items).sum())
-            .unwrap_or(0)
-    }
-
-    /// Send one batch, and send every retained batch again if the connection
-    /// failed under it.
-    fn send_pending(&self, outbox: &mut Outbox, batch: Pending) -> Result<(), TallyOwlError> {
-        let mut queue = vec![batch];
-        loop {
-            let Some(mut batch) = queue.pop() else {
-                return Ok(());
-            };
-            batch.attempts += 1;
-            match outbox
-                .pipeline
-                .send(SERVICE, "submit-batch", batch.encoded.clone())
-            {
-                Ok(id) => {
-                    outbox.pending.insert(id, batch);
-                }
-                Err(e) => {
-                    // The connection took everything outstanding with it. Each
-                    // retained batch keeps its ID, so sending it again stays one
-                    // logical commit.
-                    let mut lost = Vec::new();
-                    for (_, held) in outbox.pending.drain() {
-                        if held.attempts >= self.settings.max_batch_attempts {
-                            lost.push(LostBatch {
-                                batch_id: held.batch_id,
-                                attempts: held.attempts,
-                            });
-                        } else {
-                            queue.push(held);
-                        }
-                    }
-                    if batch.attempts >= self.settings.max_batch_attempts {
-                        lost.push(LostBatch {
-                            batch_id: batch.batch_id,
-                            attempts: batch.attempts,
-                        });
-                    } else {
-                        queue.push(batch);
-                    }
-                    if !lost.is_empty() {
-                        outbox.pipeline.reset();
-                        return Err(TallyOwlError::unavailable(format!(
-                            "{} batches were not recorded after {} attempts each. {e}",
-                            lost.len(),
-                            self.settings.max_batch_attempts
-                        )));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Wait for the next acknowledgement and match it to the batch it answers.
-    fn collect_one(&self, outbox: &mut Outbox) -> Result<Receipt, TallyOwlError> {
-        loop {
-            match outbox.pipeline.recv() {
-                Ok(Some((id, response))) => {
-                    let Some(batch) = outbox.pending.remove(&id) else {
-                        // A reply for a call this driver never made. The
-                        // connection is no longer trustworthy.
-                        outbox.pipeline.reset();
-                        outbox.pending.clear();
-                        return Err(TallyOwlError::internal(
-                            "The collector answered a batch this application did not send."
-                                .to_string(),
-                        ));
-                    };
-                    return read_receipt(batch.batch_id, &response);
-                }
-                Ok(None) => {
-                    return Err(TallyOwlError::internal(
-                        "There was no batch waiting for an acknowledgement.".to_string(),
-                    ))
-                }
-                Err(e) => {
-                    // Everything outstanding goes again on a fresh connection.
-                    let held: Vec<Pending> = outbox.pending.drain().map(|(_, p)| p).collect();
-                    if held.is_empty() {
-                        return Err(e);
-                    }
-                    for batch in held {
-                        if batch.attempts >= self.settings.max_batch_attempts {
-                            return Err(TallyOwlError::unavailable(format!(
-                                "A batch was not recorded after {} attempts. {e}",
-                                self.settings.max_batch_attempts
-                            )));
-                        }
-                        self.send_pending(outbox, batch)?;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Flush when a seal condition is reached, and do nothing otherwise.
-    pub fn flush_if_sealed(&self) -> Result<Option<Receipt>, TallyOwlError> {
-        if self.should_flush() {
-            self.flush()
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Stop accepting, drain until the deadline, and report what did not go.
-    ///
-    /// The count of unsent items is the return value, because a shutdown that
-    /// reports nothing is a shutdown that hides data loss.
-    pub fn shutdown(&self) -> usize {
-        let deadline = Instant::now() + self.settings.shutdown_flush_deadline;
-        // A batch that was already sent is not in the buffer, so a shutdown that
-        // ignored the pipeline would report zero unsent items while several
-        // batches were still waiting for their acknowledgement.
-        let unacknowledged = if self.outstanding() > 0 {
-            match self.drain() {
-                Ok(_) => 0,
-                Err(_) => self.outstanding_items(),
-            }
-        } else {
-            0
-        };
-        while Instant::now() < deadline {
-            match self.flush() {
-                Ok(None) => return unacknowledged,
-                Ok(Some(_)) => {
-                    if self.buffered() == 0 {
-                        return unacknowledged;
-                    }
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(20)),
-            }
-        }
-        self.buffered() + unacknowledged
-    }
-
-    /// The encoded size of a set of items. A caller sizing its own limits uses
-    /// this rather than guessing.
-    pub fn encoded_size(items: &[TelemetryItem]) -> usize {
-        encode_batch(&Batch {
-            batch_id: vec![0; 16],
-            items: items.to_vec(),
-            common_properties: None,
-            sealed_at: 0,
-            compression: None,
-        })
-        .len()
-    }
-}
-
-/// Read one collector reply into a receipt, or into the typed error it carried.
-fn read_receipt(
-    batch_id: [u8; 16],
-    response: &tallyowl_rpc::Response,
-) -> Result<Receipt, TallyOwlError> {
-    if response.variant.as_deref() == Some(SERVICE_ERROR_VARIANT) {
-        let error = decode_service_error(&response.payload).map_err(|e| {
-            TallyOwlError::internal(format!(
-                "The collector returned an error we could not read: {e}"
-            ))
-        })?;
-        return Err(
-            TallyOwlError::new(from_wire(&error.code), error.message).retryable(error.retryable)
-        );
-    }
-
-    let receipt = decode_submit_batch_response(&response.payload).map_err(|e| {
-        TallyOwlError::internal(format!(
-            "The collector returned a receipt we could not read: {e}"
-        ))
-    })?;
-
-    Ok(Receipt {
-        batch_id,
-        accepted: receipt.accepted,
-        durable_copies: receipt.durable_copies,
-        rejected: receipt
-            .rejected
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| (r.event_id, r.message))
-            .collect(),
-    })
-}
-
-fn seal_reached(buffer: &Buffer, settings: &Settings) -> bool {
-    if buffer.items.is_empty() {
-        return false;
-    }
-    if buffer.seal_now {
-        return true;
-    }
-    if buffer.items.len() >= settings.max_items {
-        return true;
-    }
-    if buffer.bytes >= settings.max_batch_bytes {
-        return true;
-    }
-    buffer
-        .opened_at
-        .map(|opened| opened.elapsed() >= settings.linger)
-        .unwrap_or(false)
-}
-
-fn from_wire(code: &tallyowl_collector_api::types::ErrorCode) -> ErrorCode {
-    use tallyowl_collector_api::types::ErrorCode as Wire;
-    match code {
-        Wire::InvalidArgument => ErrorCode::InvalidArgument,
-        Wire::Unauthenticated => ErrorCode::Unauthenticated,
-        Wire::PermissionDenied => ErrorCode::PermissionDenied,
-        Wire::NotFound => ErrorCode::NotFound,
-        Wire::AlreadyExists => ErrorCode::AlreadyExists,
-        Wire::ResourceExhausted => ErrorCode::ResourceExhausted,
-        Wire::FailedPrecondition => ErrorCode::FailedPrecondition,
-        Wire::Unavailable => ErrorCode::Unavailable,
-        Wire::SchemaUnsupported => ErrorCode::SchemaUnsupported,
-        Wire::BudgetExceeded => ErrorCode::BudgetExceeded,
-        Wire::IncompleteResult => ErrorCode::IncompleteResult,
-        Wire::Internal => ErrorCode::Internal,
     }
 }
 
@@ -990,9 +618,37 @@ fn process_random() -> [u8; 10] {
     out
 }
 
-/// A session, in the shape D11 requires. The client library issues the ID; a
-/// person cannot select it. It works on every surface, including a terminal user
-/// interface, because it assumes no cookie and no browser storage.
+/// The parameters a marketing link carries.
+///
+/// An application reads these out of the address a person arrived at. It does
+/// not name a channel: TallyOwl classifies the channel from the source, the
+/// medium, and the referring site, because a producer that could name its own
+/// channel could put paid traffic in the organic column.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Campaign {
+    pub source: Option<String>,
+    pub medium: Option<String>,
+    pub name: Option<String>,
+    pub term: Option<String>,
+    pub content: Option<String>,
+    pub click_id: Option<String>,
+    pub referrer: Option<String>,
+    pub landing: Option<String>,
+}
+
+impl Campaign {
+    fn parameters(&self) -> CampaignParameters {
+        CampaignParameters {
+            source: self.source.clone(),
+            medium: self.medium.clone(),
+            campaign: self.name.clone(),
+            term: self.term.clone(),
+            content: self.content.clone(),
+            click_id: self.click_id.clone(),
+        }
+    }
+}
+
 /// One stack frame, in the shape the group fingerprint reads.
 ///
 /// `in_app` is the field that matters most. Two defects in one application
@@ -1147,6 +803,9 @@ fn from_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// A session, in the shape D11 requires. The client library issues the ID; a
+/// person cannot select it. It works on every surface, including a terminal user
+/// interface, because it assumes no cookie and no browser storage.
 pub struct Session {
     id: String,
 }
@@ -1177,6 +836,7 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::time::Duration;
 
     fn settings() -> Settings {
         // Port 1 on the loopback refuses at once, so a test that expects no
@@ -1329,7 +989,7 @@ mod tests {
         let driver = Driver::new(settings);
         driver.capture(Capture::event("a")).unwrap();
 
-        let buffer = driver.buffer.lock().unwrap();
+        let buffer = driver.inner.buffer.lock().unwrap();
         let property = buffer.items[0]
             .envelope
             .properties
@@ -1350,7 +1010,7 @@ mod tests {
             )
             .unwrap();
 
-        let buffer = driver.buffer.lock().unwrap();
+        let buffer = driver.inner.buffer.lock().unwrap();
         let properties = &buffer.items[0].envelope.properties;
         let value = properties.iter().find(|p| p.key == "value").unwrap();
         assert_eq!(wire::read(&value.value).unwrap(), Value::Float(19.99));
@@ -1363,7 +1023,7 @@ mod tests {
         // something it cannot know, and the collector would discard it anyway.
         let driver = Driver::new(settings());
         driver.capture(Capture::event("a")).unwrap();
-        let buffer = driver.buffer.lock().unwrap();
+        let buffer = driver.inner.buffer.lock().unwrap();
         let envelope = &buffer.items[0].envelope;
         assert!(envelope.workspace_id.is_none());
         assert!(envelope.project_id.is_none());
@@ -1377,7 +1037,7 @@ mod tests {
         for _ in 0..3 {
             driver.capture(Capture::event("a")).unwrap();
         }
-        let buffer = driver.buffer.lock().unwrap();
+        let buffer = driver.inner.buffer.lock().unwrap();
         let sequences: Vec<u64> = buffer
             .items
             .iter()
@@ -1408,7 +1068,7 @@ mod tests {
                     .at(1_785_628_800_000),
             )
             .unwrap();
-        let buffer = driver.buffer.lock().unwrap();
+        let buffer = driver.inner.buffer.lock().unwrap();
         let envelope = &buffer.items[0].envelope;
         assert_eq!(envelope.session_id.as_deref(), Some("s-1"));
         assert_eq!(envelope.request_id.as_deref(), Some("r-1"));
@@ -1422,6 +1082,7 @@ mod pipeline_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use tallyowl_collector_api::codec::{
         decode_submit_batch_request, encode_submit_batch_response,
     };
@@ -1600,7 +1261,7 @@ mod pipeline_tests {
     }
 
     #[test]
-    fn a_collector_that_never_answers_reports_the_loss_rather_than_hanging() {
+    fn a_collector_that_is_unreachable_keeps_the_batch_rather_than_hanging_or_losing_it() {
         let driver = {
             let mut settings = Settings::new("127.0.0.1:1", "key-a");
             settings.max_items = 1;
@@ -1610,7 +1271,10 @@ mod pipeline_tests {
         driver.capture(Capture::event("a")).unwrap();
         let failure = driver.submit().unwrap_err();
         assert_eq!(failure.code, ErrorCode::Unavailable);
-        assert!(failure.message.contains("not recorded"));
+        assert!(failure.retryable);
+        // The batch never left, so it used no attempt and it is still held.
+        assert_eq!(driver.outstanding_items(), 1);
+        assert_eq!(driver.stats().lost, 0);
     }
 }
 

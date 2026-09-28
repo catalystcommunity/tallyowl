@@ -128,6 +128,9 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// How many envelope columns lead every export. The property columns follow.
+const ENVELOPE_COLUMNS: usize = 12;
+
 /// Which columns an export writes.
 ///
 /// The envelope columns are fixed. A property becomes a column when the rows
@@ -311,40 +314,144 @@ pub struct ExportRequest {
     pub reserve_bytes: u64,
 }
 
+/// The first width of one export window, and the narrowest and the widest.
+///
+/// **An export holds one window of rows at a time.** The store answers a scan
+/// with every row of the range it was asked for, so the range an export asks
+/// for is what bounds its memory. One hour is a guess; the width then follows
+/// the data, halving after a window that held more than [`WINDOW_ROWS`] and
+/// doubling after one that held few.
+const FIRST_WINDOW_MS: i64 = 3_600_000;
+const NARROWEST_WINDOW_MS: i64 = 60_000;
+const WIDEST_WINDOW_MS: i64 = 86_400_000;
+
+/// How many rows one window aims to stay under.
+const WINDOW_ROWS: usize = 250_000;
+
+/// How many windows one export may take.
+///
+/// At the widest window this is about 270 years. It exists so that a range of
+/// `0..i64::MAX` is refused in words and does not loop until somebody notices.
+const MOST_WINDOWS: u64 = 100_000;
+
+/// Walk a range one window at a time, oldest first.
+///
+/// `visit` gets the rows of one window and answers how many it held, which is
+/// what the next width follows.
+fn each_window(
+    store: &dyn Store,
+    request: &ExportRequest,
+    mut visit: impl FnMut(Vec<EventRow>) -> Result<(), ExportError>,
+) -> Result<(), ExportError> {
+    let too_wide = || ExportError {
+        message: format!(
+            "The export did not run. The range {} to {} is wider than one export can walk. \
+             Export a shorter range, for example one year at a time.",
+            request.range_start, request.range_end
+        ),
+    };
+    // Refused from the arithmetic, before the first scan. The count inside the
+    // loop covers a range that is legal here and dense enough to stay narrow.
+    let span = request.range_end.saturating_sub(request.range_start);
+    if span / WIDEST_WINDOW_MS > MOST_WINDOWS as i64 {
+        return Err(too_wide());
+    }
+    let mut from = request.range_start;
+    let mut width = FIRST_WINDOW_MS;
+    let mut windows = 0u64;
+    while from < request.range_end {
+        windows += 1;
+        if windows > MOST_WINDOWS {
+            return Err(too_wide());
+        }
+        let to = from.saturating_add(width).min(request.range_end);
+        let scanned = store.scan(request.project_id, from, to, request.basis)?;
+        if scanned.incomplete {
+            // An export is a compatibility contract: somebody reads the file
+            // later and believes it holds the range it names. An export that
+            // quietly dropped the rows it could not read would be a wrong
+            // answer that outlives this process.
+            return Err(ExportError {
+                message: "The export did not run. Some of the stored data for this range could \
+                          not be read, so the file would hold fewer rows than the range it \
+                          names. Repair or restore the damaged segment first."
+                    .to_string(),
+            });
+        }
+        let held = scanned.rows.len();
+        visit(scanned.rows)?;
+        width = match held {
+            held if held > WINDOW_ROWS => (width / 2).max(NARROWEST_WINDOW_MS),
+            held if held < WINDOW_ROWS / 4 => width.saturating_mul(2).min(WIDEST_WINDOW_MS),
+            _ => width,
+        };
+        from = to;
+    }
+    Ok(())
+}
+
+/// Widen `held` so that it can carry every column of `more`.
+fn merge_schema(held: &mut std::collections::BTreeMap<String, DataType>, more: &Schema) {
+    for field in more.fields().iter().skip(ENVELOPE_COLUMNS) {
+        held.entry(field.name().clone())
+            .and_modify(|kind| {
+                if kind != field.data_type() {
+                    *kind = DataType::Utf8;
+                }
+            })
+            .or_insert_with(|| field.data_type().clone());
+    }
+}
+
 /// Export one project's rows over one range to a Parquet file.
 ///
 /// The rows come from the store's own query path, so visible tombstones are
 /// already applied.
+///
+/// **Two passes, one window of rows in memory at a time.** Parquet wants its
+/// columns before its first row, and a property is a column only when a row
+/// holds it, so the first pass reads the range to learn the columns and the
+/// second writes one row group for each window. Telemetry that lands between
+/// the passes with a column the first pass did not see stops the export: a file
+/// that dropped a column without saying so is the wrong answer this crate
+/// exists to avoid.
+///
+/// **An export never replaces a file.** The destination is created new, and a
+/// name that is taken is refused.
 pub fn export_events(
     store: &dyn Store,
     request: &ExportRequest,
 ) -> Result<ExportManifest, ExportError> {
-    let ExportRequest {
-        project_id,
-        range_start,
-        range_end,
-        basis,
-        into,
-        tombstone_generation,
-        reserve_bytes,
-    } = request;
-    let (project_id, tombstone_generation) = (*project_id, *tombstone_generation);
-    let (range_start, range_end, basis) = (*range_start, *range_end, *basis);
-    let into: &Path = into;
-    let scanned = store.scan(project_id, range_start, range_end, basis)?;
-    if scanned.incomplete {
-        // An export is a compatibility contract: somebody reads the file later
-        // and believes it holds the range it names. An export that quietly
-        // dropped the rows it could not read would be a wrong answer that
-        // outlives this process.
+    let into: &Path = &request.into;
+    if request.range_end <= request.range_start {
         return Err(ExportError {
-            message: "The export did not run. Some of the stored data for this range could not \
-                      be read, so the file would hold fewer rows than the range it names. Repair \
-                      or restore the damaged segment first."
+            message: "The export did not run. It needs a time range whose end is after its start."
                 .to_string(),
         });
     }
-    let rows = scanned.rows;
+
+    // The first pass: the columns, and how many rows there are to make room for.
+    let mut properties = std::collections::BTreeMap::new();
+    let mut expected: u64 = 0;
+    each_window(store, request, |rows| {
+        expected += rows.len() as u64;
+        merge_schema(&mut properties, &schema_for(&rows));
+        Ok(())
+    })?;
+    let mut fields: Vec<Field> = schema_for(&[])
+        .fields()
+        .iter()
+        .map(|f| (**f).clone())
+        .collect();
+    for (name, kind) in &properties {
+        fields.push(Field::new(name, kind.clone(), true));
+    }
+    let schema = Schema::new(fields);
+    let columns: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
 
     if let Some(parent) = into.parent() {
         std::fs::create_dir_all(parent).map_err(|e| failed("create its directory", e))?;
@@ -354,53 +461,65 @@ pub fn export_events(
     // export displace live data. An export is the one write here that nobody is
     // waiting on and that nothing depends on, so it is the first to give way.
     //
-    // The estimate is the rows in hand at their in-memory size. Parquet is
-    // smaller than that in every measured case, so this refuses a little early
-    // rather than filling the device and then failing.
-    let estimate = rows.len() as u64 * ROW_BYTES_ESTIMATE;
+    // The estimate is the rows the first pass counted at a generous size.
+    // Parquet is smaller than that in every measured case, so this refuses a
+    // little early rather than filling the device and then failing.
     let space = Space::new(
         into.parent().unwrap_or_else(|| Path::new(".")),
-        *reserve_bytes,
+        request.reserve_bytes,
     );
-    space.check_bulk(Point::Export, estimate)?;
+    space.check_bulk(Point::Export, expected * ROW_BYTES_ESTIMATE)?;
 
-    let schema = schema_for(&rows);
-    let columns: Vec<String> = schema
-        .fields()
-        .iter()
-        .map(|field| field.name().clone())
-        .collect();
-
-    let file = File::create(into).map_err(|e| failed("create its file", e))?;
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .build();
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(properties))
-        .map_err(|e| failed("be started", e))?;
-
-    if !rows.is_empty() {
-        writer
-            .write(&build_batch(&schema, &rows)?)
-            .map_err(|e| failed("be written", e))?;
+    let taken = |e: std::io::Error, what: &Path| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => ExportError {
+            message: format!(
+                "The export did not run. A file named {} is already there, and an export never \
+                 replaces a file. Choose another name, or remove the old export first.",
+                what.display()
+            ),
+        },
+        _ => failed("create its file", e),
+    };
+    let manifest_path = manifest_path_for(into);
+    if manifest_path.exists() {
+        return Err(taken(
+            std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+            &manifest_path,
+        ));
     }
-    writer.close().map_err(|e| failed("be finished", e))?;
+    let file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(into)
+        .map_err(|e| taken(e, into))?;
+
+    let written = write_windows(store, request, &schema, file);
+    let rows = match written {
+        Ok(rows) => rows,
+        Err(e) => {
+            // This call created the file, so it is this call's to remove. Half
+            // an export left behind would read as a whole one.
+            let _ = std::fs::remove_file(into);
+            return Err(e);
+        }
+    };
 
     let file_bytes = std::fs::metadata(into)
         .map_err(|e| failed("be measured", e))?
         .len();
 
     let manifest = ExportManifest {
-        project_id,
-        range_start,
-        range_end,
-        basis: match basis {
+        project_id: request.project_id,
+        range_start: request.range_start,
+        range_end: request.range_end,
+        basis: match request.basis {
             TimeBasis::OccurredAt => "occurred_at",
             TimeBasis::ReceivedAt => "received_at",
             TimeBasis::CommittedAt => "committed_at",
         },
-        rows: rows.len(),
+        rows,
         columns,
-        tombstone_generation,
+        tombstone_generation: request.tombstone_generation,
         commit_watermark: store.commit_watermark(),
         file_bytes,
         relative_path: into
@@ -409,10 +528,61 @@ pub fn export_events(
             .unwrap_or_default(),
     };
 
-    std::fs::write(manifest_path_for(into), manifest.to_text())
+    std::fs::write(&manifest_path, manifest.to_text())
         .map_err(|e| failed("write its description", e))?;
 
     Ok(manifest)
+}
+
+/// The second pass: one row group for each window that held rows.
+fn write_windows(
+    store: &dyn Store,
+    request: &ExportRequest,
+    schema: &Schema,
+    file: File,
+) -> Result<usize, ExportError> {
+    let properties = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .build();
+    let mut writer = ArrowWriter::try_new(file, Arc::new(schema.clone()), Some(properties))
+        .map_err(|e| failed("be started", e))?;
+
+    let mut total = 0;
+    each_window(store, request, |rows| {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        check_fits(schema, &schema_for(&rows))?;
+        writer
+            .write(&build_batch(schema, &rows)?)
+            .map_err(|e| failed("be written", e))?;
+        // One window is one row group, so a reader can skip by time and this
+        // writer holds no more than one window.
+        writer.flush().map_err(|e| failed("be written", e))?;
+        total += rows.len();
+        Ok(())
+    })?;
+    writer.close().map_err(|e| failed("be finished", e))?;
+    Ok(total)
+}
+
+/// Refuse a window the columns of the first pass cannot carry.
+fn check_fits(fixed: &Schema, window: &Schema) -> Result<(), ExportError> {
+    for field in window.fields().iter().skip(ENVELOPE_COLUMNS) {
+        let fits = fixed.field_with_name(field.name()).is_ok_and(|held| {
+            held.data_type() == field.data_type() || *held.data_type() == DataType::Utf8
+        });
+        if !fits {
+            return Err(ExportError {
+                message: format!(
+                    "The export did not finish. New telemetry arrived while it ran, and the \
+                     property `{}` changed. Run the export again.",
+                    field.name().trim_start_matches("p_")
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Where the description of an export lives, beside the file it describes.

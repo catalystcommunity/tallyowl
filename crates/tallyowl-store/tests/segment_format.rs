@@ -486,3 +486,38 @@ fn the_measured_cost_for_each_event_is_reported_rather_than_assumed() {
         "a segment cost {each_event} bytes for each event, which is outside any plausible range"
     );
 }
+
+#[test]
+fn a_description_whose_item_count_was_changed_is_refused_before_it_sizes_anything() {
+    // The description is under no checksum of its own, and its item count used
+    // to size an allocation: a changed count stopped the process with
+    // "capacity overflow", and it did so while holding the store's lock.
+    let segment = write(10);
+    let mut bytes = segment.bytes.clone();
+
+    // CBOR text "rows" and then the count, which is 10 in its one-byte form.
+    let needle = [0x64, b'r', b'o', b'w', b's', 0x0a];
+    let header_at = bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("the description names its item count");
+    bytes[header_at + needle.len() - 1] = 0x0b;
+
+    let failure = match open(bytes.clone(), true) {
+        Err(failure) => failure,
+        Ok(_) => panic!("a description that disagrees with the directory opened"),
+    };
+    assert!(matches!(failure, FormatError::Damaged(_)));
+    assert!(failure
+        .to_string()
+        .contains("says it holds 11 items and lists 10"));
+
+    // Bytes that arrive from another node are checked whole before any of them
+    // is read, so the same change is refused there as a changed file.
+    let failure = match tallyowl_store::segment::open_received(bytes) {
+        Err(failure) => failure,
+        Ok(_) => panic!("a changed file was accepted from a peer"),
+    };
+    assert!(failure.to_string().contains("not the file it says it is"));
+    assert!(tallyowl_store::segment::open_received(segment.bytes.clone()).is_ok());
+}

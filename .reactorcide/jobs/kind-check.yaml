@@ -1,0 +1,24 @@
+name: tallyowl-kind-check
+description: "Install both charts in a disposable kind cluster and prove them in a real cluster."
+job:
+  image: containers.catalystsquad.com/public/reactorcide/runnerbase:latest
+  command: "runnerlib run --job-command true"
+  # The image build compiles the Rust workspace, and then the cluster, three
+  # releases, and every proof run in order. Each wait inside has its own bound.
+  timeout: 7200
+  priority: 10
+  working_dir: /job
+  capabilities:
+    # kind makes its nodes as containers, so this job needs a container daemon.
+    # Whether kind runs nested inside a job pod here is not proven yet.
+    - docker
+  resources:
+    cpu:
+      request: "4"
+      limit: "8"
+    memory:
+      limit: "12Gi"
+environment:
+  REACTORCIDE_TALLYOWL_JOB: kind-check
+run_local:
+  user: host

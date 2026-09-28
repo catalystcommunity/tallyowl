@@ -82,7 +82,9 @@ fn erasure(id: u8, user: &str) -> Tombstone {
         property: Some(("end_user".to_string(), user.to_string())),
         range: None,
         requested_at: BASE_TIME,
-        horizon: BASE_TIME + 30 * 86_400_000,
+        // Still standing whenever this runs. A date here would turn into a
+        // predicate past its horizon, which compaction removes.
+        horizon: i64::MAX / 2,
         reason: "The end user asked for their data to be removed.".into(),
         except_kinds: Vec::new(),
     }
@@ -388,10 +390,13 @@ fn compaction_groups_rows_by_the_correlation_value() {
     }
     store.commit([1; 16], [1; 16], mixed).unwrap();
 
-    // An erasure of a person who is not there still triggers the rewrite, which
-    // is what carries the grouping.
-    store.erase(&erasure(1, "u-absent")).unwrap();
-    compact(&store, eager_settings()).unwrap();
+    // A rewrite is what carries the grouping, and an erasure that takes rows
+    // out of the segment is what causes a rewrite. An erasure of a person who
+    // is not there used to cause one too, which is how one standing predicate
+    // came to rewrite its whole project on every pass.
+    store.erase(&erasure(1, "u-3")).unwrap();
+    let outcome = compact(&store, eager_settings()).unwrap();
+    assert_eq!(outcome.rewritten, 1);
 
     let manifests = store.catalog().manifests().unwrap();
     let physical = store.read_segment_rows(&manifests[0]).unwrap();
@@ -976,4 +981,228 @@ fn cold_consolidation_does_not_resurrect_an_erased_row() {
         );
     }
     assert_eq!(visible(&store).len(), 60);
+}
+
+// ---------------------------------------------------------------------------
+// A standing predicate must not make every pass rewrite its project
+// ---------------------------------------------------------------------------
+
+/// Three segments that hold the erased person and one that does not.
+fn a_store_with_one_untouched_segment(place: &PathBuf) -> (SegmentedStore, Vec<[u8; 16]>) {
+    let store = store(place);
+    for batch in 0..3u8 {
+        store
+            .commit([1; 16], [batch; 16], rows(40, u16::from(batch) * 100))
+            .unwrap();
+    }
+    let mut untouched = rows(40, 900);
+    for row in &mut untouched {
+        row.properties.insert(
+            "end_user".into(),
+            (PropertyValue::Text("u-777".into()), "client".into()),
+        );
+    }
+    store.commit([1; 16], [9; 16], untouched).unwrap();
+    let ids = store
+        .catalog()
+        .manifests()
+        .unwrap()
+        .iter()
+        .map(|manifest| manifest.segment_id)
+        .collect();
+    (store, ids)
+}
+
+#[test]
+fn a_segment_no_erasure_took_a_row_from_is_left_exactly_as_it_was() {
+    let place = directory("unchanged-stays");
+    let (store, before) = a_store_with_one_untouched_segment(&place);
+    store.erase(&erasure(1, "u-042")).unwrap();
+
+    let outcome = compact(&store, eager_settings()).unwrap();
+    assert_eq!(
+        outcome.rewritten, 3,
+        "only the segments that held the person"
+    );
+    assert_eq!(outcome.rows_erased, 60);
+
+    let after: Vec<[u8; 16]> = store
+        .catalog()
+        .manifests()
+        .unwrap()
+        .iter()
+        .map(|manifest| manifest.segment_id)
+        .collect();
+    let survivors = before.iter().filter(|id| after.contains(id)).count();
+    assert_eq!(
+        survivors, 1,
+        "the segment that held nothing of the erased person was rewritten anyway"
+    );
+}
+
+#[test]
+fn a_second_pass_under_a_standing_predicate_reads_and_rewrites_nothing() {
+    // The predicate never goes away on its own, so this is every pass after
+    // the first, for as long as the installation runs.
+    let place = directory("second-pass");
+    let (store, _) = a_store_with_one_untouched_segment(&place);
+    store.erase(&erasure(1, "u-042")).unwrap();
+    compact(&store, eager_settings()).unwrap();
+
+    // The replacements are new to the predicate, so the pass after a rewrite
+    // looks at them once and leaves them.
+    let settling = compact(&store, eager_settings()).unwrap();
+    assert_eq!(settling.rewritten + settling.removed, 0);
+    let generation = store.catalog().generation().unwrap();
+
+    let idle = compact(&store, eager_settings()).unwrap();
+    assert_eq!(idle.rewritten + idle.removed, 0);
+    assert_eq!(
+        idle.unchanged, 0,
+        "a settled pass read a segment it had already cleared"
+    );
+    assert_eq!(
+        store.catalog().generation().unwrap(),
+        generation,
+        "a settled pass published a generation"
+    );
+    assert_eq!(visible(&store).len(), 100);
+}
+
+#[test]
+fn a_segment_sealed_after_the_erasure_is_still_reached_by_the_next_pass() {
+    let place = directory("late-segment");
+    let (store, _) = a_store_with_one_untouched_segment(&place);
+    // Still inside its horizon, whatever the date is when this runs.
+    let mut standing = erasure(1, "u-042");
+    standing.horizon = i64::MAX / 2;
+    store.erase(&standing).unwrap();
+    compact(&store, eager_settings()).unwrap();
+    compact(&store, eager_settings()).unwrap();
+
+    // A late arrival for the erased person. The predicate hides it on read, and
+    // the physical half has to follow.
+    store.commit([1; 16], [20; 16], rows(40, 2_000)).unwrap();
+    assert_eq!(visible(&store).len(), 120);
+    let outcome = compact(&store, eager_settings()).unwrap();
+    assert_eq!(outcome.rows_erased, 20);
+    assert_eq!(visible(&store).len(), 120);
+
+    let held: u64 = store
+        .catalog()
+        .manifests()
+        .unwrap()
+        .iter()
+        .map(|manifest| manifest.row_count)
+        .sum();
+    assert_eq!(held, 120, "an erased row is still stored");
+}
+
+#[test]
+fn an_erasure_pass_publishes_in_bounded_bites() {
+    let place = directory("bites");
+    let (store, _) = a_store_with_one_untouched_segment(&place);
+    store.erase(&erasure(1, "u-042")).unwrap();
+    let generation = store.catalog().generation().unwrap();
+
+    // One byte: every rewritten segment is a bite of its own.
+    let outcome = compact(
+        &store,
+        CompactionSettings {
+            cold_group_batch_bytes: 1,
+            ..eager_settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.rewritten, 3);
+    assert_eq!(
+        store.catalog().generation().unwrap(),
+        generation + 3,
+        "the pass held every rewritten segment for one swap"
+    );
+    assert_eq!(visible(&store).len(), 100);
+}
+
+#[test]
+fn a_predicate_past_its_horizon_is_removed_once_a_pass_has_applied_it() {
+    let place = directory("retire");
+    let (store, _) = a_store_with_one_untouched_segment(&place);
+    let mut finished = erasure(1, "u-042");
+    finished.horizon = BASE_TIME; // long past
+    let mut standing = erasure(2, "u-999");
+    standing.horizon = i64::MAX / 2;
+    store.erase(&finished).unwrap();
+    store.erase(&standing).unwrap();
+
+    let outcome = compact(&store, eager_settings()).unwrap();
+    assert_eq!(outcome.tombstones_retired, 1);
+    let left = store.catalog().tombstones().unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(
+        left[0].tombstone_id, [2; 16],
+        "the standing predicate stays"
+    );
+
+    // The rows are gone from the segments, so nothing comes back.
+    assert_eq!(visible(&store).len(), 40);
+    // And the record that the erasure happened is not the working set.
+    assert_eq!(store.catalog().erasure_ledger().unwrap().len(), 2);
+}
+
+#[test]
+fn a_predicate_is_kept_while_a_matching_row_could_still_be_unsealed() {
+    let place = directory("retire-waits");
+    let store = store(&place);
+    // Committed and not sealed: the pass cannot have applied anything to it.
+    store.commit([1; 16], [1; 16], rows(10, 0)).unwrap();
+    let mut finished = erasure(1, "u-042");
+    finished.horizon = tallyowl_obs::time::now_ms() - 1_000;
+    store.erase(&finished).unwrap();
+
+    let outcome = compact(
+        &store,
+        CompactionSettings {
+            tombstone_retire_after_ms: 0,
+            ..eager_settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.tombstones_retired, 0);
+    assert_eq!(visible(&store).len(), 5, "the unsealed rows came back");
+}
+
+#[test]
+fn a_negative_margin_keeps_every_predicate() {
+    let place = directory("retire-off");
+    let (store, _) = a_store_with_one_untouched_segment(&place);
+    let mut finished = erasure(1, "u-042");
+    finished.horizon = BASE_TIME;
+    store.erase(&finished).unwrap();
+    let outcome = compact(
+        &store,
+        CompactionSettings {
+            tombstone_retire_after_ms: -1,
+            ..eager_settings()
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.tombstones_retired, 0);
+    assert_eq!(store.catalog().tombstones().unwrap().len(), 1);
+}
+
+#[test]
+fn a_retired_segments_catalog_records_go_with_its_file() {
+    let place = directory("records-go");
+    let (store, _) = a_store_with_one_untouched_segment(&place);
+    store.erase(&erasure(1, "u-042")).unwrap();
+    compact(&store, eager_settings()).unwrap();
+
+    assert!(
+        store.catalog().retired_segments().unwrap().is_empty(),
+        "a retired segment's records outlived its file"
+    );
+    // And the store reads the same after a reopen, from the records that stay.
+    drop(store);
+    let store = self::store(&place);
+    assert_eq!(visible(&store).len(), 100);
 }

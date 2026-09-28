@@ -219,6 +219,7 @@ impl AlertService {
     pub fn put_rule(&self, rule: &AlertRule, by: &str) -> Result<AlertRule, TallyOwlError> {
         check_rule(rule, self.callbacks_available)?;
         let project_id = to_id(&rule.project_id)?;
+        reads_only_its_project(rule, project_id)?;
         let now = tallyowl_obs::time::now_ms();
         let mut stored = rule.clone();
         stored.updated_at = Some(now);
@@ -290,6 +291,20 @@ impl AlertService {
     /// makes the state machine testable without a store behind it, and the
     /// state machine is where every rule about not lying lives.
     pub fn evaluate(&self, rule: &AlertRule) -> Evaluation {
+        // A rule stored before `put_rule` made this check is still in the
+        // catalog, and the scheduler queues it like any other. It is refused
+        // here as well, so it reports an error where its owner looks and reads
+        // nothing.
+        let named = to_id(&rule.project_id).and_then(|id| reads_only_its_project(rule, id));
+        if let Err(failure) = named {
+            return Evaluation {
+                outcome: AlertOutcome::Error,
+                code: Some(failure.code),
+                value: None,
+                commit_watermark: 0,
+                reason: failure.message,
+            };
+        }
         let mut request = rule.query.clone();
         // **The alert's own budget.** Section 7 asks for a separate pool, and a
         // tighter deadline is what one process can give: an evaluation that
@@ -510,7 +525,20 @@ pub fn decide(
     // **How long the condition has held.** A threshold with `sustained_ms`
     // fires only after it has been true for that long, so a single spike does
     // not wake somebody up.
-    let same_as_before = state_name(&wanted) == previous.state;
+    //
+    // **The comparison is with what the last evaluation asked for, and not with
+    // the state the rule was in.** Inside the sustain window the rule asks for
+    // `firing` and stays `ok`, so a comparison with the applied state was false
+    // on every evaluation, the count started again each time, and a rule with a
+    // sustain window never fired at all. An instance stored before
+    // `pending_state` existed has none, and its applied state is the best
+    // record there is.
+    let previous_wanted = match previous.pending_state.as_str() {
+        "" => previous.state.as_str(),
+        pending => pending,
+    };
+    let wanted_name = state_name(&wanted);
+    let same_as_before = wanted_name == previous_wanted;
     let holding = match same_as_before {
         true => previous.holding_ms + (now - previous.last_evaluated_at).max(0),
         false => 0,
@@ -579,6 +607,7 @@ pub fn decide(
         holding_ms: holding,
         commit_watermark: evaluation.commit_watermark,
         budget_failures: previous.budget_failures,
+        pending_state: wanted_name.to_string(),
     };
     // A state change starts the count again, because "how many times has this
     // one alert notified" is what an operator reads it as.
@@ -644,6 +673,9 @@ fn as_number(value: &tallyowl_control_api::types::TypedValue) -> Option<f64> {
 }
 
 fn decimal_as_float(decimal: &tallyowl_control_api::types::CsilDecimal) -> Option<f64> {
+    // An exponent outside the wire bound would be cut to 32 bits below, and the
+    // threshold would become a different number.
+    tallyowl_wire::check_decimal(decimal.exponent).ok()?;
     Some(decimal.mantissa as f64 * 10f64.powi(decimal.exponent as i32))
 }
 
@@ -689,6 +721,7 @@ pub fn check_rule(rule: &AlertRule, callbacks_available: bool) -> Result<(), Tal
                         "A webhook notification needs an address to send to.",
                     ));
                 }
+                crate::notify::check_address_text(url)?;
                 if !url.starts_with("https://") && !url.starts_with("http://") {
                     return Err(TallyOwlError::invalid_argument(format!(
                         "`{url}` is not an address TallyOwl can send a webhook to. Write a full address, such as `https://example.test/alerts`."
@@ -699,6 +732,12 @@ pub fn check_rule(rule: &AlertRule, callbacks_available: bool) -> Result<(), Tal
                 if target.url.as_deref().unwrap_or_default().is_empty() {
                     return Err(TallyOwlError::invalid_argument(
                         "A native callback needs the address of the service to call.",
+                    ));
+                }
+                crate::notify::check_address_text(target.url.as_deref().unwrap_or_default())?;
+                if target.secret_ref.as_deref().unwrap_or_default().is_empty() {
+                    return Err(TallyOwlError::invalid_argument(
+                        "A native callback is signed, so it needs a secret. Set `secret_ref` on the target to the name of a secret this head can read, and give the receiver the same secret to verify with.",
                     ));
                 }
                 if !callbacks_available {
@@ -713,6 +752,26 @@ pub fn check_rule(rule: &AlertRule, callbacks_available: bool) -> Result<(), Tal
     // A rule with no target evaluates and records state and tells nobody, which
     // is a legitimate thing to want while a rule is being tuned. It is worth
     // saying that it is what will happen.
+    Ok(())
+}
+
+/// Refuse a rule whose query reads any project other than the rule's own.
+///
+/// The control operation authorizes the caller against `rule.project_id` and
+/// nothing else. Without this, an administrator of one project stored a rule
+/// whose query scanned another tenant's project, and read the answer back
+/// through the alert instance and the webhook body. `projects_named` is the
+/// same walk `run-query` is authorized with, so a form it covers is a form
+/// this covers.
+fn reads_only_its_project(rule: &AlertRule, project_id: [u8; 16]) -> Result<(), TallyOwlError> {
+    let named = crate::query::projects_named(&rule.query)?;
+    if named.iter().any(|project| *project != project_id) {
+        return Err(TallyOwlError::new(
+            tallyowl_obs::ErrorCode::PermissionDenied,
+            "This alert rule belongs to one project and its query reads another. An alert reads only the project it belongs to. Change the project in the query, or store the rule in that project.",
+        )
+        .retryable(false));
+    }
     Ok(())
 }
 
@@ -832,6 +891,11 @@ pub fn declare(metrics: &Registry) {
         "tallyowl_notifications_total",
         tallyowl_obs::MetricKind::Counter,
         "Notification attempts, by channel and outcome.",
+    );
+    declare(
+        "tallyowl_alert_evaluations_skipped_total",
+        tallyowl_obs::MetricKind::Counter,
+        "Queued alert evaluations that did not run, because the rule was evaluated after they were queued. A rising value means the evaluation worker is slower than the schedule.",
     );
     declare(
         "tallyowl_alert_evaluation_delay_ms",

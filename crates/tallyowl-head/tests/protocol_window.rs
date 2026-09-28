@@ -119,6 +119,7 @@ fn head_at(place: &Path) -> Ingest {
         receipt_policy: ReceiptPolicy::LocalOne,
         open_traces: None,
         policy: None,
+        sources: None,
     }
 }
 

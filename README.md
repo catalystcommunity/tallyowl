@@ -28,19 +28,67 @@ TallyOwl hosts the dashboard and uses LinkKeys login. Corndogs provides durable
 queues and workflows. CSIL defines the ingest and query contracts. Do not edit
 generated code.
 
+## Install and run
+
+TallyOwl has two services. The head stores the data, answers queries, and
+serves the dashboard. The collector receives telemetry from applications. An
+installation also needs [Corndogs](https://github.com/catalystcommunity/corndogs),
+which is the durable queue. LinkKeys login is optional. An operator session is
+sufficient for a first installation.
+
+- **On Kubernetes:** do the quick start in
+  [DEPLOYMENT.md section 3a](docs/DEPLOYMENT.md). It installs the head chart
+  with a Corndogs sidecar, and then the collector chart.
+- **On one host:** get the binaries from the release page. Copy
+  [tallyowl.example.yaml](tallyowl.example.yaml), and set the data directory
+  and the Corndogs address. Start Corndogs, then `tallyowl-head --config <file>`,
+  then `tallyowl-collector --config <file>`. `tallyowl-head --config <file>
+  config check` finds a setting that is not correct before the service starts.
+- **From source:** [CONTRIBUTING.md](CONTRIBUTING.md) starts the `home`
+  profile on a workstation.
+
+Then make the first key and the first session. Stop the head before you use
+these commands, because they need the data directory. On Kubernetes, use the
+maintenance Job in [DEPLOYMENT.md section 9](docs/DEPLOYMENT.md).
+
+```sh
+tallyowl-head --config <file> provision <project>     # prints one project key
+tallyowl-head --config <file> session create <name>   # prints one session token
+```
+
+The dashboard is on the `dashboard.listen` address. Paste the session token
+into the sign-in page.
+
+On one host, the services connect over loopback or unix sockets and need no
+certificates. When a service listens on a network address, it uses TLS. Make
+an authority with `tallyowl-head ca create <directory>`. See
+[DEPLOYMENT.md section 7c](docs/DEPLOYMENT.md) and decision D62.
+
+## Monitor an application
+
+A project key and a collector address are all that an application needs.
+
+- A Go service: [Go app driver](packages/driver-go/README.md).
+- A Rust service: [Rust app driver](crates/tallyowl-driver-rust/README.md).
+- A browser application: [browser package](packages/browser/README.md). The
+  browser sends to your application, and your application sends to TallyOwl.
+- An application that already has a Prometheus endpoint or an OpenTelemetry
+  exporter: [integration runbook, section 4](docs/RUNBOOK_INTEGRATION.md).
+
+To monitor TallyOwl itself, use the alert rules in
+[deploy/monitoring](deploy/monitoring/README.md).
+
+## State of the build
+
 All eleven phases of [the plan](docs/PLAN.md) are built: the contract, the
 local development loop, the embedded store, the durable telemetry paths,
 replicated storage, product behavior, campaigns and attribution, alerts and
-workflows, and production hardening — drills, a running soak, Helm chart
-templates, CI workflows, and runbooks. A developer runs the `home` profile as
-binaries on a workstation, with the same configuration, health, and delivery
-path a deployment uses, and a home installation starts no consensus group and
-opens no replication port. [CONTRIBUTING.md](CONTRIBUTING.md) says how to
-start it.
+workflows, and production hardening. A `home` installation starts no consensus
+group and opens no replication port.
 
-The first release candidate is **0.1.0-rc.1**.
-[RELEASE_NOTES.md](docs/RELEASE_NOTES.md) says what it contains, which
-collection behavior changed, where each artifact is, and what is not in it.
+[RELEASE_NOTES.md](docs/RELEASE_NOTES.md) gives the contents of each release,
+the location of each artifact, and the functions that a release does not
+include.
 
 [PHASE11_REPORT.md](docs/PHASE11_REPORT.md) is the current phase report; the
 earlier reports say what each phase was when it was reported.

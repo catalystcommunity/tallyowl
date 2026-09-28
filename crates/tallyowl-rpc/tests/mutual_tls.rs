@@ -137,7 +137,17 @@ fn a_peer_with_no_certificate_never_reaches_the_service() {
     let failure = plain
         .call("TallyOwlCollector", "echo", vec![1])
         .expect_err("a plain client cannot speak to a TLS listener");
-    assert_eq!(failure.code, tallyowl_obs::error::ErrorCode::Unavailable);
+    // The listener answers the stray bytes with a TLS alert, which the plain
+    // client cannot read as a frame. The call fails for good, and says why.
+    assert!(
+        !failure.retryable,
+        "a plain client to a TLS listener fails the same way every time"
+    );
+    assert!(
+        failure.message.contains("TLS"),
+        "the failure should point at TLS: {}",
+        failure.message
+    );
     assert_eq!(
         served.load(std::sync::atomic::Ordering::SeqCst),
         0,

@@ -1,0 +1,303 @@
+# Alert rules for TallyOwl itself, in the Prometheus rule file format.
+#
+# Each expression uses only an instrument that a TallyOwl service registers.
+# `./tools.sh helm-check` does not read this file; tools/tests/test_monitoring.py
+# does, and fails when a rule names an instrument that no crate declares.
+#
+# The thresholds are starting values. Change them to fit your installation.
+# README.md in this directory says what each rule means and what to do.
+groups:
+  - name: tallyowl-delivery
+    rules:
+      - alert: TallyOwlRetrySweepStopped
+        # The sweep runs each `corndogs.sweepInterval`, one second by default,
+        # and each run adds one to this counter. Retry, backoff, and the
+        # recovery of a stopped worker all stop when the sweep stops.
+        expr: rate(tallyowl_retry_sweeps_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The timeout sweep of a collector stopped.
+          description: Nothing retries until the sweep runs. Check the connection from the collector to Corndogs. See RUNBOOK_INCIDENT.md section 1.
+
+      - alert: TallyOwlDeliveryStopped
+        expr: rate(tallyowl_batches_delivered_total[10m]) == 0 and tallyowl_delivery_queue_depth_count > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Batches wait in the queue and no batch reaches the head.
+          description: The head is unreachable, or the delivery loop of the collector stopped. The `delivery-loop` readiness check also fails when the loop stops. See RUNBOOK_INCIDENT.md section 5.
+
+      - alert: TallyOwlDeliveryQueueGrowing
+        expr: deriv(tallyowl_delivery_queue_depth_count[30m]) > 0 and tallyowl_delivery_queue_depth_count > 1000
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: The delivery queue grows and does not drain.
+          description: Restore the head before the oldest batch is older than `corndogs.maxDeliveryAge`. A batch older than that goes to quarantine.
+
+      - alert: TallyOwlBatchesQuarantined
+        expr: increase(tallyowl_batches_quarantined_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A collector moved a batch to quarantine.
+          description: No retry can deliver that batch. A person must read it. See RUNBOOK_INCIDENT.md section 5.
+
+      - alert: TallyOwlProtocolVersionRefused
+        expr: increase(tallyowl_protocol_version_refused_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A collector or the head refused a protocol version.
+          description: An application or a collector is older than the compatibility window. See DEPLOYMENT.md section 7.
+
+  - name: tallyowl-storage
+    rules:
+      - alert: TallyOwlAppendLogStalled
+        # The signature of L131: a commit is in flight across the whole window
+        # and the durable position does not move.
+        expr: min_over_time(tallyowl_wal_commit_in_flight_count[3m]) >= 1 and changes(tallyowl_wal_durable_position_count[3m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: The append log of a head does not move.
+          description: See RUNBOOK_INCIDENT.md section 2. Liveness does not find this state, so nothing restarts the head.
+
+      - alert: TallyOwlStorageRefusedAWrite
+        expr: sum(increase(tallyowl_storage_refusals_total[10m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A head refused a write because the device has too little space.
+          description: Free space or grow the volume. See RUNBOOK_INCIDENT.md section 4.
+
+      - alert: TallyOwlDiskNearTheReserve
+        expr: tallyowl_disk_free_bytes < 2 * tallyowl_storage_reserve_bytes
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Free space is less than two times `storage.reserveBytes`.
+          description: The head refuses new data when free space reaches the reserve. Grow the volume or shorten the retention.
+
+      - alert: TallyOwlIntegrityFailure
+        expr: sum(increase(tallyowl_integrity_failures_total[1h])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A checksum failed on stored data.
+          description: Nothing repairs a damaged segment automatically in this release. See RUNBOOK_INCIDENT.md section 7.
+
+      - alert: TallyOwlSegmentsDamaged
+        expr: tallyowl_segments_damaged_count > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: A head holds a damaged segment.
+          description: Queries over its range answer `incomplete-result`. Restore the segment from a snapshot.
+
+      - alert: TallyOwlGenerationPinIsOld
+        # `compaction.gcGrace` is one hour by default. A pin older than that
+        # holds storage that compaction wants to delete.
+        expr: tallyowl_generation_pin_age_seconds > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: A query has pinned a generation for more than one hour.
+          description: A pin that does not end keeps retired data on the volume. See FAILURE_MODES.md section 13.
+
+  - name: tallyowl-workflows
+    rules:
+      - alert: TallyOwlWorkflowQuarantined
+        expr: tallyowl_workflow_quarantined_count > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A head workflow holds work that it will not retry.
+          description: An alert evaluation, a notification, or a projector pass needs a person.
+
+      - alert: TallyOwlWorkflowLagging
+        expr: tallyowl_workflow_lag_ms > 600000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The oldest item in a head workflow queue has waited for more than ten minutes.
+          description: Alerts on your own telemetry are late by this time.
+
+      - alert: TallyOwlAlertsDisabledByBudget
+        expr: increase(tallyowl_alerts_disabled_by_budget_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: The head disabled an alert rule because it used its evaluation budget.
+          description: See ALERTS.md. The rule does not run again until a person enables it.
+
+  - name: tallyowl-compatibility
+    rules:
+      - alert: TallyOwlScrapeFailures
+        expr: increase(tallyowl_scrape_failures_total[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A collector cannot reach a scrape target.
+          description: The collector log names the target. See RUNBOOK_INTEGRATION.md section 4.
+
+      - alert: TallyOwlMetricSeriesRefused
+        expr: sum(increase(tallyowl_metric_series_refused_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A collector refused metric points because a series budget is full.
+          description: The refusal names the metric. See DATA_MODEL.md section 3.4.
+
+  - name: tallyowl-liveness
+    rules:
+      - alert: TallyOwlDeliveryLoopStopped
+        # The delivery loop stamps this age each time it turns. A loop that a
+        # stalled peer holds cannot report itself, so a watchdog thread does.
+        expr: tallyowl_delivery_loop_age_seconds > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: The delivery loop of a collector does not turn.
+          description: No batch reaches the head from this collector. Restart the collector. Then find the peer that did not answer in `tallyowl_head_call_failures_total` and `tallyowl_queue_call_failures_total`.
+
+      - alert: TallyOwlBackgroundLoopStale
+        expr: tallyowl_background_loop_tick_age_ms > 600000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A background loop of the head did not finish a pass for ten minutes.
+          description: The `loop` label names the loop. The health report shows the same loop as degraded. A slow compaction pass can cause this. A loop that does not return needs a restart of the head.
+
+      - alert: TallyOwlTaskPanicked
+        expr: >
+          increase(tallyowl_background_loop_panics_total[15m]) > 0
+          or increase(tallyowl_intake_handler_panics_total[15m]) > 0
+          or increase(tallyowl_scrape_panics_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A TallyOwl task stopped on a defect and continued.
+          description: The service contained the failure and the log has the message. This is a defect in TallyOwl. Report it with the log line.
+
+      - alert: TallyOwlSealFailing
+        expr: increase(tallyowl_seal_failures_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: The head cannot write a segment.
+          description: The rows stay in the append log and the head tries again. The append log grows until a seal succeeds. Check the free space and the device. See RUNBOOK_INCIDENT.md section 4.
+
+  - name: tallyowl-consensus
+    rules:
+      - alert: TallyOwlConsensusGroupStopped
+        expr: tallyowl_consensus_groups_stopped_count > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A consensus group stopped on this node.
+          description: The head log names the group one time. The node reports the group as not writable. A replica stops when its own store cannot write, for example when the device is full. See FAILURE_MODES.md section 6.
+
+      - alert: TallyOwlConsensusGroupLeaderless
+        expr: tallyowl_consensus_groups_leaderless_count > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: A consensus group has no leader.
+          description: Writes to that tablet do not commit. Check that a majority of the voters run and can reach each other on `replication.advertise`.
+
+      - alert: TallyOwlReplicaLagging
+        expr: tallyowl_consensus_groups_lagging_count > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A replica stays behind its leader.
+          description: The gauge `tallyowl_consensus_replication_lag_count` gives the largest number of entries. A replica that is too far behind copies segments from a peer before it reports that it caught up.
+
+  - name: tallyowl-transport-security
+    rules:
+      # D62. A collector presents a certificate from files to applications. The
+      # gauge is the time until the LAST loaded certificate expires, so it
+      # stays high while a second certificate for a rotation is loaded.
+      - alert: TallyOwlApplicationCertificateExpiring
+        expr: tallyowl_tls_certificate_expiry_seconds < 14 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: A collector certificate for applications expires in less than 14 days.
+          description: The `listener` label names intake or otlp. Put a new certificate in a second directory of `tls.certificateDirectories`. The collector reads it with no restart. See DEPLOYMENT.md section 7c.
+
+      - alert: TallyOwlApplicationCertificateCritical
+        expr: tallyowl_tls_certificate_expiry_seconds < 3 * 86400
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: A collector certificate for applications expires in less than 3 days.
+          description: When it expires, applications refuse the connection and hold their data until the driver memory limit is full. Replace the certificate now. See DEPLOYMENT.md section 7c.
+
+      - alert: TallyOwlCertificateReloadFailing
+        expr: increase(tallyowl_tls_reload_failures_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A collector could not read a changed certificate file.
+          description: The collector keeps the certificate it had, and the log gives the file and the reason. A certificate and its key that do not match is the usual cause. See RUNBOOK_INCIDENT.md section 8.
+
+      # A node renews its certificate when one third of its lifetime is left,
+      # and the gauge then goes up again. A value that stays below one third
+      # means that renewal fails. The threshold is one third of the default
+      # lifetime of 24 hours: change 8 to the value of
+      # `enrollment.certificateLifetimeHours` divided by 3.
+      - alert: TallyOwlNodeCertificateNotRenewing
+        expr: tallyowl_node_certificate_expiry_seconds < 8 * 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A node certificate is not renewed.
+          description: The node continues until the certificate expires. Read `tallyowl_enrollment_failures_total` by reason and the node log. See RUNBOOK_INCIDENT.md section 8.
+
+      - alert: TallyOwlNodeCertificateLapsing
+        expr: tallyowl_node_certificate_expiry_seconds < 3600
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A node certificate expires in less than one hour.
+          description: When it expires, the node cannot reach the head or its peers. A collector then stops delivery and keeps accepting into Corndogs. See RUNBOOK_INCIDENT.md section 8.
+
+      - alert: TallyOwlEnrollmentFailing
+        expr: sum by (reason) (increase(tallyowl_enrollment_failures_total[15m])) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: A node fails to enroll or to renew its certificate.
+          description: The `reason` label is unreachable, refused, handshake, invalid, or other. See RUNBOOK_INCIDENT.md section 8.
+
+      - alert: TallyOwlHandshakesRefused
+        # A few refusals are ordinary: a client that restarts with an old
+        # setting, or a scanner. A steady rate is a client that cannot connect.
+        expr: sum by (listener) (increase(tallyowl_tls_handshakes_refused_total[15m])) > 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A listener refuses TLS handshakes at a steady rate.
+          description: A client shows a certificate that no trusted authority signed, or speaks plaintext to a TLS listener. The client's own error names the cause. See RUNBOOK_INCIDENT.md section 8.4.

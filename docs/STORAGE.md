@@ -329,6 +329,46 @@ after the catalog checkpoint, reconstructs missing receipt entries, and resumes
 segment work. A batch committed before a lost response returns the same receipt
 when retried.
 
+**Damage in the middle of the log is not a torn final frame.** The scanner stops
+at the first frame that does not read back. It then looks for a frame that does
+read back after that point. If it finds one at a log position that the store
+acknowledged, the log holds accepted data after the damage. The store then
+refuses to open and does not change the file. The message names the file and
+the byte, and it tells the operator to restore the file. A frame after the
+damage at a position that the store did not acknowledge is part of a group that
+a power loss tore. The scanner removes it.
+
+**The frame checksum covers the frame header.** Frame version 2 computes the
+checksum over the length, the position, and the payload. A log starts with
+`TOWLWAL2`. Frame version 1 computed the checksum over the payload only, and a
+log of that version starts with `TOWLWAL1`. The store reads a version 1 log as
+it was written, and it appends version 1 frames to it, so that one file holds
+one version. The next rewrite of the log writes every kept frame again as
+version 2.
+
+**The log checkpoint is a catalog record, and only a seal moves it.** The record
+is `tablet/<tablet-id>/log-checkpoint`. A seal writes it in the transaction that
+publishes the segments of that seal. A segment that a node copies from a
+different node contains the log positions of that different node. Thus, the
+store does not calculate the checkpoint from segment manifests. A catalog with
+no checkpoint record is from an earlier build. The store replays the full log
+one time for such a catalog and then writes the record. A replayed frame that a
+segment already holds gives a second physical row for one logical event, and
+section 6 of `docs/DELIVERY.md` makes that safe.
+
+**A log position is never used again.** When a seal covers every frame, the
+rewrite leaves a log with no frame. After a restart, such a log cannot calculate
+its next position from its frames. The store gives the log a minimum position at
+startup. The minimum is the larger of the checkpoint and the position after the
+last receipt.
+
+**A seal that does not publish puts its rows back.** A seal moves the rows out
+of the open buffer before it builds a segment. If the build, the file write, or
+the catalog publish fails for any reason, the rows go back into the open buffer.
+The checkpoint does not move, and the log keeps the frames. While a seal builds,
+a query continues to read the rows of that seal from memory. A query reads those
+rows from memory or from the published segments, and never from both.
+
 ### Multi-voter tablet
 
 1. The tablet leader validates and assigns the next log position.
@@ -655,6 +695,32 @@ Compaction rewrites only affected bounded segments. A project and time-range
 deletion can remove fully covered segments without reading them. Compaction can
 combine small tombstones to keep query filtering bounded.
 
+The erasure pass obeys four rules that keep the work bounded:
+
+- **The pass does not rewrite a segment that lost no row.** The pass reads a
+  segment, applies the predicates, and leaves the segment as it is if each row
+  stays.
+- **The pass reads a segment only if something about it is new.** The catalog
+  record `tablet/<tablet-id>/erasure-applied` holds a tombstone generation and a
+  manifest generation. Each predicate at or below the first was applied to each
+  segment at or below the second. The pass reads a segment that is newer than
+  the record, and it reads the segments that a newer predicate can reach.
+- **A new predicate reaches only the segments that contain its value**, when the
+  tablet locator can answer. A predicate that names events, a trace, a session,
+  a request, or a property value uses the locator. If the locator names no
+  segment, the pass reads each segment of the project in the time range.
+- **One swap takes at most `compaction.coldGroupBatch` of stored source bytes.**
+  The pass publishes each group of rewritten segments as it fills, so that memory
+  use does not increase with the size of the project.
+
+A replacement segment and the locator runs that describe it go into the catalog
+in one transaction, as they do for a seal. After the swap, compaction combines
+the stored runs of each affected time bucket. It reads and writes one bucket in
+one transaction, so that a run from a concurrent seal always stays.
+
+Compaction removes the catalog records of a retired segment after it removes
+the file of that segment.
+
 ### Cold consolidation
 
 Compaction also serves the locator. Once a time bucket's segments are older
@@ -688,6 +754,21 @@ telemetry arrives later.
 Therefore a tombstone stays active until its horizon ends. The ingest path
 applies active erasure predicates to newly accepted data. A late arrival that
 matches an active predicate never becomes visible.
+
+Compaction removes a tombstone from the active set when these conditions are
+all true:
+
+- the horizon ended more than `tombstone_retire_after_ms` ago. The default is
+  24 hours. A negative value keeps each tombstone;
+- a complete erasure pass applied the tombstone to each published segment;
+- when that pass started, no row from before the horizon was in memory and
+  not in a segment.
+
+The erasure ledger keeps its entry. The ledger is the record that the erasure
+occurred. The active set is only the set of predicates that a read applies. A
+read finds the predicates for one row from an index by project, event ID, and
+property value, so that the cost of one row does not increase with the number
+of active tombstones.
 
 The same rule applies to a restore and to a replay. A tombstone generation
 travels with the data.

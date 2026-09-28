@@ -4,5 +4,7 @@ pub mod index;
 pub mod page;
 pub mod schema;
 
-pub use file::{open, open_with_key, Footer, Header, KeyReference, Segment, SegmentWriter};
+pub use file::{
+    open, open_received, open_with_key, Footer, Header, KeyReference, Segment, SegmentWriter,
+};
 pub use format::{FormatError, IndexLayout};

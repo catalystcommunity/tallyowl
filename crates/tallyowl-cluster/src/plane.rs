@@ -87,6 +87,11 @@ impl ControlPlane {
         Arc::clone(&self.directory_cache)
     }
 
+    /// The group this cell's controllers run.
+    pub fn controllers(&self) -> GroupKey {
+        self.controller_group()
+    }
+
     fn controller_group(&self) -> GroupKey {
         GroupKey::CellController(self.cell.clone())
     }

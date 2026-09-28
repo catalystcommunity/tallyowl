@@ -1,0 +1,16 @@
+{{- include "tallyowl-collector.validate" . -}}
+{{- if and .Values.disruption.enabled (or .Values.autoscaling.enabled (gt (int .Values.replicas) 1)) }}
+# A drain must not stop all intake. A collector holds no durable state, so one
+# may be away at a time, and the applications reconnect to the others.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tallyowl-collector.fullname" . }}
+  labels:
+    {{- include "tallyowl-collector.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.disruption.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "tallyowl-collector.selectorLabels" . | nindent 6 }}
+{{- end }}

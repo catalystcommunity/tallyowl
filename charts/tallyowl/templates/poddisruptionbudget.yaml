@@ -2,7 +2,8 @@
 {{- if and .Values.disruption.enabled (gt (int .Values.replicas) 1) }}
 # A voluntary disruption must never take a quorum. `minAvailable` is a count
 # and not a percentage: a percentage of a shrinking set rounds in the wrong
-# direction. See docs/DEPLOYMENT.md section 6.
+# direction. An empty value is a majority of the replicas, and the chart refuses
+# a lower one. See docs/DEPLOYMENT.md section 6.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -10,7 +11,7 @@ metadata:
   labels:
     {{- include "tallyowl.labels" . | nindent 4 }}
 spec:
-  minAvailable: {{ .Values.disruption.minAvailable }}
+  minAvailable: {{ include "tallyowl.minAvailable" . }}
   selector:
     matchLabels:
       {{- include "tallyowl.selectorLabels" . | nindent 6 }}

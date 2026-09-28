@@ -23,6 +23,11 @@ type Client struct {
 	address        string
 	maxFrameBytes  int
 	connectTimeout time.Duration
+	// callTimeout bounds one send and its reply. Zero means no bound, which is
+	// what a collector that accepts a connection and never answers turns into a
+	// caller that never returns.
+	callTimeout time.Duration
+	security    Transport
 
 	mu     sync.Mutex
 	conn   net.Conn
@@ -31,20 +36,57 @@ type Client struct {
 
 // NewClient builds a client that connects on its first call.
 func NewClient(address string, maxFrameBytes int) *Client {
+	return NewClientWith(address, maxFrameBytes, Transport{})
+}
+
+// NewClientWith builds a client that reaches the address by the given transport.
+func NewClientWith(address string, maxFrameBytes int, security Transport) *Client {
 	return &Client{
 		address:        address,
 		maxFrameBytes:  maxFrameBytes,
 		connectTimeout: 5 * time.Second,
+		security:       security,
 	}
 }
 
 // Address is the collector this client reaches.
 func (c *Client) Address() string { return c.address }
 
+// SetCallTimeout bounds every later call: the connect, the send, and the wait
+// for the reply. A shutdown lowers it to the time it has left.
+func (c *Client) SetCallTimeout(timeout time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.callTimeout = timeout
+}
+
+// UnreachableError reports that no connection opened, so nothing was sent. A
+// caller that counts attempts against a batch does not count this one, because
+// the batch never left.
+type UnreachableError struct {
+	Address string
+	Err     error
+}
+
+func (e *UnreachableError) Error() string {
+	return fmt.Sprintf("we could not reach %s. %v", e.Address, e.Err)
+}
+
+func (e *UnreachableError) Unwrap() error { return e.Err }
+
+// dialTimeout is the shorter of the connect timeout and the call timeout, so a
+// short call deadline is not spent waiting on a connect.
+func dialTimeout(connect, call time.Duration) time.Duration {
+	if call > 0 && call < connect {
+		return call
+	}
+	return connect
+}
+
 func (c *Client) connect() error {
-	conn, err := net.DialTimeout("tcp", c.address, c.connectTimeout)
+	conn, err := dial(c.address, c.security, dialTimeout(c.connectTimeout, c.callTimeout))
 	if err != nil {
-		return fmt.Errorf("we could not reach %s. %w", c.address, err)
+		return err
 	}
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
@@ -79,8 +121,19 @@ func (c *Client) Call(service, op string, payload []byte, auth *string) (transpo
 	for attempt := 0; attempt < 2; attempt++ {
 		if c.client == nil {
 			if err := c.connect(); err != nil {
+				if last != nil {
+					// The first attempt sent the call and then lost the
+					// connection, so whether the peer took it is unknown. The
+					// failed reconnect does not change that.
+					return transport.RpcResponse{}, fmt.Errorf(
+						"we lost the connection to %s during `%s`, and could not open another. %w",
+						c.address, op, last)
+				}
 				return transport.RpcResponse{}, err
 			}
+		}
+		if c.callTimeout > 0 {
+			_ = c.conn.SetDeadline(time.Now().Add(c.callTimeout))
 		}
 		response, err := c.client.Call(service, op, payload, auth)
 		if err == nil {

@@ -35,7 +35,7 @@ use tallyowl_cluster_api::types::{
 };
 use tallyowl_obs::error::{ErrorCode, TallyOwlError};
 use tallyowl_rpc::{
-    error_outcome, malformed, reply, unknown_operation, Dispatcher, Outcome, Request,
+    error_outcome, malformed, reply, unknown_operation, Dispatcher, Outcome, Peer, Request,
 };
 
 use crate::groups::{GroupKey, GroupRegistry};
@@ -203,11 +203,16 @@ impl ReplicationService {
     }
 
     /// Answer one consensus message.
-    fn consensus(&self, payload: &[u8]) -> Outcome {
+    fn consensus(&self, payload: &[u8], peer: &Peer) -> Outcome {
         let message = match decode_consensus_message(payload) {
             Ok(message) => message,
             Err(e) => return malformed(e),
         };
+        // The name in the message is a claim. The connection's certificate is
+        // proof, and the two must agree. D62.
+        if let Err(reason) = self.registry.security().check_sender(peer, &message.sender) {
+            return encode_refusal(reason, None);
+        }
         let key = match GroupKey::from_wire(message.group.kind, message.group.name.as_deref()) {
             Ok(key) => key,
             Err(e) => return refusal(&e),
@@ -231,6 +236,22 @@ impl ReplicationService {
                     message.sender,
                     key.label(),
                     message.generation
+                ),
+                Some(current),
+            );
+        }
+
+        // A message is from a member of the group it is for. Over mutual TLS the
+        // sender's name was checked against its certificate above, so this is
+        // proof that a member sent it. Over a loopback or unix connection it is
+        // the name the sender gave, and it stops a node from another cell, or
+        // one that was removed, from driving this group by accident.
+        if !self.registry.knows_member(&key, &message.sender) {
+            return encode_refusal(
+                format!(
+                    "`{}` is not a member of {}, so its message was not taken.",
+                    message.sender,
+                    key.label()
                 ),
                 Some(current),
             );
@@ -288,6 +309,20 @@ impl ReplicationService {
                 format!("This node does not hold `{}`.", request.tablet),
             ));
         }
+        // **The consistency a read asked for is checked where the rows are.** A
+        // coordinator cannot know how far this replica has applied, and a
+        // replica that answered anyway would return a smaller answer marked
+        // complete. The refusal is retryable and the coordinator asks the next
+        // replica.
+        if let Some(required) = request.require_watermark.filter(|required| *required > 0) {
+            let applied = self.registry.applied_index(&key);
+            if applied < required {
+                return refusal(&TallyOwlError::unavailable(format!(
+                    "This replica of `{}` has applied entry {applied} and the read needs entry {required}.",
+                    request.tablet
+                )));
+            }
+        }
         match self.source.partial(&request.tablet, &request) {
             Err(e) => refusal(&e),
             Ok(partial) => reply(
@@ -309,9 +344,21 @@ impl ReplicationService {
 }
 
 impl Dispatcher for ReplicationService {
+    /// A call with no transport behind it, which only a test or an in-process
+    /// caller makes, is treated as a local peer.
     fn dispatch(&self, request: &Request) -> Outcome {
+        self.dispatch_from(request, &Peer::Local)
+    }
+
+    fn dispatch_from(&self, request: &Request, peer: &Peer) -> Outcome {
+        // Every operation here serves another node: consensus, segments, raw
+        // rows for a fan-out read. None of it is for a peer that did not prove
+        // it is a node of this installation.
+        if let Err(reason) = self.registry.security().admits(peer) {
+            return refusal(&TallyOwlError::new(ErrorCode::PermissionDenied, reason));
+        }
         match request.op.as_str() {
-            "deliver-consensus" => self.consensus(&request.payload),
+            "deliver-consensus" => self.consensus(&request.payload, peer),
             "partial-aggregate" => self.partial_aggregate(&request.payload),
             "replica-status" => self.replica_status(&request.payload),
             "report-health" => self.health(&request.payload),
@@ -331,10 +378,16 @@ impl ReplicationService {
             Ok(report) => report,
             Err(e) => return malformed(e),
         };
-        self.reports
-            .lock()
-            .expect("health reports")
-            .push(from_wire_report(&report));
+        // Nothing drains this yet, so it keeps the newest reports and no more.
+        // Before it was bounded any host that reached this address could grow
+        // it until the node ran out of memory.
+        let mut reports = self.reports.lock().expect("health reports");
+        if reports.len() >= MAX_HEALTH_REPORTS_HELD {
+            let excess = reports.len() + 1 - MAX_HEALTH_REPORTS_HELD;
+            reports.drain(..excess);
+        }
+        reports.push(from_wire_report(&report));
+        drop(reports);
         let generation = self.topology.lock().expect("topology").generation;
         reply(
             "ClusterAck",
@@ -346,6 +399,10 @@ impl ReplicationService {
         )
     }
 }
+
+/// How many health reports a node holds at once. A cell has a few hundred
+/// nodes at most, and a report is replaced by the next one from the same node.
+pub const MAX_HEALTH_REPORTS_HELD: usize = 4096;
 
 /// Turn one error into the typed refusal the contract declares.
 pub fn refusal(error: &TallyOwlError) -> Outcome {

@@ -24,14 +24,21 @@
 //! TallyOwl's, so a test double here is a stand-in for a dependency rather than
 //! a mock of the thing under test.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use corndogs::transport::Transport;
+use corndogs::tls::TlsOptions;
+use corndogs::transport::{ConnectOptions, Transport};
 use corndogs::{
     CleanUpTimedOutRequest, CompleteTaskRequest, CorndogsClient, GetNextTaskRequest,
     GetQueueAndStateCountsRequest, SubmitTaskRequest, UpdateTaskRequest,
 };
 use tallyowl_obs::error::TallyOwlError;
+use tallyowl_obs::metrics::{labels, MetricKind, Registry};
+
+mod pool;
+
+use pool::{Pool, PoolError};
 
 /// The states a delivery task moves through. `docs/DELIVERY.md` section 4 draws
 /// the whole diagram; these are the names on it.
@@ -47,6 +54,12 @@ pub struct ClaimedTask {
     pub queue: String,
     /// The state the task is in now, which is the state a completion must name.
     pub current_state: String,
+    /// The priority the task was accepted with.
+    ///
+    /// An update names no priority, so Corndogs keeps this one. Before Corndogs
+    /// `23caaf1` an update replaced it with whatever it named, and an update
+    /// that named zero moved a retried conversion behind every ordinary event.
+    pub priority: i64,
 }
 
 /// The durable queue a collector uses.
@@ -116,34 +129,251 @@ impl QueueCounts {
     }
 }
 
+/// How a [`CorndogsQueue`] reaches the durable store.
+#[derive(Clone)]
+pub struct QueueOptions {
+    /// How many connections the queue keeps. Corndogs coalesces commits across
+    /// connections, so one connection is the slowest way to use it.
+    pub connections: usize,
+    /// How long one call may take before the caller is told the durable store
+    /// did not answer.
+    pub call_timeout: Duration,
+    /// Where call latency is published, when a host wants it.
+    pub metrics: Option<Arc<Registry>>,
+    /// TLS to the durable store. `None` is plaintext, which D62 permits on a
+    /// loopback endpoint or under `transport.allowPlaintext`. See
+    /// [`QueueTls::for_endpoint`].
+    pub tls: Option<QueueTls>,
+}
+
+impl Default for QueueOptions {
+    fn default() -> QueueOptions {
+        QueueOptions {
+            connections: DEFAULT_CONNECTIONS,
+            call_timeout: DEFAULT_CALL_TIMEOUT,
+            metrics: None,
+            tls: None,
+        }
+    }
+}
+
+/// How the queue checks the durable store over TLS. The store shows a
+/// certificate; the queue shows none. Its project key is not on this hop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueueTls {
+    /// A PEM file of the authorities that sign the store's certificate. `None`
+    /// is the operating system's trusted authorities.
+    pub ca_file: Option<std::path::PathBuf>,
+    /// The name the store's certificate must carry. `None` is the host part of
+    /// the endpoint.
+    pub server_name: Option<String>,
+}
+
+impl QueueTls {
+    /// D62 for the hop to the durable store: plaintext to a loopback endpoint,
+    /// TLS to any other, and plaintext elsewhere only when the operator set
+    /// `transport.allowPlaintext`.
+    ///
+    /// A configured CA file always means TLS, even to a loopback endpoint and
+    /// even under `transport.allowPlaintext`. A Corndogs that serves TLS serves
+    /// it on its one RPC port, so the head's own sidecar on loopback needs it
+    /// too, and the setting never makes the hop less secure than its
+    /// configuration can be.
+    pub fn for_endpoint(
+        endpoint: &str,
+        ca_file: &str,
+        server_name: &str,
+        allow_plaintext: bool,
+    ) -> Option<QueueTls> {
+        if ca_file.is_empty() && (is_loopback(endpoint) || allow_plaintext) {
+            return None;
+        }
+        Some(QueueTls {
+            ca_file: (!ca_file.is_empty()).then(|| std::path::PathBuf::from(ca_file)),
+            server_name: (!server_name.is_empty()).then(|| server_name.to_string()),
+        })
+    }
+
+    fn options(&self) -> TlsOptions {
+        let options = match &self.ca_file {
+            Some(path) => TlsOptions::ca_file(path.clone()),
+            None => TlsOptions::system_roots(),
+        };
+        match &self.server_name {
+            Some(name) => options.server_name(name.clone()),
+            None => options,
+        }
+    }
+}
+
+/// Whether `host:port` names this host.
+fn is_loopback(endpoint: &str) -> bool {
+    let host = endpoint
+        .rsplit_once(':')
+        .map_or(endpoint, |(host, _)| host)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Eight matches the number of requests one intake connection serves at a time.
+pub const DEFAULT_CONNECTIONS: usize = 8;
+/// Shorter than the forwarder's claim timeout would be wrong the other way: a
+/// slow durable write is not a dead store. Thirty seconds is the same bound the
+/// RPC client uses.
+pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+const CALL_SECONDS: &str = "tallyowl_queue_call_seconds";
+const CALL_FAILURES: &str = "tallyowl_queue_call_failures_total";
+
+/// The Corndogs client says "timed out" when its deadline ends a call.
+fn timed_out(reason: &str) -> bool {
+    reason.contains("timed out")
+}
+
 /// The real Corndogs queue.
 pub struct CorndogsQueue {
-    client: Mutex<CorndogsClient<Transport>>,
+    pool: Pool<CorndogsClient<Transport>>,
     endpoint: String,
+    call_timeout: Duration,
+    metrics: Option<Arc<Registry>>,
+    secured: bool,
 }
 
 impl CorndogsQueue {
     pub fn connect(endpoint: &str) -> Result<CorndogsQueue, TallyOwlError> {
-        let transport = Transport::connect(endpoint).map_err(|e| {
+        CorndogsQueue::connect_with(endpoint, QueueOptions::default())
+    }
+
+    /// Connect with the number of connections and the call deadline stated.
+    ///
+    /// The first connection opens here, so a durable store that cannot be
+    /// reached fails the start. The rest open when load first needs them.
+    pub fn connect_with(
+        endpoint: &str,
+        options: QueueOptions,
+    ) -> Result<CorndogsQueue, TallyOwlError> {
+        // The client's deadline covers the whole call: a re-dial, the write,
+        // and the full read. A connect that takes longer than a call may is not
+        // useful, so the dial takes the shorter of the two.
+        let connect = ConnectOptions::new()
+            .connect_timeout(options.call_timeout.min(Duration::from_secs(5)))
+            .io_timeout(options.call_timeout);
+        let connect = match &options.tls {
+            Some(tls) => connect.tls(tls.options()),
+            None => connect,
+        };
+        let secured = options.tls.is_some();
+        let first = Transport::connect_options(endpoint, connect.clone()).map_err(|e| {
             TallyOwlError::unavailable(format!(
-                "We could not reach the durable store at {endpoint}. {e}"
+                "We could not reach the durable store at {endpoint}{}. {e}",
+                if secured { " over TLS" } else { "" }
             ))
         })?;
+        let address = endpoint.to_string();
         Ok(CorndogsQueue {
-            client: Mutex::new(CorndogsClient::new(transport)),
+            pool: Pool::new(
+                options.connections,
+                options.call_timeout,
+                Some(CorndogsClient::new(first)),
+                Box::new(move || {
+                    Transport::connect_options(address.clone(), connect.clone())
+                        .map(CorndogsClient::new)
+                        .map_err(|e| e.to_string())
+                }),
+            ),
             endpoint: endpoint.to_string(),
+            call_timeout: options.call_timeout,
+            metrics: options.metrics,
+            secured,
         })
+    }
+
+    /// Whether this queue reaches the durable store over TLS.
+    pub fn secured(&self) -> bool {
+        self.secured
+    }
+
+    /// Declare what this queue publishes. A host calls it once for a registry
+    /// it then passes in [`QueueOptions`].
+    pub fn declare_metrics(metrics: &Registry) {
+        metrics
+            .declare(
+                CALL_SECONDS,
+                MetricKind::Histogram,
+                "How long one call to the durable store took, by operation.",
+                &[0.001, 0.005, 0.025, 0.1, 0.5, 2.0, 10.0, 30.0],
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "the metric `{CALL_SECONDS}` is not a name the registry accepts: {}",
+                    e.0
+                )
+            });
+        metrics
+            .declare(
+                CALL_FAILURES,
+                MetricKind::Counter,
+                "Calls to the durable store that produced no answer, by operation and reason.",
+                &[],
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "the metric `{CALL_FAILURES}` is not a name the registry accepts: {}",
+                    e.0
+                )
+            });
     }
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    fn unavailable(&self, what: &str, error: impl std::fmt::Display) -> TallyOwlError {
-        TallyOwlError::unavailable(format!(
-            "We could not reach the durable store at {} to {what}. {error}",
-            self.endpoint
-        ))
+    /// Run one call on a pooled connection, inside the deadline.
+    ///
+    /// `op` is the metric label and `what` finishes the sentence a person reads.
+    fn call<R, F>(&self, op: &str, what: &str, call: F) -> Result<R, TallyOwlError>
+    where
+        F: FnOnce(&CorndogsClient<Transport>) -> Result<R, String>,
+    {
+        let started = Instant::now();
+        let outcome = self.pool.run(call, timed_out);
+        if let Some(metrics) = &self.metrics {
+            metrics.observe(
+                CALL_SECONDS,
+                &labels(&[("op", op)]),
+                started.elapsed().as_secs_f64(),
+            );
+            let reason = match &outcome {
+                Ok(_) => None,
+                Err(PoolError::Busy) => Some("busy"),
+                Err(PoolError::TimedOut) => Some("timed-out"),
+                Err(PoolError::Failed(_)) => Some("failed"),
+            };
+            if let Some(reason) = reason {
+                metrics.increment(CALL_FAILURES, &labels(&[("op", op), ("reason", reason)]));
+            }
+        }
+        outcome.map_err(|e| {
+            let reason = match e {
+                PoolError::Busy => format!(
+                    "Every connection to it stayed busy for {} ms.",
+                    self.call_timeout.as_millis()
+                ),
+                PoolError::TimedOut => format!(
+                    "It did not answer within {} ms.",
+                    self.call_timeout.as_millis()
+                ),
+                PoolError::Failed(reason) => reason,
+            };
+            TallyOwlError::unavailable(format!(
+                "We could not reach the durable store at {} to {what}. {reason}",
+                self.endpoint
+            ))
+        })
     }
 }
 
@@ -154,20 +384,20 @@ impl DurableQueue for CorndogsQueue {
         payload: Vec<u8>,
         priority: i64,
     ) -> Result<String, TallyOwlError> {
-        let client = self.client.lock().expect("queue lock");
-        let response = client
-            .submit_task(SubmitTaskRequest {
-                queue: queue.to_string(),
-                current_state: STATE_QUEUED.to_string(),
-                auto_target_state: STATE_SENDING.to_string(),
-                // A negative value means no timeout. Zero would mean "use the
-                // Corndogs default", which is not what a queued task wants: a
-                // queued task waits for a worker rather than for a clock.
-                timeout: -1,
-                payload,
-                priority,
-            })
-            .map_err(|e| self.unavailable("accept a batch", e))?;
+        let request = SubmitTaskRequest {
+            queue: queue.to_string(),
+            current_state: STATE_QUEUED.to_string(),
+            auto_target_state: STATE_SENDING.to_string(),
+            // A negative value means no timeout. Zero would mean "use the
+            // Corndogs default", which is not what a queued task wants: a
+            // queued task waits for a worker rather than for a clock.
+            timeout: -1,
+            payload,
+            priority,
+        };
+        let response = self.call("submit", "accept a batch", move |client| {
+            client.submit_task(request).map_err(|e| e.to_string())
+        })?;
         response.task.map(|t| t.uuid).ok_or_else(|| {
             TallyOwlError::internal("The durable store accepted a batch and returned no task.")
         })
@@ -178,35 +408,36 @@ impl DurableQueue for CorndogsQueue {
         queue: &str,
         timeout_seconds: i64,
     ) -> Result<Option<ClaimedTask>, TallyOwlError> {
-        let client = self.client.lock().expect("queue lock");
-        let response = client
-            .get_next_task(GetNextTaskRequest {
-                queue: queue.to_string(),
-                current_state: STATE_QUEUED.to_string(),
-                // The claim carries a timeout, so a worker that dies mid-send
-                // releases the task at the next sweep rather than holding it.
-                override_timeout: timeout_seconds,
-                override_current_state: String::new(),
-                override_auto_target_state: STATE_QUEUED.to_string(),
-            })
-            .map_err(|e| self.unavailable("claim a batch", e))?;
+        let request = GetNextTaskRequest {
+            queue: queue.to_string(),
+            current_state: STATE_QUEUED.to_string(),
+            // The claim carries a timeout, so a worker that dies mid-send
+            // releases the task at the next sweep rather than holding it.
+            override_timeout: timeout_seconds,
+            override_current_state: String::new(),
+            override_auto_target_state: STATE_QUEUED.to_string(),
+        };
+        let response = self.call("claim", "claim a batch", move |client| {
+            client.get_next_task(request).map_err(|e| e.to_string())
+        })?;
         Ok(response.delivery.map(|d| ClaimedTask {
             uuid: d.task.uuid,
             payload: d.payload,
             queue: d.task.queue,
             current_state: d.task.current_state,
+            priority: d.task.priority,
         }))
     }
 
     fn complete(&self, task: &ClaimedTask) -> Result<(), TallyOwlError> {
-        let client = self.client.lock().expect("queue lock");
-        client
-            .complete_task(CompleteTaskRequest {
-                uuid: task.uuid.clone(),
-                queue: task.queue.clone(),
-                current_state: task.current_state.clone(),
-            })
-            .map_err(|e| self.unavailable("finish a batch", e))?;
+        let request = CompleteTaskRequest {
+            uuid: task.uuid.clone(),
+            queue: task.queue.clone(),
+            current_state: task.current_state.clone(),
+        };
+        self.call("complete", "finish a batch", move |client| {
+            client.complete_task(request).map_err(|e| e.to_string())
+        })?;
         Ok(())
     }
 
@@ -216,57 +447,40 @@ impl DurableQueue for CorndogsQueue {
         delay_seconds: i64,
         payload: Option<Vec<u8>>,
     ) -> Result<(), TallyOwlError> {
-        let client = self.client.lock().expect("queue lock");
-        client
-            .update_task(UpdateTaskRequest {
-                uuid: task.uuid.clone(),
-                queue: task.queue.clone(),
-                current_state: task.current_state.clone(),
-                // The sweep swaps these back when the timeout expires, which is
-                // how a delay is expressed without a polling loop.
-                new_state: STATE_BACKOFF.to_string(),
-                auto_target_state: STATE_QUEUED.to_string(),
-                timeout: delay_seconds.max(1),
-                payload,
-                priority: 0,
-            })
-            .map_err(|e| self.unavailable("delay a retry", e))?;
+        let request = park_request(task, delay_seconds, payload);
+        self.call("park", "delay a retry", move |client| {
+            client.update_task(request).map_err(|e| e.to_string())
+        })?;
         Ok(())
     }
 
     fn quarantine(&self, task: &ClaimedTask, queue: &str) -> Result<(), TallyOwlError> {
-        let client = self.client.lock().expect("queue lock");
-        client
-            .update_task(UpdateTaskRequest {
-                uuid: task.uuid.clone(),
-                queue: task.queue.clone(),
-                current_state: task.current_state.clone(),
-                new_state: format!("quarantined-into-{queue}"),
-                auto_target_state: String::new(),
-                timeout: -1,
-                payload: None,
-                priority: 0,
-            })
-            .map_err(|e| self.unavailable("quarantine a batch", e))?;
+        let request = quarantine_request(task, queue);
+        self.call("quarantine", "quarantine a batch", move |client| {
+            client.update_task(request).map_err(|e| e.to_string())
+        })?;
         Ok(())
     }
 
     fn sweep(&self, queue: &str, at_nanos: i64) -> Result<i64, TallyOwlError> {
-        let client = self.client.lock().expect("queue lock");
-        let response = client
-            .clean_up_timed_out(CleanUpTimedOutRequest {
-                at_time: at_nanos,
-                queue: queue.to_string(),
-            })
-            .map_err(|e| self.unavailable("return expired batches for retry", e))?;
+        let request = CleanUpTimedOutRequest {
+            at_time: at_nanos,
+            queue: queue.to_string(),
+        };
+        let response = self.call("sweep", "return expired batches for retry", move |client| {
+            client
+                .clean_up_timed_out(request)
+                .map_err(|e| e.to_string())
+        })?;
         Ok(response.timed_out)
     }
 
     fn counts(&self) -> Result<Vec<QueueCounts>, TallyOwlError> {
-        let client = self.client.lock().expect("queue lock");
-        let response = client
-            .get_queue_and_state_counts(GetQueueAndStateCountsRequest {})
-            .map_err(|e| self.unavailable("count what is waiting", e))?;
+        let response = self.call("counts", "count what is waiting", |client| {
+            client
+                .get_queue_and_state_counts(GetQueueAndStateCountsRequest {})
+                .map_err(|e| e.to_string())
+        })?;
         let mut out: Vec<QueueCounts> = response
             .queue_and_state_counts
             .into_values()
@@ -280,6 +494,45 @@ impl DurableQueue for CorndogsQueue {
         // two reads of one unchanged installation draw the same table.
         out.sort_by(|left, right| left.queue.cmp(&right.queue));
         Ok(out)
+    }
+}
+
+/// Park a claimed task until a delay expires.
+///
+/// It names no priority, so Corndogs keeps the one the task was accepted with,
+/// and no payload unless the caller has a new one, so Corndogs keeps the stored
+/// payload. Both rules are Corndogs' own from commit `23caaf1`.
+fn park_request(
+    task: &ClaimedTask,
+    delay_seconds: i64,
+    payload: Option<Vec<u8>>,
+) -> UpdateTaskRequest {
+    UpdateTaskRequest {
+        uuid: task.uuid.clone(),
+        queue: task.queue.clone(),
+        current_state: task.current_state.clone(),
+        // The sweep swaps these back when the timeout expires, which is how a
+        // delay is expressed without a polling loop.
+        new_state: STATE_BACKOFF.to_string(),
+        auto_target_state: STATE_QUEUED.to_string(),
+        timeout: delay_seconds.max(1),
+        payload,
+        priority: None,
+    }
+}
+
+/// Move a claimed task out of the retry path, keeping its priority for the
+/// person who replays it.
+fn quarantine_request(task: &ClaimedTask, queue: &str) -> UpdateTaskRequest {
+    UpdateTaskRequest {
+        uuid: task.uuid.clone(),
+        queue: task.queue.clone(),
+        current_state: task.current_state.clone(),
+        new_state: format!("quarantined-into-{queue}"),
+        auto_target_state: String::new(),
+        timeout: -1,
+        payload: None,
+        priority: None,
     }
 }
 
@@ -304,6 +557,10 @@ pub mod testing {
     struct Inner {
         /// Which queue each task was submitted to, so `counts` can group.
         task_queue: std::collections::BTreeMap<String, String>,
+        /// The priority each task holds now. An update that names no priority
+        /// keeps it, which is the rule Corndogs follows from commit `23caaf1`,
+        /// and `CorndogsQueue` names none.
+        priority: std::collections::BTreeMap<String, i64>,
         queued: VecDeque<(String, Vec<u8>)>,
         claimed: Vec<(String, Vec<u8>)>,
         parked: Vec<(String, Vec<u8>)>,
@@ -344,6 +601,11 @@ pub mod testing {
                 .queued
                 .front()
                 .map(|(_, payload)| payload.clone())
+        }
+
+        /// The priority a task holds now, wherever it is.
+        pub fn priority_of(&self, uuid: &str) -> Option<i64> {
+            self.inner.lock().unwrap().priority.get(uuid).copied()
         }
 
         pub fn completed(&self) -> Vec<String> {
@@ -400,7 +662,7 @@ pub mod testing {
             &self,
             queue: &str,
             payload: Vec<u8>,
-            _priority: i64,
+            priority: i64,
         ) -> Result<String, TallyOwlError> {
             if self.refusing.load(Ordering::Relaxed) {
                 return Err(TallyOwlError::unavailable(
@@ -410,6 +672,7 @@ pub mod testing {
             let uuid = format!("task-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
             let mut inner = self.inner.lock().unwrap();
             inner.task_queue.insert(uuid.clone(), queue.to_string());
+            inner.priority.insert(uuid.clone(), priority);
             inner.queued.push_back((uuid.clone(), payload));
             Ok(uuid)
         }
@@ -425,15 +688,26 @@ pub mod testing {
                 ));
             }
             let mut inner = self.inner.lock().unwrap();
-            let Some((uuid, payload)) = inner.queued.pop_front() else {
+            // Highest priority first, and the oldest of those, which is the
+            // order the real store claims in.
+            let mut best: Option<(usize, i64)> = None;
+            for (position, (uuid, _)) in inner.queued.iter().enumerate() {
+                let priority = inner.priority.get(uuid).copied().unwrap_or(0);
+                if best.is_none_or(|(_, held)| priority > held) {
+                    best = Some((position, priority));
+                }
+            }
+            let Some((position, priority)) = best else {
                 return Ok(None);
             };
+            let (uuid, payload) = inner.queued.remove(position).expect("found above");
             inner.claimed.push((uuid.clone(), payload.clone()));
             Ok(Some(ClaimedTask {
                 uuid,
                 payload,
                 queue: queue.to_string(),
                 current_state: STATE_SENDING.to_string(),
+                priority,
             }))
         }
 
@@ -525,5 +799,102 @@ pub mod testing {
             }
             Ok(moved)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::FakeQueue;
+    use super::*;
+
+    #[test]
+    fn a_retried_task_keeps_the_priority_it_was_accepted_with() {
+        // A conversion that failed one delivery came back at priority zero,
+        // behind every ordinary event accepted during the catch-up.
+        let queue = FakeQueue::new();
+        let conversion = queue.submit("delivery", b"conversion".to_vec(), 5).unwrap();
+        let claimed = queue.claim("delivery", 30).unwrap().expect("a task");
+        assert_eq!(claimed.priority, 5);
+        queue.park(&claimed, 1, None).unwrap();
+        assert_eq!(queue.priority_of(&conversion), Some(5));
+
+        // An ordinary event arrives while the conversion waits out its backoff.
+        queue.submit("delivery", b"event".to_vec(), 2).unwrap();
+        queue.release_parked();
+        let next = queue.claim("delivery", 30).unwrap().expect("a task");
+        assert_eq!(next.uuid, conversion, "the retried conversion goes first");
+    }
+
+    #[test]
+    fn a_quarantined_task_keeps_its_priority_for_the_person_who_replays_it() {
+        let queue = FakeQueue::new();
+        let uuid = queue.submit("delivery", b"x".to_vec(), 4).unwrap();
+        let claimed = queue.claim("delivery", 30).unwrap().expect("a task");
+        queue.quarantine(&claimed, "quarantine").unwrap();
+        assert_eq!(queue.priority_of(&uuid), Some(4));
+    }
+
+    #[test]
+    fn an_update_names_no_priority_so_the_store_keeps_the_one_it_holds() {
+        // Before Corndogs `23caaf1`, an update replaced the stored priority
+        // with whatever it named. It keeps it now when none is named, so the
+        // safe request names none, and a caller cannot get it wrong.
+        let task = ClaimedTask {
+            uuid: "t".into(),
+            payload: Vec::new(),
+            queue: "delivery".into(),
+            current_state: STATE_SENDING.into(),
+            priority: 5,
+        };
+        assert_eq!(park_request(&task, 30, None).priority, None);
+        assert_eq!(park_request(&task, 30, None).payload, None);
+        assert_eq!(quarantine_request(&task, "quarantine").priority, None);
+    }
+
+    #[test]
+    fn a_loopback_store_is_plaintext_and_a_network_store_uses_tls() {
+        assert_eq!(
+            QueueTls::for_endpoint("127.0.0.1:5080", "", "", false),
+            None
+        );
+        assert_eq!(QueueTls::for_endpoint("[::1]:5080", "", "", false), None);
+        assert_eq!(
+            QueueTls::for_endpoint("localhost:5080", "", "", false),
+            None
+        );
+        assert_eq!(
+            QueueTls::for_endpoint("corndogs.tallyowl:5080", "", "", false),
+            Some(QueueTls::default()),
+            "the system roots and the endpoint's own name"
+        );
+        assert_eq!(
+            QueueTls::for_endpoint("corndogs:5080", "/tls/ca.crt", "corndogs.internal", false),
+            Some(QueueTls {
+                ca_file: Some("/tls/ca.crt".into()),
+                server_name: Some("corndogs.internal".into()),
+            })
+        );
+        assert_eq!(
+            QueueTls::for_endpoint("corndogs:5080", "", "", true),
+            None,
+            "plaintext on a network only when the operator said so"
+        );
+        assert!(
+            QueueTls::for_endpoint("corndogs:5080", "/tls/ca.crt", "", true).is_some(),
+            "a configured authority is used even under transport.allowPlaintext"
+        );
+        assert_eq!(
+            QueueTls::for_endpoint(
+                "127.0.0.1:5080",
+                "/tls/ca.crt",
+                "home-corndogs.ns.svc",
+                false
+            ),
+            Some(QueueTls {
+                ca_file: Some("/tls/ca.crt".into()),
+                server_name: Some("home-corndogs.ns.svc".into()),
+            }),
+            "a sidecar that serves TLS on loopback is reached over TLS, by its Service name"
+        );
     }
 }

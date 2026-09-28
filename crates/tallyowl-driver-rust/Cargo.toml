@@ -17,7 +17,14 @@ tallyowl-collector-api = { workspace = true }
 # Trace and span identifiers. A span ID has to be unpredictable as well as
 # unique: a guessable one lets a caller attach a span to somebody else's trace.
 getrandom = { workspace = true }
+# The authority certificates a developer gives in PEM form. The same version the
+# RPC crate reads its own PEM files with.
+rustls-pemfile = "2"
+# Verifying a signed alert callback: keyed BLAKE3, the head's own scheme.
+blake3 = { workspace = true }
 
 [dev-dependencies]
+# The TLS tests build a real authority and a real collector certificate.
+rcgen = { workspace = true }
 tallyowl-config = { workspace = true }
 tallyowl-control-api = { workspace = true }

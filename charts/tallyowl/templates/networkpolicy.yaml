@@ -1,0 +1,56 @@
+{{- include "tallyowl.validate" . -}}
+{{- if .Values.deployment.networkPolicy.enabled }}
+# The queue port carries no transport security and no authentication in this
+# release, because Corndogs has no TLS (D62). This policy is what limits it,
+# and it also limits the replication and ingest ports, which use mutual TLS. A
+# cluster with no policy controller ignores it, so check that yours enforces
+# one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tallyowl.fullname" . }}
+  labels:
+    {{- include "tallyowl.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "tallyowl.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- if .Values.replication.listen }}
+    # Node to node only.
+    - ports:
+        - port: {{ include "tallyowl.port" .Values.replication.listen }}
+      from:
+        - podSelector:
+            matchLabels:
+              {{- include "tallyowl.selectorLabels" . | nindent 14 }}
+    {{- end }}
+    # Ingest, and the queue when it runs beside the head: the collectors and
+    # this release.
+    - ports:
+        - port: {{ include "tallyowl.port" .Values.head.listen }}
+        {{- if .Values.corndogsDeployment.enabled }}
+        - port: {{ include "tallyowl.port" .Values.corndogs.endpoint }}
+        {{- end }}
+      from:
+        - podSelector:
+            matchLabels:
+              {{- include "tallyowl.selectorLabels" . | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.deployment.networkPolicy.collectorSelector | nindent 14 }}
+    # The dashboard and the operational port.
+    - ports:
+        - port: {{ include "tallyowl.port" .Values.head.operationalListen }}
+        {{- if .Values.dashboard.enabled }}
+        - port: {{ include "tallyowl.port" .Values.dashboard.listen }}
+        {{- end }}
+      from:
+        {{- if .Values.deployment.networkPolicy.extraIngressFrom }}
+        {{- toYaml .Values.deployment.networkPolicy.extraIngressFrom | nindent 8 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+{{- end }}

@@ -71,6 +71,7 @@ fn head(name: &str, settings: TailSettings) -> Head {
             receipt_policy: ReceiptPolicy::LocalOne,
             open_traces: Some(Arc::clone(&open)),
             policy: None,
+            sources: None,
         },
         query: QueryService {
             store: Arc::clone(&store),

@@ -23,6 +23,7 @@
 //! collector starts each one only when configuration asks for it.
 
 pub mod exposition;
+pub mod ids;
 pub mod otlp;
 pub mod protobuf;
 pub mod receiver;

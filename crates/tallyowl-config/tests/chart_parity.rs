@@ -51,6 +51,12 @@ const NOT_SETTINGS: &[&str] = &[
     // Where a cluster routes traffic from. A Gateway is the cluster's object,
     // not TallyOwl's.
     "gateway",
+    // The pod itself: annotations, the termination grace period, the container
+    // security context, the key Secret, extra volumes, the ServiceMonitor, the
+    // NetworkPolicy, and the maintenance Job. One key holds them all, so a new
+    // one needs no change to this list, to `DEPLOYMENT_KEYS` in
+    // `tools/tallyowl_tools/helm.py`, or to either chart's `omit` list.
+    "deployment",
 ];
 
 fn repository_root() -> PathBuf {

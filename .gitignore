@@ -34,6 +34,12 @@
 # `./tools.sh setup` puts it there. Never edit it.
 /.deps/
 
+# A link to the pinned csilgen generators under `.deps`. csilgen reads
+# `.generators` in its working directory before the user's own, and
+# `./tools.sh deps` makes the link. Never commit it.
+/csil/.generators
+/csil/.generators.part
+
 # Node.js
 node_modules/
 /packages/*/dist/

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use tallyowl_cluster_api::codec::*;
 use tallyowl_cluster_api::types::{
-    AssignProjectRequest, ClearDegradedRequest, DescribeTopologyRequest, RouteRequest,
-    SetReceiptPolicyRequest, SplitTabletRequest, UnsafeRecoverRequest,
+    AssignProjectRequest, ClearDegradedRequest, DescribeTopologyRequest, MoveTabletRequest,
+    RouteRequest, SetReceiptPolicyRequest, SplitTabletRequest, UnsafeRecoverRequest,
 };
 use tallyowl_rpc::{Client, Dispatcher, Server};
 
@@ -578,4 +578,55 @@ fn an_operation_this_service_does_not_have_is_a_transport_failure_and_not_an_err
         .call(SERVICE, "invent", Vec::new())
         .expect_err("no handler ran");
     assert_eq!(failure.code, tallyowl_obs::error::ErrorCode::Unavailable);
+}
+
+#[test]
+fn a_split_or_a_move_is_refused_where_tablets_run_as_groups() {
+    // Both record a change that nothing carries out. On a node that runs a
+    // tablet group the split left a child with no group and no data, every read
+    // asked it and came back incomplete, and a move stayed `Moving` for ever.
+    let operator = start();
+    let registry = operator.plane.registry();
+    let group = crate::groups::GroupKey::Tablet("t1".into());
+    registry
+        .start(
+            group,
+            Arc::new(crate::raft::machine::TabletMachine::new(Arc::clone(
+                &operator.store,
+            ))),
+            vec![Member::voter("operator", "127.0.0.1:1")],
+            0,
+        )
+        .expect("the group starts");
+
+    let before = operator.plane.topology().generation;
+    let split = call(
+        &operator,
+        "split-tablet",
+        encode_split_tablet_request(&SplitTabletRequest {
+            tablet: "t1".into(),
+            at_shard: None,
+        }),
+    );
+    let message = is_error(&split).expect("a typed refusal");
+    assert!(message.contains("not built yet"), "{message}");
+    assert!(operator.plane.topology().tablet("t1-b").is_none());
+
+    let moved = call(
+        &operator,
+        "move-tablet",
+        encode_move_tablet_request(&MoveTabletRequest {
+            tablet: "t1".into(),
+            away_from: "storage-a".into(),
+            onto: "storage-b".into(),
+        }),
+    );
+    let message = is_error(&moved).expect("a typed refusal");
+    assert!(message.contains("add-replica"), "{message}");
+    assert_eq!(
+        operator.plane.topology().generation,
+        before,
+        "a refused operation changed the topology"
+    );
+    registry.shutdown();
 }

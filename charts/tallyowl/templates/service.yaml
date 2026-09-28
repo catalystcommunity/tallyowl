@@ -10,6 +10,9 @@ metadata:
     {{- include "tallyowl.labels" . | nindent 4 }}
 spec:
   clusterIP: None
+  # A consensus group forms before any pod is ready, so a peer must resolve a
+  # pod that is not ready yet.
+  publishNotReadyAddresses: true
   selector:
     {{- include "tallyowl.selectorLabels" . | nindent 4 }}
   ports:

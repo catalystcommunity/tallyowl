@@ -459,6 +459,23 @@ func (v *CampaignCostPayload) Validate() error {
 	return nil
 }
 
+// ValidateAlertNotifyRequest validates the AlertNotifyRequest struct
+func (v *AlertNotifyRequest) Validate() error {
+	if len(v.Signature) < 64 {
+		return fmt.Errorf("field 'Signature' must have at least 64 elements")
+	}
+	if len(v.Signature) > 64 {
+		return fmt.Errorf("field 'Signature' must have at most 64 elements")
+	}
+	if len(v.Body) < 1 {
+		return fmt.Errorf("field 'Body' must have at least 1 elements")
+	}
+	if len(v.Body) > 65536 {
+		return fmt.Errorf("field 'Body' must have at most 65536 elements")
+	}
+	return nil
+}
+
 // ValidateProperty validates the Property struct
 func (v *Property) Validate() error {
 	if len(v.Key) < 1 {

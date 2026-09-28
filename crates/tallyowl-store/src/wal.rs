@@ -39,12 +39,20 @@ use std::time::Duration;
 
 use crate::segment::format::{get_u32, get_u64, page_checksum, put_u32, put_u64, FormatError};
 
-/// The first bytes of every append log, so a file that is not one is refused
-/// rather than parsed.
-pub const WAL_MAGIC: &[u8; 8] = b"TOWLWAL1";
+/// The first bytes of every append log this build starts, so a file that is not
+/// one is refused rather than parsed.
+///
+/// The last byte is the frame version. In version 2 a frame's checksum covers
+/// its length and its position as well as its payload.
+pub const WAL_MAGIC: &[u8; 8] = b"TOWLWAL2";
 
-/// A frame header: payload length, log position, and a checksum over the
-/// payload.
+/// The version before it, whose checksum covered the payload alone. A flipped
+/// bit in a position went unseen there, and the position decides what a replay
+/// returns and what a reclamation removes. A log that starts with this is read
+/// as it was written, and becomes version 2 the next time it is rewritten.
+pub const WAL_MAGIC_V1: &[u8; 8] = b"TOWLWAL1";
+
+/// A frame header: payload length, log position, and a checksum.
 pub const FRAME_HEADER_BYTES: usize = 20;
 
 /// D47. The default linger, and the measured best of the four modes.
@@ -223,6 +231,9 @@ struct Shared {
     /// back. Reopening the log is what clears this, because reopening truncates
     /// to the last complete frame.
     failure: Option<String>,
+    /// Whether this file's frames carry a checksum over their header. See
+    /// [`WAL_MAGIC`].
+    header_checksummed: bool,
     /// Test-only fault injection: refuse the next write as a device would.
     ///
     /// `docs/FAILURE_MODES.md` requires a test for the append-log refusal, and
@@ -247,6 +258,26 @@ impl Wal {
     /// A torn final frame is truncated, which is the only truncation recovery
     /// performs. Every complete frame before it survives.
     pub fn open(path: impl AsRef<Path>, settings: GroupCommit) -> Result<Arc<Wal>, WalError> {
+        Wal::open_acknowledged(path, settings, None)
+    }
+
+    /// Open, knowing the highest position the store has acknowledged.
+    ///
+    /// **Damage in the middle of the log is not a torn tail.** Recovery stops
+    /// at the first frame that does not read back, and it used to cut the file
+    /// there whatever followed. A frame that still reads back beyond the damage,
+    /// at a position the store acknowledged, is a batch a caller was told is
+    /// safe: cutting it off lost it with no error, no log line, and no metric.
+    /// With `acknowledged_through` the log refuses to open instead, and leaves
+    /// the file exactly as it found it.
+    ///
+    /// A frame beyond the damage at a position nobody acknowledged is what a
+    /// group torn by a power loss looks like, and that is still cut.
+    pub fn open_acknowledged(
+        path: impl AsRef<Path>,
+        settings: GroupCommit,
+        acknowledged_through: Option<u64>,
+    ) -> Result<Arc<Wal>, WalError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -257,7 +288,8 @@ impl Wal {
             })?;
         }
 
-        let recovered = recover(&path)?;
+        let recovered = recover(&path, acknowledged_through)?;
+        let existed = path.exists();
 
         let file = OpenOptions::new()
             .create(true)
@@ -276,13 +308,25 @@ impl Wal {
         file.set_len(recovered.durable_bytes).map_err(|e| {
             WalError::Unavailable(format!("The append log could not be trimmed: {e}"))
         })?;
-        if recovered.durable_bytes == 0 {
+        // A log with no frame in it starts, or starts again, in the current
+        // frame version.
+        let mut header_checksummed = recovered.header_checksummed;
+        if recovered.frames.is_empty() {
+            file.set_len(0).map_err(|e| {
+                WalError::Unavailable(format!("The append log could not be trimmed: {e}"))
+            })?;
             file.write_all_at(WAL_MAGIC, 0).map_err(|e| {
                 WalError::Unavailable(format!("The append log could not be started: {e}"))
             })?;
             file.sync_data().map_err(|e| {
                 WalError::Unavailable(format!("The append log could not be flushed to disk: {e}"))
             })?;
+            header_checksummed = true;
+        }
+        if !existed {
+            // A new file is a new directory entry, and the entry has to reach
+            // the device before a frame in the file can be called durable.
+            sync_parent(&path)?;
         }
         let write_offset = recovered.durable_bytes.max(WAL_MAGIC.len() as u64);
 
@@ -303,6 +347,7 @@ impl Wal {
                 next_position: recovered.next_position,
                 statistics: WalStatistics::default(),
                 failure: None,
+                header_checksummed,
                 #[cfg(test)]
                 fail_next_write: false,
             }),
@@ -312,6 +357,28 @@ impl Wal {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Never assign a position below `floor`.
+    ///
+    /// **A position is assigned once and never reused**, and the log alone
+    /// cannot keep that promise. It learns its next position from the frames it
+    /// holds, and a log whose frames were all reclaimed holds none, so after a
+    /// restart it would begin again at zero. The store then had frames below
+    /// its own checkpoint: a restart did not replay them and the next seal
+    /// reclaimed them, and both were acknowledged batches. The store knows how
+    /// far the log has reached, from its checkpoint and its last receipt, and
+    /// tells the log here before anything is appended.
+    pub fn start_at_least(&self, floor: u64) {
+        let mut shared = self.shared.lock().expect("append log lock");
+        if shared.next_position < floor {
+            shared.next_position = floor;
+            // Nothing is pending at this point, so every position below the
+            // floor is as durable as it will ever be.
+            if shared.pending.is_empty() {
+                shared.durable_before = shared.durable_before.max(floor);
+            }
+        }
     }
 
     /// Append one payload and return only after it is durable.
@@ -354,7 +421,7 @@ impl Wal {
 
         let position = shared.next_position;
         shared.next_position += 1;
-        let frame = encode_frame(position, payload);
+        let frame = encode_frame(position, payload, shared.header_checksummed);
         shared.pending.extend_from_slice(&frame);
         shared.pending_frames += 1;
 
@@ -591,7 +658,7 @@ impl Wal {
     /// The catalog checkpoint decides `from`, so a replay after a crash covers
     /// exactly the range a segment has not yet taken.
     pub fn replay(&self, from: u64) -> Result<Vec<Frame>, WalError> {
-        let frames = recover(&self.path)?.frames;
+        let frames = recover(&self.path, None)?.frames;
         Ok(frames.into_iter().filter(|f| f.position >= from).collect())
     }
 
@@ -711,52 +778,55 @@ impl Wal {
             return Ok(0);
         }
 
-        let tail = &bytes[at..];
+        // The kept frames, in the current frame version. A log an older build
+        // started carries frames whose checksum leaves their position out, and
+        // this rewrite is where those stop.
+        let tail: std::borrow::Cow<'_, [u8]> = if shared.header_checksummed {
+            std::borrow::Cow::Borrowed(&bytes[at..])
+        } else {
+            std::borrow::Cow::Owned(reencode(&bytes[at..])?)
+        };
         let temporary = self.path.with_extension("reclaiming");
-        {
-            let file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&temporary)
-                .map_err(|e| {
-                    WalError::Unavailable(format!("The append log could not be rewritten: {e}"))
-                })?;
-            file.write_all_at(WAL_MAGIC, 0).map_err(|e| {
+        // Read and write, because this handle becomes the log. Opening the path
+        // again after the rename could fail, and the log then kept writing to
+        // the file the rename had just unlinked: frames acknowledged into a
+        // file nothing could open.
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&temporary)
+            .map_err(|e| {
                 WalError::Unavailable(format!("The append log could not be rewritten: {e}"))
             })?;
-            file.write_all_at(tail, magic).map_err(|e| {
-                WalError::Unavailable(format!("The append log could not be rewritten: {e}"))
-            })?;
-            file.sync_data().map_err(|e| {
-                WalError::Unavailable(format!("The append log could not be flushed to disk: {e}"))
-            })?;
-        }
+        file.write_all_at(WAL_MAGIC, 0).map_err(|e| {
+            WalError::Unavailable(format!("The append log could not be rewritten: {e}"))
+        })?;
+        file.write_all_at(&tail, magic).map_err(|e| {
+            WalError::Unavailable(format!("The append log could not be rewritten: {e}"))
+        })?;
+        file.sync_data().map_err(|e| {
+            WalError::Unavailable(format!("The append log could not be flushed to disk: {e}"))
+        })?;
 
         std::fs::rename(&temporary, &self.path).map_err(|e| {
             WalError::Unavailable(format!("The append log could not be replaced: {e}"))
         })?;
-        // The rename itself has to reach the device, or a crash could leave the
-        // directory entry pointing at the old file.
-        if let Some(parent) = self.path.parent() {
-            if let Ok(directory) = File::open(parent) {
-                let _ = directory.sync_all();
-            }
-        }
-
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.path)
-            .map_err(|e| {
-                WalError::Unavailable(format!(
-                    "The append log {} could not be reopened: {e}",
-                    self.path.display()
-                ))
-            })?;
         shared.file = Arc::new(file);
         shared.write_offset = magic + tail.len() as u64;
         shared.durable_upto = shared.write_offset;
+        shared.header_checksummed = true;
+
+        // The rename itself has to reach the device, or a crash could leave the
+        // directory entry pointing at the old file, and every frame appended
+        // from here on would be in a file the directory does not name. A log
+        // that cannot make that durable stops accepting.
+        if let Err(failed) = sync_parent(&self.path) {
+            shared.failure = Some(failed.to_string());
+            self.durable.notify_all();
+            return Err(failed);
+        }
         Ok(at as u64)
     }
 
@@ -776,6 +846,13 @@ impl Wal {
         shared.file.set_len(WAL_MAGIC.len() as u64).map_err(|e| {
             WalError::Unavailable(format!("The append log could not be trimmed: {e}"))
         })?;
+        if !shared.header_checksummed {
+            // No frame is left, so the file moves to the current frame version.
+            shared.file.write_all_at(WAL_MAGIC, 0).map_err(|e| {
+                WalError::Unavailable(format!("The append log could not be started: {e}"))
+            })?;
+            shared.header_checksummed = true;
+        }
         shared.file.sync_data().map_err(|e| {
             WalError::Unavailable(format!("The append log could not be flushed to disk: {e}"))
         })?;
@@ -785,13 +862,78 @@ impl Wal {
     }
 }
 
-fn encode_frame(position: u64, payload: &[u8]) -> Vec<u8> {
+fn encode_frame(position: u64, payload: &[u8], header_checksummed: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
     put_u32(&mut out, payload.len() as u32);
     put_u64(&mut out, position);
-    put_u64(&mut out, page_checksum(payload));
+    put_u64(
+        &mut out,
+        frame_checksum(payload.len() as u32, position, payload, header_checksummed),
+    );
     out.extend_from_slice(payload);
     out
+}
+
+/// A frame's checksum. In version 2 it covers the length and the position, so
+/// neither can change without the frame being refused.
+fn frame_checksum(length: u32, position: u64, payload: &[u8], header_checksummed: bool) -> u64 {
+    if !header_checksummed {
+        return page_checksum(payload);
+    }
+    let mut covered = Vec::with_capacity(12 + payload.len());
+    put_u32(&mut covered, length);
+    put_u64(&mut covered, position);
+    covered.extend_from_slice(payload);
+    page_checksum(&covered)
+}
+
+/// Whole version 1 frames, written again as version 2.
+fn reencode(frames: &[u8]) -> Result<Vec<u8>, WalError> {
+    let mut out = Vec::with_capacity(frames.len());
+    let mut at = 0usize;
+    while at < frames.len() {
+        let length = get_u32(frames, at)? as usize;
+        let position = get_u64(frames, at + 4)?;
+        let next = at + FRAME_HEADER_BYTES + length;
+        if next > frames.len() {
+            break;
+        }
+        out.extend_from_slice(&encode_frame(
+            position,
+            &frames[at + FRAME_HEADER_BYTES..next],
+            true,
+        ));
+        at = next;
+    }
+    Ok(out)
+}
+
+/// Make a change to the directory that holds `path` durable.
+fn sync_parent(path: &Path) -> Result<(), WalError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| {
+            WalError::Unavailable(format!(
+                "The directory {} could not be flushed to disk, so a change to the append log \
+                 might not survive a power loss: {e}",
+                parent.display()
+            ))
+        })
+}
+
+/// One whole frame that reads back, starting at `at`.
+fn frame_at(bytes: &[u8], at: usize, header_checksummed: bool) -> Option<(u64, usize)> {
+    let length = get_u32(bytes, at).ok()?;
+    let position = get_u64(bytes, at + 4).ok()?;
+    let checksum = get_u64(bytes, at + 12).ok()?;
+    let payload_at = at.checked_add(FRAME_HEADER_BYTES)?;
+    let end = payload_at.checked_add(length as usize)?;
+    let payload = bytes.get(payload_at..end)?;
+    (frame_checksum(length, position, payload, header_checksummed) == checksum)
+        .then_some((position, end))
 }
 
 /// The position of the last whole frame in `bytes`, when there is one.
@@ -855,16 +997,19 @@ struct Recovered {
     /// How many bytes hold complete frames. A torn tail beyond this is cut.
     durable_bytes: u64,
     next_position: u64,
+    header_checksummed: bool,
 }
 
 /// Read every complete frame, and say where the complete part ends.
-fn recover(path: &Path) -> Result<Recovered, WalError> {
+fn recover(path: &Path, acknowledged_through: Option<u64>) -> Result<Recovered, WalError> {
+    let nothing = Recovered {
+        frames: Vec::new(),
+        durable_bytes: 0,
+        next_position: 0,
+        header_checksummed: true,
+    };
     if !path.exists() {
-        return Ok(Recovered {
-            frames: Vec::new(),
-            durable_bytes: 0,
-            next_position: 0,
-        });
+        return Ok(nothing);
     }
 
     let mut bytes = Vec::new();
@@ -880,18 +1025,18 @@ fn recover(path: &Path) -> Result<Recovered, WalError> {
     if bytes.len() < WAL_MAGIC.len() {
         // A file that never reached its own magic holds nothing, which is the
         // ordinary result of a crash during creation.
-        return Ok(Recovered {
-            frames: Vec::new(),
-            durable_bytes: 0,
-            next_position: 0,
-        });
+        return Ok(nothing);
     }
-    if &bytes[..WAL_MAGIC.len()] != WAL_MAGIC {
-        return Err(WalError::Damaged(format!(
-            "The file {} is where the append log should be and is not one.",
-            path.display()
-        )));
-    }
+    let header_checksummed = match &bytes[..WAL_MAGIC.len()] {
+        magic if magic == WAL_MAGIC => true,
+        magic if magic == WAL_MAGIC_V1 => false,
+        _ => {
+            return Err(WalError::Damaged(format!(
+                "The file {} is where the append log should be and is not one.",
+                path.display()
+            )))
+        }
+    };
 
     let mut frames = Vec::new();
     let mut at = WAL_MAGIC.len();
@@ -899,39 +1044,51 @@ fn recover(path: &Path) -> Result<Recovered, WalError> {
     let mut next_position = 0u64;
 
     while at < bytes.len() {
-        let Ok(length) = get_u32(&bytes, at) else {
+        // A frame that does not read back ends the log. A crash during a write
+        // is the ordinary cause, and what follows it is then part of the same
+        // unfinished write.
+        let Some((position, end)) = frame_at(&bytes, at, header_checksummed) else {
             break;
         };
-        let length = length as usize;
-        let payload_at = at + FRAME_HEADER_BYTES;
-        if payload_at + length > bytes.len() {
-            // A torn final frame. Everything before it survives.
-            break;
-        }
-        let position = get_u64(&bytes, at + 4)?;
-        let checksum = get_u64(&bytes, at + 12)?;
-        let payload = &bytes[payload_at..payload_at + length];
-
-        if page_checksum(payload) != checksum {
-            // A frame that does not match its checksum ends the log. A crash
-            // during a write is the ordinary cause, and a later frame written
-            // after it would be from a different life of the process.
-            break;
-        }
-
         frames.push(Frame {
             position,
-            payload: payload.to_vec(),
+            payload: bytes[at + FRAME_HEADER_BYTES..end].to_vec(),
         });
         next_position = next_position.max(position + 1);
-        at = payload_at + length;
+        at = end;
         complete = at;
+    }
+
+    // **Unless what follows was acknowledged.** See `Wal::open_acknowledged`.
+    if let (Some(acknowledged), true) = (acknowledged_through, complete < bytes.len()) {
+        // The position is read first, because it is eight bytes and rules out
+        // nearly every offset, and a checksum is the whole payload.
+        let beyond = (complete + 1..bytes.len())
+            .filter(|offset| {
+                get_u64(&bytes, offset + 4)
+                    .is_ok_and(|position| position >= next_position && position <= acknowledged)
+            })
+            .filter_map(|offset| frame_at(&bytes, offset, header_checksummed))
+            .map(|(position, _)| position)
+            .next();
+        if let Some(position) = beyond {
+            return Err(WalError::Damaged(format!(
+                "The append log {} is damaged in the middle, at byte {complete}, and it holds \
+                 accepted data after the damage (log position {position}). We did not cut the \
+                 file, because that would discard the accepted data. Restore the file from a \
+                 copy. If there is no copy, move the file away and start again: the data in it \
+                 that was not yet stored elsewhere is then lost, and TallyOwl will not report \
+                 it as stored.",
+                path.display()
+            )));
+        }
     }
 
     Ok(Recovered {
         frames,
         durable_bytes: complete as u64,
         next_position,
+        header_checksummed,
     })
 }
 
@@ -1031,6 +1188,126 @@ mod tests {
         // sitting in front of the next append.
         wal.append(b"after").unwrap();
         assert_eq!(wal.replay(0).unwrap().len(), 11);
+    }
+
+    /// A log as the build before frame version 2 wrote it.
+    fn write_version_one(path: &Path, payloads: &[&[u8]]) {
+        let mut bytes = WAL_MAGIC_V1.to_vec();
+        for (position, payload) in payloads.iter().enumerate() {
+            bytes.extend_from_slice(&encode_frame(position as u64, payload, false));
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_log_an_older_build_wrote_still_reads_and_moves_to_the_new_frame_when_rewritten() {
+        let place = directory("version-one");
+        let path = place.join("tablet.wal");
+        write_version_one(&path, &[&[1; 32], &[2; 32], &[3; 32]]);
+
+        let wal = Wal::open(
+            &path,
+            GroupCommit {
+                min_reclaim_bytes: 0,
+                ..GroupCommit::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(wal.replay(0).unwrap().len(), 3);
+        // A frame appended to it is a frame of the file's own version, so one
+        // file never holds two kinds.
+        assert_eq!(wal.append(&[4; 32]).unwrap(), 3);
+        drop(wal);
+        assert_eq!(&std::fs::read(&path).unwrap()[..8], WAL_MAGIC_V1);
+        let wal = Wal::open(
+            &path,
+            GroupCommit {
+                min_reclaim_bytes: 0,
+                ..GroupCommit::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(wal.replay(0).unwrap().len(), 4);
+
+        // The rewrite is where the old frames stop.
+        assert!(wal.reclaim_through(1).unwrap() > 0);
+        wal.append(&[5; 32]).unwrap();
+        drop(wal);
+        assert_eq!(&std::fs::read(&path).unwrap()[..8], WAL_MAGIC);
+        let wal = Wal::open(&path, GroupCommit::default()).unwrap();
+        let kept: Vec<(u64, u8)> = wal
+            .replay(0)
+            .unwrap()
+            .iter()
+            .map(|frame| (frame.position, frame.payload[0]))
+            .collect();
+        assert_eq!(kept, vec![(2, 3), (3, 4), (4, 5)]);
+    }
+
+    #[test]
+    fn a_position_that_changed_on_disk_is_refused_rather_than_believed() {
+        // The position decides what a replay returns and what a reclamation
+        // removes, and the old checksum did not cover it.
+        let place = directory("position-flip");
+        let path = place.join("tablet.wal");
+        {
+            let wal = Wal::open(&path, GroupCommit::default()).unwrap();
+            for n in 0..3u8 {
+                wal.append(&[n; 32]).unwrap();
+            }
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        // The third frame's position field.
+        let position_at = WAL_MAGIC.len() + 2 * (FRAME_HEADER_BYTES + 32) + 4;
+        bytes[position_at] ^= 0x40;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let wal = Wal::open(&path, GroupCommit::default()).unwrap();
+        let positions: Vec<u64> = wal.replay(0).unwrap().iter().map(|f| f.position).collect();
+        assert_eq!(positions, vec![0, 1]);
+    }
+
+    #[test]
+    fn damage_with_acknowledged_frames_after_it_refuses_to_open_and_leaves_the_file_alone() {
+        let place = directory("mid-log-damage");
+        let path = place.join("tablet.wal");
+        {
+            let wal = Wal::open(&path, GroupCommit::default()).unwrap();
+            for n in 0..5u8 {
+                wal.append(&[n; 32]).unwrap();
+            }
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        let third = WAL_MAGIC.len() + 2 * (FRAME_HEADER_BYTES + 32) + FRAME_HEADER_BYTES;
+        bytes[third] ^= 0xff;
+        std::fs::write(&path, &bytes).unwrap();
+
+        // The store acknowledged position 4, and frames 3 and 4 still read back.
+        let refused = match Wal::open_acknowledged(&path, GroupCommit::default(), Some(4)) {
+            Err(refused) => refused,
+            Ok(_) => panic!("the log cut off two acknowledged frames and opened"),
+        };
+        assert!(matches!(refused, WalError::Damaged(_)));
+        assert!(refused.to_string().contains("damaged in the middle"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "the file was changed, so the accepted data after the damage is gone"
+        );
+
+        // The same damage in the length field, which moves where the next frame
+        // seems to start.
+        let mut in_length = std::fs::read(&path).unwrap();
+        in_length[third] ^= 0xff;
+        in_length[third - FRAME_HEADER_BYTES + 2] ^= 0x01;
+        std::fs::write(&path, &in_length).unwrap();
+        assert!(Wal::open_acknowledged(&path, GroupCommit::default(), Some(4)).is_err());
+
+        // Nothing past position 1 was acknowledged: this is a torn group, and a
+        // torn group is cut as it always was.
+        std::fs::write(&path, &bytes).unwrap();
+        let wal = Wal::open_acknowledged(&path, GroupCommit::default(), Some(1)).unwrap();
+        assert_eq!(wal.replay(0).unwrap().len(), 2);
     }
 
     #[test]

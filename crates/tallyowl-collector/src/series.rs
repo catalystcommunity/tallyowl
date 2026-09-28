@@ -24,6 +24,31 @@
 //! amount nobody can bound. Dropping quietly makes a chart that reads as an
 //! outage.
 //!
+//! # What the byte budget counts
+//!
+//! The bytes of a series are the bytes of its **latest** point, and the bytes
+//! of a metric are the sum over its active series. That is the live footprint:
+//! what one reading of every active series costs downstream. It rises when a
+//! series arrives or grows, and it falls when a series expires.
+//!
+//! An earlier version added every admitted point for as long as the process
+//! ran. A steady metric then filled its budget in hours with no growth at all,
+//! and every new series of it was refused until a restart, with a message that
+//! told the operator to send fewer series.
+//!
+//! # What the ledger itself may cost
+//!
+//! The ledger is memory inside the collector, keyed by a name a client chose.
+//! So it has three bounds of its own:
+//!
+//! - one project holds at most `max_metric_names` metric names. A new name past
+//!   that is refused in the open, the same way a new series is;
+//! - an idle sweep runs on the admit path at a fraction of the idle period. It
+//!   removes every idle series and every metric that holds none, so a metric
+//!   that stopped gives its place back without having to fill first;
+//! - the active totals are kept as running numbers. Reading them costs nothing,
+//!   which matters because intake reads them for every batch.
+//!
 //! # The work budget
 //!
 //! Merging is quadratic in nothing and linear in the points, but a batch is a
@@ -76,6 +101,10 @@ pub struct SeriesBudget {
     pub idle_expiry_ms: i64,
 }
 
+/// Metric names one project may hold, when nothing sets another number. See
+/// `metrics.maxMetricNamesForEachProject`.
+pub const DEFAULT_MAX_METRIC_NAMES: u64 = 10_000;
+
 impl Default for SeriesBudget {
     fn default() -> SeriesBudget {
         SeriesBudget {
@@ -97,6 +126,10 @@ pub struct Pressure {
     pub series_refused: u64,
     pub bytes_refused: u64,
     pub labels_refused: u64,
+    /// New metric names refused because the project already holds its limit.
+    pub names_refused: u64,
+    /// Metric names the ledger holds, across every project.
+    pub active_metrics: u64,
     pub active_series: u64,
     pub active_bytes: u64,
     pub expired_series: u64,
@@ -118,6 +151,7 @@ struct MetricState {
 #[derive(Debug)]
 pub struct SeriesLedger {
     budget: SeriesBudget,
+    max_metric_names: u64,
     state: Mutex<LedgerState>,
 }
 
@@ -126,15 +160,86 @@ struct LedgerState {
     /// Keyed by project and metric name. A project cannot spend another
     /// project's budget, which is the multi-tenant half of this.
     metrics: HashMap<(Vec<u8>, String), MetricState>,
+    /// How many metric names each project holds. It is what the name limit
+    /// reads, so the limit costs one lookup and not a scan.
+    names: HashMap<Vec<u8>, u64>,
+    /// Running totals. `pressure` holds the refusal counters, and these two
+    /// are kept here as the series come and go.
+    active_series: u64,
+    active_bytes: u64,
+    last_sweep_ms: i64,
     pressure: Pressure,
+}
+
+impl LedgerState {
+    /// Remove every series that has been idle for the whole idle period, and
+    /// every metric that then holds none.
+    fn sweep(&mut self, horizon: i64) {
+        let mut expired = 0u64;
+        let mut freed = 0u64;
+        let names = &mut self.names;
+        self.metrics.retain(|(project, _), metric| {
+            metric.series.retain(|_, entry| {
+                let keep = entry.last_seen_ms > horizon;
+                if !keep {
+                    expired += 1;
+                    freed = freed.saturating_add(entry.bytes);
+                    metric.bytes = metric.bytes.saturating_sub(entry.bytes);
+                }
+                keep
+            });
+            let keep = !metric.series.is_empty();
+            if !keep {
+                if let Some(held) = names.get_mut(project) {
+                    *held = held.saturating_sub(1);
+                    if *held == 0 {
+                        names.remove(project);
+                    }
+                }
+            }
+            keep
+        });
+        self.active_series = self.active_series.saturating_sub(expired);
+        self.active_bytes = self.active_bytes.saturating_sub(freed);
+        self.pressure.expired_series += expired;
+    }
 }
 
 impl SeriesLedger {
     pub fn new(budget: SeriesBudget) -> SeriesLedger {
         SeriesLedger {
             budget,
+            max_metric_names: DEFAULT_MAX_METRIC_NAMES,
             state: Mutex::new(LedgerState::default()),
         }
+    }
+
+    /// Set how many metric names one project may hold.
+    pub fn with_max_metric_names(mut self, names: u64) -> SeriesLedger {
+        self.max_metric_names = names.max(1);
+        self
+    }
+
+    /// How often the idle sweep runs. A quarter of the idle period keeps an
+    /// idle series for at most a quarter longer than the setting says.
+    fn sweep_interval_ms(&self) -> i64 {
+        (self.budget.idle_expiry_ms / 4).max(1_000)
+    }
+
+    /// Run the idle sweep when one is due. Intake calls this for each batch,
+    /// so a ledger that stopped receiving metric points still gives its
+    /// series back.
+    pub fn sweep_if_due(&self, now_ms: i64) {
+        let mut state = self.state.lock().expect("series lock");
+        self.sweep_if_due_locked(&mut state, now_ms);
+    }
+
+    fn sweep_if_due_locked(&self, state: &mut LedgerState, now_ms: i64) {
+        if now_ms - state.last_sweep_ms < self.sweep_interval_ms() {
+            return;
+        }
+        state.last_sweep_ms = now_ms;
+        state.sweep(now_ms - self.budget.idle_expiry_ms);
     }
 
     pub fn budget(&self) -> SeriesBudget {
@@ -144,8 +249,9 @@ impl SeriesLedger {
     pub fn pressure(&self) -> Pressure {
         let state = self.state.lock().expect("series lock");
         let mut pressure = state.pressure;
-        pressure.active_series = state.metrics.values().map(|m| m.series.len() as u64).sum();
-        pressure.active_bytes = state.metrics.values().map(|m| m.bytes).sum();
+        pressure.active_series = state.active_series;
+        pressure.active_bytes = state.active_bytes;
+        pressure.active_metrics = state.metrics.len() as u64;
         pressure
     }
 
@@ -195,65 +301,111 @@ impl SeriesLedger {
             ));
         }
 
+        self.sweep_if_due_locked(&mut state, now_ms);
+
         let series_key = series_key(point);
         let budget = self.budget;
         let key = (project_id.to_vec(), point.metric_name.clone());
-        let metric = state.metrics.entry(key).or_default();
+        let state = &mut *state;
 
-        if let Some(entry) = metric.series.get_mut(&series_key) {
-            entry.last_seen_ms = now_ms;
-            entry.bytes = entry.bytes.saturating_add(size);
-            metric.bytes = metric.bytes.saturating_add(size);
-            // An admitted series stays admitted even when the byte budget is
-            // now full, because refusing it would lose the middle of a series
-            // rather than the start of a new one, and a broken series is harder
-            // to read than a missing one.
-            return Ok(());
+        if !state.metrics.contains_key(&key) {
+            // A name this project has not sent before. The name is a string a
+            // client chose, so the number of them is bounded like everything
+            // else a client chooses.
+            let held = state.names.get(project_id).copied().unwrap_or(0);
+            if held >= self.max_metric_names {
+                state.pressure.names_refused += 1;
+                return Err(TallyOwlError::over_limit(
+                    "This project",
+                    &format!("{} metric names", held + 1),
+                    &format!("{} metric names", self.max_metric_names),
+                    "Put the value that changes in a label and keep the metric name fixed, or raise `metrics.maxMetricNamesForEachProject`.",
+                ));
+            }
         }
 
-        // Only pay for the sweep when the budget is actually tight. A ledger
-        // with room does no work here.
-        if metric.series.len() as u64 >= budget.max_series_for_each_metric
-            || metric.bytes >= budget.max_bytes_for_each_metric
-        {
-            let horizon = now_ms - budget.idle_expiry_ms;
-            let before = metric.series.len();
-            metric.series.retain(|_, entry| {
-                let keep = entry.last_seen_ms > horizon;
-                if !keep {
-                    metric.bytes = metric.bytes.saturating_sub(entry.bytes);
-                }
-                keep
-            });
-            state.pressure.expired_series += (before - metric.series.len()) as u64;
-        }
+        if let Some(metric) = state.metrics.get_mut(&key) {
+            if let Some(entry) = metric.series.get_mut(&series_key) {
+                // The latest point replaces the earlier one in the footprint.
+                // An admitted series stays admitted even when the byte budget
+                // is now full, because refusing it would lose the middle of a
+                // series rather than the start of a new one, and a broken
+                // series is harder to read than a missing one.
+                entry.last_seen_ms = now_ms;
+                metric.bytes = metric
+                    .bytes
+                    .saturating_sub(entry.bytes)
+                    .saturating_add(size);
+                state.active_bytes = state
+                    .active_bytes
+                    .saturating_sub(entry.bytes)
+                    .saturating_add(size);
+                entry.bytes = size;
+                return Ok(());
+            }
 
-        let metric = state
-            .metrics
-            .get_mut(&(project_id.to_vec(), point.metric_name.clone()))
-            .expect("the entry was made a moment ago");
+            // The periodic sweep may not have run yet. A budget that is about
+            // to refuse checks this one metric first, so a refusal is never
+            // caused by a series that already stopped.
+            if metric.series.len() as u64 >= budget.max_series_for_each_metric
+                || metric.bytes.saturating_add(size) > budget.max_bytes_for_each_metric
+            {
+                let horizon = now_ms - budget.idle_expiry_ms;
+                let mut expired = 0u64;
+                let mut freed = 0u64;
+                metric.series.retain(|_, entry| {
+                    let keep = entry.last_seen_ms > horizon;
+                    if !keep {
+                        expired += 1;
+                        freed = freed.saturating_add(entry.bytes);
+                    }
+                    keep
+                });
+                metric.bytes = metric.bytes.saturating_sub(freed);
+                state.active_series = state.active_series.saturating_sub(expired);
+                state.active_bytes = state.active_bytes.saturating_sub(freed);
+                state.pressure.expired_series += expired;
+            }
 
-        if metric.series.len() as u64 >= budget.max_series_for_each_metric {
-            let held = metric.series.len();
-            state.pressure.series_refused += 1;
-            return Err(TallyOwlError::over_limit(
-                &format!("The metric `{}`", point.metric_name),
-                &format!("{} active series", held + 1),
-                &format!("{} active series", budget.max_series_for_each_metric),
-                "Remove a label that takes many values, or raise `metrics.maxSeriesForEachMetric` for this installation.",
-            ));
-        }
-        if metric.bytes.saturating_add(size) > budget.max_bytes_for_each_metric {
-            let held = metric.bytes;
+            if metric.series.len() as u64 >= budget.max_series_for_each_metric {
+                let held = metric.series.len();
+                state.pressure.series_refused += 1;
+                return Err(TallyOwlError::over_limit(
+                    &format!("The metric `{}`", point.metric_name),
+                    &format!("{} active series", held + 1),
+                    &format!("{} active series", budget.max_series_for_each_metric),
+                    "Remove a label that takes many values, or raise `metrics.maxSeriesForEachMetric` for this installation.",
+                ));
+            }
+            if metric.bytes.saturating_add(size) > budget.max_bytes_for_each_metric {
+                let held = metric.bytes;
+                state.pressure.bytes_refused += 1;
+                return Err(TallyOwlError::over_limit(
+                    &format!("The metric `{}`", point.metric_name),
+                    &format!("{} bytes in one reading of its active series", held + size),
+                    &format!("{} bytes", budget.max_bytes_for_each_metric),
+                    "Send fewer or shorter labels on this metric, or raise `metrics.maxBytesForEachMetric`.",
+                ));
+            }
+        } else if size > budget.max_bytes_for_each_metric {
             state.pressure.bytes_refused += 1;
             return Err(TallyOwlError::over_limit(
                 &format!("The metric `{}`", point.metric_name),
-                &format!("{} bytes", held + size),
+                &format!("{size} bytes in one point"),
                 &format!("{} bytes", budget.max_bytes_for_each_metric),
-                "Send fewer series for this metric, or raise `metrics.maxBytesForEachMetric`.",
+                "Send fewer or shorter labels on this metric, or raise `metrics.maxBytesForEachMetric`.",
             ));
         }
 
+        // Nothing refused it. Only now does a new name take a place, so a
+        // refused point never leaves an empty entry behind.
+        let metric = match state.metrics.entry(key) {
+            std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+            std::collections::hash_map::Entry::Vacant(free) => {
+                *state.names.entry(project_id.to_vec()).or_insert(0) += 1;
+                free.insert(MetricState::default())
+            }
+        };
         metric.series.insert(
             series_key,
             SeriesEntry {
@@ -262,6 +414,8 @@ impl SeriesLedger {
             },
         );
         metric.bytes = metric.bytes.saturating_add(size);
+        state.active_series += 1;
+        state.active_bytes = state.active_bytes.saturating_add(size);
         Ok(())
     }
 }
@@ -390,15 +544,23 @@ fn combine(held: &MetricPointPayload, incoming: &MetricPointPayload) -> Option<M
             out.end_at = held.end_at.max(incoming.end_at);
             match (&held.histogram_value, &incoming.histogram_value) {
                 (Some(a), Some(b)) => {
-                    if a.bounds != b.bounds {
+                    // The same bounds and the same number of buckets. Intake
+                    // refuses a histogram whose two lists disagree, but this
+                    // function is also reached from the compatibility edge, so
+                    // it does not index on a promise made somewhere else.
+                    if a.bounds != b.bounds || a.counts.len() != b.counts.len() {
                         return None;
                     }
-                    let mut counts = a.counts.clone();
-                    for (index, count) in b.counts.iter().enumerate() {
-                        counts[index] += count;
-                    }
+                    // A sum that does not fit is not a sum. Both points travel
+                    // and the head, which holds wider numbers, adds them.
+                    let counts = a
+                        .counts
+                        .iter()
+                        .zip(&b.counts)
+                        .map(|(a, b)| a.checked_add(*b))
+                        .collect::<Option<Vec<u64>>>()?;
                     out.histogram_value = Some(tallyowl_collector_api::types::HistogramValue {
-                        count: a.count + b.count,
+                        count: a.count.checked_add(b.count)?,
                         sum: a.sum + b.sum,
                         bounds: a.bounds.clone(),
                         counts,
@@ -863,5 +1025,172 @@ mod tests {
         gauge.metric_kind = MetricKind::Gauge;
         let counter = counter("requests_total", &[], 1.0);
         assert_ne!(series_key(&gauge), series_key(&counter));
+    }
+
+    #[test]
+    fn two_delta_histograms_with_the_same_bounds_and_a_different_bucket_count_both_travel() {
+        // The second point has one bucket more than its bounds allow. Adding
+        // it bucket by bucket once read past the end of the first, which
+        // stopped the worker that carried the batch.
+        let items = vec![
+            item(histogram(&[0.1, 0.5], &[1, 2], 0.4)),
+            item(histogram(&[0.1, 0.5], &[1, 2, 3, 4], 0.9)),
+        ];
+        let (out, report) = merge(items, &SeriesBudget::default());
+        assert_eq!(out.len(), 2, "a shape nobody observed is never produced");
+        assert_eq!(report.merged, 0);
+
+        // The shorter one second is the same mistake from the other side.
+        let items = vec![
+            item(histogram(&[0.1, 0.5], &[1, 2, 3], 0.4)),
+            item(histogram(&[0.1, 0.5], &[1], 0.9)),
+        ];
+        let (out, _) = merge(items, &SeriesBudget::default());
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn a_bucket_count_that_does_not_fit_is_not_added() {
+        let items = vec![
+            item(histogram(&[0.1], &[u64::MAX], 0.4)),
+            item(histogram(&[0.1], &[1], 0.9)),
+        ];
+        let (out, report) = merge(items, &SeriesBudget::default());
+        assert_eq!(out.len(), 2, "a sum that wrapped would read as a reset");
+        assert_eq!(report.merged, 0);
+    }
+
+    #[test]
+    fn a_steady_metric_never_fills_its_byte_budget() {
+        // One series, reporting for ever. The budget counts one reading of
+        // each active series, so a metric that does not grow does not fill.
+        let ledger = ledger(SeriesBudget {
+            max_bytes_for_each_metric: 250,
+            ..SeriesBudget::default()
+        });
+        let project = [1u8; 16];
+        let steady = counter("requests_total", &[("route", "/a")], 1.0);
+        for reading in 0..1_000 {
+            ledger
+                .admit(&project, &steady, 100, 10_000 + reading * 15_000)
+                .unwrap();
+        }
+        assert_eq!(ledger.pressure().active_bytes, 100);
+
+        // A second series still fits after all of those readings, which is the
+        // new pod after a deploy.
+        ledger
+            .admit(
+                &project,
+                &counter("requests_total", &[("route", "/b")], 1.0),
+                100,
+                20_000_000,
+            )
+            .expect("a steady metric left room for a new series");
+        assert_eq!(ledger.pressure().bytes_refused, 0);
+    }
+
+    #[test]
+    fn a_series_that_grows_is_counted_at_its_new_size() {
+        let ledger = ledger(SeriesBudget::default());
+        let project = [1u8; 16];
+        let point = counter("requests_total", &[], 1.0);
+        ledger.admit(&project, &point, 100, 10_000).unwrap();
+        ledger.admit(&project, &point, 140, 11_000).unwrap();
+        assert_eq!(ledger.pressure().active_bytes, 140);
+        ledger.admit(&project, &point, 90, 12_000).unwrap();
+        assert_eq!(ledger.pressure().active_bytes, 90);
+        assert_eq!(ledger.pressure().active_series, 1);
+    }
+
+    #[test]
+    fn a_project_cannot_hold_more_metric_names_than_its_limit() {
+        let ledger = ledger(SeriesBudget::default()).with_max_metric_names(2);
+        let project = [1u8; 16];
+        ledger
+            .admit(&project, &counter("a_total", &[], 1.0), 10, 10_000)
+            .unwrap();
+        ledger
+            .admit(&project, &counter("b_total", &[], 1.0), 10, 10_000)
+            .unwrap();
+        let refused = ledger
+            .admit(&project, &counter("c_total", &[], 1.0), 10, 10_000)
+            .expect_err("a third name is past the limit");
+        assert!(refused
+            .message
+            .contains("metrics.maxMetricNamesForEachProject"));
+        assert_eq!(ledger.pressure().names_refused, 1);
+        assert_eq!(
+            ledger.pressure().active_metrics,
+            2,
+            "a refused name takes no place"
+        );
+
+        // A name this project already holds is not a new name.
+        ledger
+            .admit(
+                &project,
+                &counter("a_total", &[("x", "1")], 1.0),
+                10,
+                10_000,
+            )
+            .unwrap();
+        // Another project has its own limit.
+        ledger
+            .admit(&[2u8; 16], &counter("c_total", &[], 1.0), 10, 10_000)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_idle_sweep_removes_stopped_series_and_empty_metrics_with_no_budget_full() {
+        // Nothing here is near a budget. The earlier ledger only looked for
+        // idle series when a budget was full, so these stayed until a restart.
+        let ledger = ledger(SeriesBudget {
+            idle_expiry_ms: 4_000,
+            ..SeriesBudget::default()
+        })
+        .with_max_metric_names(2);
+        let project = [1u8; 16];
+        ledger
+            .admit(&project, &counter("a_total", &[], 1.0), 10, 10_000)
+            .unwrap();
+        ledger
+            .admit(&project, &counter("b_total", &[], 1.0), 30, 10_000)
+            .unwrap();
+        assert_eq!(ledger.pressure().active_bytes, 40);
+
+        // `a_total` keeps reporting and `b_total` stops.
+        ledger
+            .admit(&project, &counter("a_total", &[], 1.0), 10, 13_000)
+            .unwrap();
+        ledger.sweep_if_due(15_000);
+        let pressure = ledger.pressure();
+        assert_eq!(pressure.active_series, 1);
+        assert_eq!(pressure.active_bytes, 10);
+        assert_eq!(pressure.active_metrics, 1, "an empty metric is removed");
+        assert_eq!(pressure.expired_series, 1);
+
+        // The name `b_total` held is free again.
+        ledger
+            .admit(&project, &counter("c_total", &[], 1.0), 10, 15_000)
+            .expect("the stopped metric gave its name back");
+    }
+
+    #[test]
+    fn the_idle_sweep_does_not_run_more_often_than_its_interval() {
+        let ledger = ledger(SeriesBudget {
+            idle_expiry_ms: 4_000,
+            ..SeriesBudget::default()
+        });
+        let project = [1u8; 16];
+        ledger
+            .admit(&project, &counter("a_total", &[], 1.0), 10, 10_000)
+            .unwrap();
+        // The sweep ran at 10,000. The series is idle at 14,000 and the next
+        // sweep is not due before 11,000, so these two calls show both sides.
+        ledger.sweep_if_due(10_500);
+        assert_eq!(ledger.pressure().active_series, 1);
+        ledger.sweep_if_due(14_001);
+        assert_eq!(ledger.pressure().active_series, 0);
     }
 }

@@ -68,3 +68,31 @@ impl<T: AsyncTransport> TallyOwlIngestAsyncClient<T> {
             .map_err(|e| ClientError::Transport(e.to_string()))
     }
 }
+
+/// Typed client for the TallyOwlAlertReceiver service.
+pub struct TallyOwlAlertReceiverAsyncClient<T: AsyncTransport> {
+    #[allow(dead_code)]
+    transport: T,
+}
+
+impl<T: AsyncTransport> TallyOwlAlertReceiverAsyncClient<T> {
+    pub fn new(transport: T) -> Self {
+        Self { transport }
+    }
+
+    /// Take one signed alert notification.
+    pub async fn notify(
+        &self,
+        req: AlertNotifyRequest,
+    ) -> Result<AlertNotifyResponse, ClientError> {
+        let csil_resp = self
+            .transport
+            .call(
+                "TallyOwlAlertReceiver",
+                "notify",
+                &encode_alert_notify_request(&req),
+            )
+            .await?;
+        decode_alert_notify_response(&csil_resp).map_err(|e| ClientError::Transport(e.to_string()))
+    }
+}

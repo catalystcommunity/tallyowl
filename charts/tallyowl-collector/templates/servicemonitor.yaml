@@ -1,0 +1,22 @@
+{{- include "tallyowl-collector.validate" . -}}
+{{- if .Values.deployment.serviceMonitor.enabled }}
+# For a cluster that runs the Prometheus operator. The rules for TallyOwl
+# itself are in deploy/monitoring/.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "tallyowl-collector.fullname" . }}
+  labels:
+    {{- include "tallyowl-collector.labels" . | nindent 4 }}
+    {{- with .Values.deployment.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "tallyowl-collector.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: operational
+      path: /metrics
+      interval: {{ .Values.deployment.serviceMonitor.interval }}
+{{- end }}

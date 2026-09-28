@@ -325,7 +325,21 @@ impl Workflows {
             }
         };
 
-        match runner.run(&work) {
+        // **A runner that panics is a piece of work no retry will fix.** One
+        // thread serves each queue. Without this, a rule whose filter divided
+        // by zero in a way the evaluator did not expect stopped that thread,
+        // its claim came back after the timeout with nobody left to take it,
+        // and the same work stopped the next worker after every restart, while
+        // `/readyz` answered ready. The work goes to a person and the worker
+        // takes the next piece.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run(&work)))
+            .unwrap_or_else(|panic| {
+                Outcome::Quarantine(format!(
+                    "This work stopped the worker that ran it, which is a defect in TallyOwl. It said: {}",
+                    crate::lifecycle::panic_text(panic.as_ref())
+                ))
+            });
+        match outcome {
             Outcome::Done => {
                 self.queue.complete(&task)?;
                 self.mark_done(queue);
@@ -543,6 +557,48 @@ mod tests {
                 false => Outcome::Done,
             }
         }
+    }
+
+    struct Panics;
+    impl Runner for Panics {
+        fn run(&self, _work: &Work) -> Outcome {
+            panic!("attempt to divide with overflow")
+        }
+    }
+
+    #[test]
+    fn work_that_stops_its_runner_goes_to_quarantine_and_the_worker_takes_the_next_piece() {
+        // One thread serves each queue. A panic used to end it, the claim came
+        // back after its timeout with nobody left to take it, and the same
+        // stored work ended the next worker after every restart.
+        let queue = Arc::new(FakeQueue::default());
+        let engine = workflows(Arc::clone(&queue), 3_600_000);
+        engine
+            .submit(&Work::new(Kind::AlertEvaluation, [1; 16]))
+            .expect("the poison queues");
+        engine
+            .submit(&Work::new(Kind::AlertEvaluation, [2; 16]))
+            .expect("the next piece queues");
+
+        assert!(engine
+            .run_one(ALERT_QUEUE, &Panics)
+            .expect("the worker survives"));
+        assert_eq!(queue.quarantined_count(), 1, "the poison went round again");
+        let status = engine
+            .status()
+            .into_iter()
+            .find(|status| status.queue == ALERT_QUEUE)
+            .expect("the queue is reported");
+        assert!(
+            status.last_failure.contains("divide with overflow"),
+            "{}",
+            status.last_failure
+        );
+
+        // The same thread takes the next piece.
+        assert!(engine
+            .run_one(ALERT_QUEUE, &Always(Outcome::Done))
+            .expect("it runs"));
     }
 
     #[test]

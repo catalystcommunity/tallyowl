@@ -8,3 +8,4 @@
 export * from "./value.js";
 export * from "./capture.js";
 export * from "./client.js";
+export * from "./globals.js";

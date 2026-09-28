@@ -27,14 +27,21 @@
 //! and every native producer use. So this runs a total across the buckets. A
 //! copy without one would report a p99 that is far too low and look plausible.
 //!
-//! # `service.name` is not a label
+//! # `service.name` reaches the envelope, and a metric keeps it as a label too
 //!
 //! An OpenTelemetry resource carries `service.name` and `service.version`, and
-//! TallyOwl's envelope carries a service name and a release. Leaving them as
-//! labels would put a service name in the metric series identity and out of the
-//! envelope, so a query for "everything from checkout" would miss them. They
-//! move to the envelope. Every other resource attribute becomes a label, which
-//! is what makes a resource attribute queryable at all.
+//! TallyOwl's envelope carries a service name and a release. They move to the
+//! envelope, so a query for "everything from checkout" finds them. Every other
+//! resource attribute becomes a label, which is what makes a resource attribute
+//! queryable at all.
+//!
+//! A **metric point** also keeps `service.name` as a label. The identity of a
+//! series is its kind and its labels, and nothing else. A gateway sends several
+//! services in one push, and two services that publish one metric name with the
+//! same labels would otherwise be one series: a cumulative point from one would
+//! replace the other's at intake, and a `rate` would read the pair as one
+//! counter that keeps restarting. A span has no series identity, so a span
+//! carries the service name in its envelope only.
 
 use tallyowl_collector_api::types::{
     Envelope, HistogramValue, MetricKind, MetricPointPayload,
@@ -57,6 +64,11 @@ pub struct Normalized {
     pub rejected: u64,
     /// Why, in the words the acknowledgement carries.
     pub reason: Option<String>,
+    /// The request message itself did not parse to its end. What was read
+    /// before the fault is still in `items`. A receiver must not answer a body
+    /// like this as a full success: a compressed body and a truncated one both
+    /// look exactly like this, and both would otherwise vanish without a word.
+    pub malformed: bool,
 }
 
 impl Normalized {
@@ -102,6 +114,7 @@ pub fn metrics(body: &[u8]) -> Normalized {
             resource_metrics(field.wire.as_bytes(), &mut out);
         }
     }
+    out.malformed = reader.faulted();
     out
 }
 
@@ -611,6 +624,10 @@ fn labels_of(
     // point that names a host overrides the resource that named a different
     // one.
     let mut merged: Vec<(String, Value)> = shape.attributes.labels.clone();
+    // The producer is part of the series identity. See the module note.
+    if let Some(service) = &shape.attributes.service_name {
+        merged.push(("service.name".to_string(), Value::Text(service.clone())));
+    }
     for (key, value) in point_labels {
         merged.retain(|(held, _)| held != key);
         merged.push((key.clone(), value.clone()));
@@ -637,6 +654,7 @@ pub fn traces(body: &[u8]) -> Normalized {
             resource_spans(field.wire.as_bytes(), &mut out);
         }
     }
+    out.malformed = reader.faulted();
     out
 }
 
@@ -912,29 +930,8 @@ fn ms(nanoseconds: u64) -> i64 {
 /// **not** deduplicated by this edge. `AGENTS.md` forbids claiming exactly-once
 /// anywhere, and this is one of the places that claim would be wrong.
 fn new_event_id(occurred_at: i64) -> Vec<u8> {
-    let mut id = vec![0u8; 16];
-    let ms = occurred_at.max(0) as u64;
-    id[0] = (ms >> 40) as u8;
-    id[1] = (ms >> 32) as u8;
-    id[2] = (ms >> 24) as u8;
-    id[3] = (ms >> 16) as u8;
-    id[4] = (ms >> 8) as u8;
-    id[5] = ms as u8;
-    let mut random = [0u8; 10];
-    if getrandom::fill(&mut random).is_err() {
-        // The system random source failed. A repeated ID would suppress a later
-        // legitimate item, so this separates them by time rather than by
-        // repeating a constant.
-        let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        random[..8].copy_from_slice(&counter.to_le_bytes());
-    }
-    id[6..].copy_from_slice(&random);
-    id[6] = (id[6] & 0x0f) | 0x70;
-    id[8] = (id[8] & 0x3f) | 0x80;
-    id
+    crate::ids::new_id(occurred_at)
 }
-
-static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
@@ -1071,6 +1068,41 @@ mod tests {
     // ---- metrics -----------------------------------------------------------
 
     #[test]
+    fn two_services_in_one_push_are_two_series() {
+        // A gateway forwards several services in one request. With no producer
+        // in the labels these two points are one series, and intake keeps only
+        // the later one.
+        let one = |service: &str| {
+            export_metrics(
+                &[attribute("service.name", any_string(service))],
+                &[metric(
+                    "requests",
+                    "1",
+                    7,
+                    &sum(&[number_data_point(&[], 0, 1_000_000_000, 1.0)], 2, true),
+                )],
+            )
+        };
+        let mut body = one("cart");
+        body.extend(one("checkout"));
+        let out = metrics(&body);
+        assert_eq!(out.items.len(), 2);
+        assert_ne!(
+            crate::series_key(point_of(&out.items[0])),
+            crate::series_key(point_of(&out.items[1]))
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_a_message_says_so() {
+        // The first two bytes of every gzip stream. 0x1f is wire type 7, which
+        // does not exist.
+        assert!(metrics(&[0x1f, 0x8b, 0x08, 0x00]).malformed);
+        assert!(traces(&[0xff; 64]).malformed);
+        assert!(!metrics(&[]).malformed, "an empty message is a valid one");
+    }
+
+    #[test]
     fn a_monotonic_sum_becomes_a_counter_with_its_temporality() {
         let point = number_data_point(&[], 1_000_000_000, 2_000_000_000, 7.0);
         let body = export_metrics(&[], &[metric("requests", "1", 7, &sum(&[point], 1, true))]);
@@ -1148,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn a_service_name_reaches_the_envelope_and_not_the_label_set() {
+    fn a_service_name_reaches_the_envelope_and_stays_in_the_series_identity() {
         let body = export_metrics(
             &[
                 attribute("service.name", any_string("checkout")),
@@ -1166,7 +1198,10 @@ mod tests {
         let item = &out.items[0];
         assert_eq!(item.envelope.service_name.as_deref(), Some("checkout"));
         assert_eq!(item.envelope.release.as_deref(), Some("1.4.0"));
-        assert!(label(item, "service.name").is_none());
+        // A metric keeps it as a label too, because the labels are the whole
+        // identity of a series. See the module note.
+        assert_eq!(label(item, "service.name").as_deref(), Some("checkout"));
+        assert!(label(item, "service.version").is_none());
         // Every other resource attribute is a label, which is what makes it
         // queryable.
         assert_eq!(label(item, "host.name").as_deref(), Some("node-1"));

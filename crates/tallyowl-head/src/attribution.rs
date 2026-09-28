@@ -553,7 +553,24 @@ pub fn conversions(
     Ok((out, folded, without_consent))
 }
 
+/// The largest conversion value this build credits, in digits before the
+/// decimal point. It is far past any sum of money and far inside what the
+/// exact arithmetic holds, so a total of many conversions cannot overflow.
+pub const MAX_VALUE_DIGITS: u32 = 24;
+
 fn value_of(row: &EventRow) -> Result<Amount, TallyOwlError> {
+    let amount = held_value_of(row)?;
+    let digits = amount.units.unsigned_abs().to_string().len() as u32;
+    if digits.saturating_sub(amount.scale) > MAX_VALUE_DIGITS {
+        return Err(TallyOwlError::invalid_argument(format!(
+            "The conversion `{}` carries a value with more than {MAX_VALUE_DIGITS} digits before the decimal point, so it cannot be credited. Check the application that sent it.",
+            row.event_id_text()
+        )));
+    }
+    Ok(amount)
+}
+
+fn held_value_of(row: &EventRow) -> Result<Amount, TallyOwlError> {
     match row.properties.get("value") {
         None => Ok(Amount::ZERO),
         Some((PropertyValue::Decimal(text), _)) => Amount::parse(text).ok_or_else(|| {

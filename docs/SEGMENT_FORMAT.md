@@ -339,6 +339,16 @@ partial file.
 A reader never decompresses before it validates a declared length. A
 decompression ratio limit applies.
 
+The header has no checksum of its own. Thus, the reader compares the item count
+in the header with the sum of the row-group item counts in the footer, which
+has a checksum. If the two counts are different, the reader refuses the file as
+damaged. The reader does this before it uses the header count as the size of an
+allocation.
+
+A node that receives a segment from a different node computes the content
+address of the received bytes first. It reads the header and the footer only
+if the content address agrees with the prologue.
+
 ## 15. Compatibility
 
 - A minor version adds an optional field. An older reader skips it.

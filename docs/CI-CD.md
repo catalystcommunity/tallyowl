@@ -76,6 +76,7 @@ is a thing to read, not to remember.
     test-go.yaml
     test-ts.yaml
     helm-check.yaml
+    kind-check.yaml
     audit.yaml
     package.yaml
     release.yaml
@@ -189,6 +190,43 @@ The job never modifies the source checkout and never stages regenerated files.
 - Failure injection gets a separate resource-heavier job.
 - Helm rendering and policy checks need no cluster.
 - Chart installation and upgrade tests run only in an isolated disposable cluster.
+
+### Charts in a disposable cluster
+
+`helm-check` renders the charts and runs each service's own `config check` on
+each render. It cannot see what happens only in a cluster. The `kind-check`
+job installs both charts in a kind cluster and proves them. It runs
+`./tools.sh kind-check`, which a person can also run on one machine.
+
+The job does these steps, in this order:
+
+1. It builds the service image from the commit, and makes a cluster of one
+   control plane and three workers in three zones.
+2. It makes the authority with `tallyowl-head ca create`, and the other
+   certificates with the `openssl` commands in DEPLOYMENT.md section 3a.
+3. It installs the head with its Corndogs sidecar, makes a key and a role
+   token with the maintenance Job, and installs the collector.
+4. It sends events over TLS and checks that the head commits them.
+5. It sends from an application that trusts a different authority, and
+   checks that the collector refuses the handshake and counts it.
+6. It replaces the collector certificate Secret, and checks that the
+   collector serves the new certificate with no restart.
+7. It installs a shared Corndogs from the Corndogs chart and three heads, and
+   checks that the heads form their groups, become ready, and fail over.
+
+Each wait has its own time limit. When a step fails, the job prints the pods
+that are not ready and their last log lines. The job deletes the cluster at
+the end.
+
+The job needs a container daemon, so it declares the `docker` capability. No
+pull-request profile grants that capability, so the job runs in the main
+workflow only. **It is not known yet that kind can run nested in a job pod on
+this cluster.** kind talks to the daemon that the capability gives, and
+`kubectl` must reach the API server that kind publishes on that daemon's
+host. The first run tells.
+
+The job fetches pinned `kind` and `kubectl`, because the runner image has
+neither. It needs OpenSSL 3 or later and Go, which the runner image has.
 
 ### Reference application test bed
 

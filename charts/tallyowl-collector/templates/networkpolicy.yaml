@@ -1,0 +1,33 @@
+{{- include "tallyowl-collector.validate" . -}}
+{{- if .Values.deployment.networkPolicy.enabled }}
+# The OpenTelemetry listener uses TLS and has no authentication. This policy is
+# what limits who can send to it, and it also limits intake. A cluster with no
+# policy controller ignores it, so check that yours enforces one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tallyowl-collector.fullname" . }}
+  labels:
+    {{- include "tallyowl-collector.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "tallyowl-collector.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: {{ include "tallyowl-collector.port" .Values.collector.listen }}
+        {{- if .Values.compatibility.openTelemetry.enabled }}
+        - port: {{ include "tallyowl-collector.port" .Values.compatibility.openTelemetry.listen }}
+        {{- end }}
+      from:
+        {{- if .Values.deployment.networkPolicy.ingressFrom }}
+        {{- toYaml .Values.deployment.networkPolicy.ingressFrom | nindent 8 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+    # Health and metrics: the kubelet, and a scraper in any namespace.
+    - ports:
+        - port: {{ include "tallyowl-collector.port" .Values.collector.operationalListen }}
+{{- end }}

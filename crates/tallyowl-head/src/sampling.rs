@@ -389,13 +389,29 @@ fn tombstone_id(trace_id: [u8; 16]) -> [u8; 16] {
 }
 
 /// Run the sampler on an interval.
-pub fn run(sampler: Arc<TailSampler>, interval: Duration) -> std::thread::JoinHandle<()> {
+///
+/// Each sweep runs through the loop watch, so a sweep that panics is counted and
+/// the next one still runs, and a sampler that stops sweeping is reported. A
+/// sampler that stopped would leave every trace in the provisional class for
+/// good.
+pub fn run(
+    sampler: Arc<TailSampler>,
+    interval: Duration,
+    watch: Arc<crate::lifecycle::LoopWatch>,
+    stop: Arc<crate::lifecycle::Stop>,
+) -> std::thread::JoinHandle<()> {
+    const LOOP: &str = "tail-sampler";
+    watch.register(LOOP, interval, now_ms());
     std::thread::Builder::new()
         .name("tallyowl-tail".into())
         .spawn(move || {
             while !sampler.stopping.load(Ordering::Relaxed) {
-                sampler.sweep(now_ms());
-                std::thread::sleep(interval);
+                watch.pass(LOOP, now_ms, || {
+                    sampler.sweep(now_ms());
+                });
+                if stop.wait(interval) {
+                    break;
+                }
             }
         })
         .expect("the tail sampling thread starts")

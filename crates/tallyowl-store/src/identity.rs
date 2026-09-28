@@ -51,6 +51,22 @@ use crate::row::hex;
 const ROLE_TOKEN_PREFIX: &str = "auth/role-token/";
 const NODE_PREFIX: &str = "control/node/";
 
+/// The node IDs one token enrolled, keyed by the token.
+///
+/// `active_nodes_for` runs for every enrollment and for every token in a list.
+/// Reading it from the node records meant reading every node record this
+/// installation ever kept, for each token.
+const NODE_BY_TOKEN_PREFIX: &str = "control/node-by-token/";
+/// Written once the index holds every node record that predates it.
+const NODE_INDEX_BUILT_KEY: &str = "control/node-by-token.built";
+
+fn node_by_token_key(token_id: &str, node_id: &str) -> String {
+    format!("{NODE_BY_TOKEN_PREFIX}{token_id}/{node_id}")
+}
+
+/// The length of the window `enrollments_each_hour` counts over.
+pub const RATE_WINDOW_MS: i64 = 3_600_000;
+
 /// The text that starts every role token. It differs from the source-key prefix
 /// so that a credential used in the wrong place is refused with a message that
 /// says which kind it is.
@@ -195,6 +211,10 @@ pub struct RoleToken {
     pub last_used_at: Option<i64>,
     /// How many nodes this token has enrolled. `max_uses` bounds it.
     pub uses: u64,
+    /// When the current hour of the rate control began, and how many nodes the
+    /// token enrolled in it. `enrollments_each_hour` bounds the second.
+    pub window_started_at: i64,
+    pub window_uses: u64,
 }
 
 impl RoleToken {
@@ -252,6 +272,9 @@ pub enum EnrollmentRefusal {
     ActiveNodeLimit,
     /// The certificate request was not one.
     MalformedRequest(String),
+    /// The token has enrolled as many nodes this hour as its policy permits.
+    /// The one refusal that time repairs, so it is the one a node retries.
+    RateLimited,
 }
 
 impl EnrollmentRefusal {
@@ -264,6 +287,7 @@ impl EnrollmentRefusal {
             EnrollmentRefusal::UsesExhausted => "uses-exhausted",
             EnrollmentRefusal::ActiveNodeLimit => "active-node-limit",
             EnrollmentRefusal::MalformedRequest(_) => "malformed-request",
+            EnrollmentRefusal::RateLimited => "rate-limited",
         }
     }
 }
@@ -303,6 +327,8 @@ impl Catalog {
             revoked_at: None,
             last_used_at: None,
             uses: 0,
+            window_started_at: 0,
+            window_uses: 0,
         };
         self.put_role_token(&token)?;
         Ok(IssuedRoleToken {
@@ -354,25 +380,36 @@ impl Catalog {
         cascade: bool,
         now: i64,
     ) -> Result<usize, CatalogError> {
-        let Some(mut token) = self.role_token(token_id)? else {
-            return Ok(0);
-        };
-        if token.revoked_at.is_none() {
-            token.revoked_at = Some(now);
-            self.put_role_token(&token)?;
-        }
-        if !cascade {
-            return Ok(0);
-        }
-        let mut revoked = 0;
-        for mut node in self.nodes()? {
-            if node.token_id == token_id && node.revoked_at.is_none() {
-                node.revoked_at = Some(now);
-                self.put_node(&node)?;
-                revoked += 1;
+        // One transaction reads the records and writes them. An enrollment that
+        // read this token before the revocation and wrote it back afterwards
+        // used to undo the revocation, and the log still said "Revoked".
+        let token_key = format!("{ROLE_TOKEN_PREFIX}{token_id}");
+        self.transact(|writer| {
+            let Some(bytes) = writer.get(&token_key)? else {
+                return Ok(0);
+            };
+            let mut token = decode_token(token_id, &crate::control::decode_value(&bytes)?);
+            if token.revoked_at.is_none() {
+                token.revoked_at = Some(now);
+                writer.put(&token_key, &cbor::encode(&encode_token(&token)))?;
             }
-        }
-        Ok(revoked)
+            if !cascade {
+                return Ok(0);
+            }
+            let mut revoked = 0;
+            for (key, bytes) in writer.scan(NODE_PREFIX)? {
+                let mut node = decode_node(
+                    key.trim_start_matches(NODE_PREFIX),
+                    &crate::control::decode_value(&bytes)?,
+                );
+                if node.token_id == token_id && node.revoked_at.is_none() {
+                    node.revoked_at = Some(now);
+                    writer.put(&key, &cbor::encode(&encode_node(&node)))?;
+                    revoked += 1;
+                }
+            }
+            Ok(revoked)
+        })
     }
 
     /// Resolve one role token to its policy.
@@ -409,12 +446,83 @@ impl Catalog {
 
     /// Record that a token enrolled one more node.
     pub fn record_token_use(&self, token_id: &str, now: i64) -> Result<(), CatalogError> {
-        let Some(mut token) = self.role_token(token_id)? else {
-            return Ok(());
-        };
-        token.uses += 1;
-        token.last_used_at = Some(now);
-        self.put_role_token(&token)
+        let key = format!("{ROLE_TOKEN_PREFIX}{token_id}");
+        self.transact(|writer| {
+            let Some(bytes) = writer.get(&key)? else {
+                return Ok(());
+            };
+            let mut token = decode_token(token_id, &crate::control::decode_value(&bytes)?);
+            token.uses += 1;
+            token.last_used_at = Some(now);
+            writer.put(&key, &cbor::encode(&encode_token(&token)))
+        })
+    }
+
+    /// Take one enrollment from a token, or say why the token has none to give.
+    ///
+    /// **The check and the count are one transaction.** The use count, the
+    /// hourly rate, and the revocation are all read and written under the one
+    /// writer the engine admits, so two enrollments cannot both take the last
+    /// use, and an enrollment cannot write a token back over its revocation.
+    ///
+    /// The hour is a fixed window that starts at the first enrollment after the
+    /// last one ended. That permits a short burst across a boundary, which is
+    /// the price of one stored number; the control exists to stop an autoscaler
+    /// in a loop, and it does.
+    ///
+    /// A caller that then fails to enroll gives the use back with
+    /// [`Self::release_token_use`].
+    pub fn claim_token_use(
+        &self,
+        token_id: &str,
+        now: i64,
+    ) -> Result<Result<(), EnrollmentRefusal>, CatalogError> {
+        let key = format!("{ROLE_TOKEN_PREFIX}{token_id}");
+        self.transact(|writer| {
+            let Some(bytes) = writer.get(&key)? else {
+                return Ok(Err(EnrollmentRefusal::Credential(AuthFailure::Unknown)));
+            };
+            let mut token = decode_token(token_id, &crate::control::decode_value(&bytes)?);
+            if !token.is_active(now) {
+                return Ok(Err(EnrollmentRefusal::Credential(AuthFailure::Revoked)));
+            }
+            if token.policy.max_uses.is_some_and(|max| token.uses >= max) {
+                return Ok(Err(EnrollmentRefusal::UsesExhausted));
+            }
+            if now - token.window_started_at >= RATE_WINDOW_MS || now < token.window_started_at {
+                token.window_started_at = now;
+                token.window_uses = 0;
+            }
+            if token
+                .policy
+                .enrollments_each_hour
+                .is_some_and(|rate| token.window_uses >= rate)
+            {
+                return Ok(Err(EnrollmentRefusal::RateLimited));
+            }
+            token.uses += 1;
+            token.window_uses += 1;
+            token.last_used_at = Some(now);
+            writer.put(&key, &cbor::encode(&encode_token(&token)))?;
+            Ok(Ok(()))
+        })
+    }
+
+    /// Give back a use that [`Self::claim_token_use`] took and nothing used.
+    ///
+    /// A certificate request that was not one must not cost a token one of its
+    /// enrollments.
+    pub fn release_token_use(&self, token_id: &str) -> Result<(), CatalogError> {
+        let key = format!("{ROLE_TOKEN_PREFIX}{token_id}");
+        self.transact(|writer| {
+            let Some(bytes) = writer.get(&key)? else {
+                return Ok(());
+            };
+            let mut token = decode_token(token_id, &crate::control::decode_value(&bytes)?);
+            token.uses = token.uses.saturating_sub(1);
+            token.window_uses = token.window_uses.saturating_sub(1);
+            writer.put(&key, &cbor::encode(&encode_token(&token)))
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -422,10 +530,30 @@ impl Catalog {
     // -----------------------------------------------------------------------
 
     pub fn put_node(&self, node: &NodeRecord) -> Result<(), CatalogError> {
-        self.write_durable(&[(
-            format!("{NODE_PREFIX}{}", node.node_id),
-            cbor::encode(&encode_node(node)),
-        )])
+        // The record and its place in the token's index, in one write.
+        self.write_durable(&[
+            (
+                format!("{NODE_PREFIX}{}", node.node_id),
+                cbor::encode(&encode_node(node)),
+            ),
+            (node_by_token_key(&node.token_id, &node.node_id), Vec::new()),
+        ])
+    }
+
+    /// Write the index for node records that were stored before it existed.
+    /// It runs once for one catalog, and is one point read after that.
+    fn build_node_index(&self) -> Result<(), CatalogError> {
+        if self.read(NODE_INDEX_BUILT_KEY)?.is_some() {
+            return Ok(());
+        }
+        self.transact(|writer| {
+            for (key, bytes) in writer.scan(NODE_PREFIX)? {
+                let node_id = key.trim_start_matches(NODE_PREFIX);
+                let node = decode_node(node_id, &crate::control::decode_value(&bytes)?);
+                writer.put(&node_by_token_key(&node.token_id, node_id), &[])?;
+            }
+            writer.put(NODE_INDEX_BUILT_KEY, &[1])
+        })
     }
 
     pub fn node(&self, node_id: &str) -> Result<Option<NodeRecord>, CatalogError> {
@@ -452,22 +580,69 @@ impl Catalog {
 
     /// How many of a token's nodes are still live at `now`.
     pub fn active_nodes_for(&self, token_id: &str, now: i64) -> Result<u64, CatalogError> {
-        Ok(self
-            .nodes()?
-            .iter()
-            .filter(|node| node.token_id == token_id && node.is_active(now))
-            .count() as u64)
+        self.build_node_index()?;
+        let prefix = format!("{NODE_BY_TOKEN_PREFIX}{token_id}/");
+        let mut active = 0;
+        for (key, _) in self.scan(&prefix)? {
+            let node = self.node(key.trim_start_matches(&prefix))?;
+            // The record decides. The index only says where to look.
+            if node.is_some_and(|node| node.token_id == token_id && node.is_active(now)) {
+                active += 1;
+            }
+        }
+        Ok(active)
     }
 
     pub fn revoke_node(&self, node_id: &str, now: i64) -> Result<bool, CatalogError> {
-        let Some(mut node) = self.node(node_id)? else {
-            return Ok(false);
-        };
-        if node.revoked_at.is_none() {
-            node.revoked_at = Some(now);
-            self.put_node(&node)?;
-        }
-        Ok(true)
+        let key = format!("{NODE_PREFIX}{node_id}");
+        self.transact(|writer| {
+            let Some(bytes) = writer.get(&key)? else {
+                return Ok(false);
+            };
+            let mut node = decode_node(node_id, &crate::control::decode_value(&bytes)?);
+            if node.revoked_at.is_none() {
+                node.revoked_at = Some(now);
+                writer.put(&key, &cbor::encode(&encode_node(&node)))?;
+            }
+            Ok(true)
+        })
+    }
+
+    /// Record a renewed certificate on a node that is still its own.
+    ///
+    /// Answers `false`, and writes nothing, when the node or its token was
+    /// revoked or removed since the caller looked. The caller read the record
+    /// before it signed, and writing that copy back would undo a revocation
+    /// that landed in between.
+    pub fn renew_node(
+        &self,
+        node_id: &str,
+        certificate_serial: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<bool, CatalogError> {
+        let key = format!("{NODE_PREFIX}{node_id}");
+        self.transact(|writer| {
+            let Some(bytes) = writer.get(&key)? else {
+                return Ok(false);
+            };
+            let mut node = decode_node(node_id, &crate::control::decode_value(&bytes)?);
+            if !node.is_active(now) {
+                return Ok(false);
+            }
+            let token_active = match writer.get(&format!("{ROLE_TOKEN_PREFIX}{}", node.token_id))? {
+                Some(bytes) => decode_token(&node.token_id, &crate::control::decode_value(&bytes)?)
+                    .is_active(now),
+                None => false,
+            };
+            if !token_active {
+                return Ok(false);
+            }
+            node.certificate_serial = certificate_serial.to_string();
+            node.expires_at = expires_at;
+            writer.put(&key, &cbor::encode(&encode_node(&node)))?;
+            Ok(true)
+        })
     }
 
     /// Remove nodes whose certificates expired long enough ago that nothing
@@ -476,18 +651,21 @@ impl Catalog {
     /// Section 7: an expired pod identity needs no manual removal, and the
     /// controller removes it after its lease and certificate safety periods.
     pub fn expire_nodes(&self, now: i64, safety_ms: i64) -> Result<usize, CatalogError> {
-        let stale: Vec<String> = self
+        let stale: Vec<NodeRecord> = self
             .nodes()?
             .into_iter()
             .filter(|node| now - node.expires_at > safety_ms)
-            .map(|node| format!("{NODE_PREFIX}{}", node.node_id))
             .collect();
         if stale.is_empty() {
             return Ok(0);
         }
-        let count = stale.len();
-        self.remove_records(&stale)?;
-        Ok(count)
+        let mut keys = Vec::with_capacity(stale.len() * 2);
+        for node in &stale {
+            keys.push(format!("{NODE_PREFIX}{}", node.node_id));
+            keys.push(node_by_token_key(&node.token_id, &node.node_id));
+        }
+        self.remove_records(&keys)?;
+        Ok(stale.len())
     }
 }
 
@@ -538,6 +716,8 @@ fn encode_token(token: &RoleToken) -> Value {
             policy.certificate_lifetime_ms.map(Value::integer),
         )
         .put_some("rate", policy.enrollments_each_hour.map(Value::Unsigned))
+        .put("windowStart", Value::integer(token.window_started_at))
+        .put("windowUses", Value::Unsigned(token.window_uses))
         .build()
 }
 
@@ -554,6 +734,8 @@ fn decode_token(token_id: &str, value: &Value) -> RoleToken {
         revoked_at: value.field("revoked").and_then(Value::as_integer),
         last_used_at: value.field("used").and_then(Value::as_integer),
         uses: integer_field(value, "uses").max(0) as u64,
+        window_started_at: integer_field(value, "windowStart"),
+        window_uses: integer_field(value, "windowUses").max(0) as u64,
         policy: RoleTokenPolicy {
             roles: read_text_list(value, "roles")
                 .iter()

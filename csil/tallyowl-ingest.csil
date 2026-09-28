@@ -308,6 +308,36 @@ PolicyVersionResponse = {
     enabled_kinds: [* TelemetryKind]
 }
 
+;; ---------------------------------------------------------------------------
+;; Alert callbacks
+;; ---------------------------------------------------------------------------
+
+;;; One alert notification, as the head sends it to an application that
+;;; declares `TallyOwlAlertReceiver`. docs/ALERTS.md section 6 and D62.
+;;;
+;;; The head signs it the same way it signs a webhook: a keyed BLAKE3 hash, with
+;;; the target's secret, over the decimal text of `signed_at`, a full stop, and
+;;; `body`. A receiver verifies before it reads `body`, and refuses a
+;;; `signed_at` that is more than five minutes from its own clock.
+;;;
+;;; - `signed_at` is milliseconds since 1970, the same number a webhook sends in
+;;;   its timestamp header, so one verification serves both channels.
+;;; - `signature` is the lowercase hexadecimal text of the 32-byte hash, the
+;;;   same text a webhook sends in its signature header.
+;;; - `body` is bytes, not a record: it is the exact UTF-8 JSON that was signed.
+;;;   A receiver verifies these bytes. A record would make a receiver encode it
+;;;   again to verify it, and two encoders need not agree byte for byte.
+AlertNotifyRequest = {
+    signed_at: Timestamp,
+    signature: text .size (64..64),
+    body: bytes .size (1..65536)
+}
+
+;;; The receiver took the notification. A receiver that refuses one answers a
+;;; `ServiceError`: `unauthenticated` for a signature that does not verify or a
+;;; time outside the window. The head does not send that notification again.
+AlertNotifyResponse = {}
+
 @wire-id(1)
 service TallyOwlIngest {
     ;;; Accept telemetry on the application's existing connection. Best effort.
@@ -321,4 +351,15 @@ service TallyOwlIngest {
     ;;; Report the collection policy that the client must apply.
     @wire-id(2)
     policy-version: PolicyVersionRequest -> PolicyVersionResponse / ServiceError
+}
+
+;;; Implemented by an application that receives alert notifications on the
+;;; CSIL connection it already has, in place of an HTTP webhook. The head calls
+;;; it; the application verifies the signature. Declare it only to receive
+;;; alerts.
+@wire-id(6)
+service TallyOwlAlertReceiver {
+    ;;; Take one signed alert notification.
+    @wire-id(0)
+    notify: AlertNotifyRequest -> AlertNotifyResponse / ServiceError
 }

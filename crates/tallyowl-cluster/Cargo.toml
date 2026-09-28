@@ -34,3 +34,8 @@ redb = { workspace = true }
 # second full copy of every batch, and the delivery queue already compresses a
 # batch with the same codec for the same reason.
 zstd = { workspace = true }
+
+[dev-dependencies]
+# The transport-security tests give each node a real certificate from a real
+# authority, and nothing in them is stubbed.
+rcgen = { workspace = true }

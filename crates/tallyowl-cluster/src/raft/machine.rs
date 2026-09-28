@@ -34,16 +34,61 @@ pub trait GroupMachine: Send + Sync + 'static {
     /// Apply one committed command. The answer is encoded, and empty when the
     /// machine has none.
     ///
-    /// A command that cannot be applied returns its reason as the outcome
-    /// rather than failing. Consensus already committed it, so refusing it here
-    /// would leave replicas in different states.
-    fn apply(&self, index: u64, payload: &[u8]) -> Vec<u8>;
+    /// **There are two ways a command can go wrong, and they are not the same.**
+    ///
+    /// A command that no replica could apply — it does not decode, it names a
+    /// tablet that does not exist — returns its reason as the outcome. Consensus
+    /// already committed it and every replica reaches the same refusal, so the
+    /// replicas stay in the same state.
+    ///
+    /// A failure that belongs to this replica alone — its disk is full, its
+    /// device returned an error — returns `Err`. Marking that entry applied
+    /// would skip it on this replica for ever while every other replica holds
+    /// it, and nothing would ever say so. The group stops on this node instead,
+    /// and the entry is applied when the node comes back.
+    fn apply(&self, index: u64, payload: &[u8]) -> Result<Vec<u8>, String>;
+
+    /// Whether this replica can take a write now.
+    ///
+    /// A tablet answers for its store. A follower that cannot write refuses new
+    /// entries before it acknowledges them, so it never counts towards a quorum
+    /// for a batch it cannot hold.
+    fn is_writable(&self) -> bool {
+        true
+    }
 
     /// The whole state, encoded, for a snapshot.
     fn snapshot(&self) -> Vec<u8>;
 
     /// Replace the whole state from a snapshot.
     fn install(&self, snapshot: &[u8]) -> Result<(), String>;
+
+    /// What a snapshot sent to a peer carries, given the state it stands for.
+    ///
+    /// The state a machine writes beside its applied position is written on
+    /// every apply, so it has to be small. A peer that installs a snapshot may
+    /// need more than that, and this is where a machine adds it. A failure here
+    /// fails the snapshot, and the log behind it is not purged.
+    fn snapshot_for_peer(&self, state: Vec<u8>) -> Result<Vec<u8>, String> {
+        Ok(state)
+    }
+
+    /// Install a snapshot the leader sent, because this replica fell behind
+    /// what the leader still keeps log for.
+    ///
+    /// `index` is the log position the snapshot stands for and `peers` are the
+    /// addresses of the group's members. **A machine whose snapshot does not
+    /// carry everything must fetch the rest here, and fail if it cannot.** Once
+    /// this returns, the replica reports itself level with `index`, counts
+    /// towards a quorum, and answers reads.
+    fn install_from_peer(
+        &self,
+        snapshot: &[u8],
+        _index: u64,
+        _peers: &[String],
+    ) -> Result<(), String> {
+        self.install(snapshot)
+    }
 
     /// Make everything this snapshot will cover reachable some other way.
     ///
@@ -101,10 +146,10 @@ impl ControllerMachine {
 }
 
 impl GroupMachine for ControllerMachine {
-    fn apply(&self, _index: u64, payload: &[u8]) -> Vec<u8> {
+    fn apply(&self, _index: u64, payload: &[u8]) -> Result<Vec<u8>, String> {
         let command: ControllerCommand = match super::decode(payload) {
             Ok(command) => command,
-            Err(reason) => return encode_outcome(&Outcome::Refused { reason }),
+            Err(reason) => return Ok(encode_outcome(&Outcome::Refused { reason })),
         };
         let mut topology = self.state.lock().expect("topology");
         let before = topology.generation;
@@ -115,7 +160,7 @@ impl GroupMachine for ControllerMachine {
                 reason: e.to_string(),
             },
         };
-        encode_outcome(&outcome)
+        Ok(encode_outcome(&outcome))
     }
 
     fn snapshot(&self) -> Vec<u8> {
@@ -149,10 +194,10 @@ impl DirectoryMachine {
 }
 
 impl GroupMachine for DirectoryMachine {
-    fn apply(&self, _index: u64, payload: &[u8]) -> Vec<u8> {
+    fn apply(&self, _index: u64, payload: &[u8]) -> Result<Vec<u8>, String> {
         let command: DirectoryCommand = match super::decode(payload) {
             Ok(command) => command,
-            Err(reason) => return encode_outcome(&Outcome::Refused { reason }),
+            Err(reason) => return Ok(encode_outcome(&Outcome::Refused { reason })),
         };
         let mut directory = self.state.lock().expect("directory");
         let before = directory.generation;
@@ -163,7 +208,7 @@ impl GroupMachine for DirectoryMachine {
                 reason: e.to_string(),
             },
         };
-        encode_outcome(&outcome)
+        Ok(encode_outcome(&outcome))
     }
 
     fn snapshot(&self) -> Vec<u8> {
@@ -233,6 +278,44 @@ pub struct TabletMachine {
     /// are part of the snapshot, so a replica that catches up by snapshot
     /// rather than by log reaches the same generations.
     marks: Mutex<TabletMarks>,
+    catch_up: Option<Arc<dyn TabletCatchUp>>,
+    erasures: Option<ErasureSource>,
+    writable: Option<WritableProbe>,
+}
+
+/// How a tablet replica gets the rows a snapshot stands for.
+///
+/// A tablet snapshot carries marks and not rows, because a snapshot that held a
+/// tablet's rows would be one message as large as the tablet. The rows travel
+/// as sealed segments. [`crate::transfer::SegmentCatchUp`] is the real one.
+pub trait TabletCatchUp: Send + Sync + 'static {
+    /// Bring this replica's store up to at least `index`, from one of `peers`,
+    /// and say what position the replica it copied from had reached.
+    fn catch_up(&self, index: u64, peers: &[String]) -> Result<u64, String>;
+}
+
+/// Every standing erasure this replica holds, each in the store's encoding.
+pub type ErasureSource = Arc<dyn Fn() -> Result<Vec<Vec<u8>>, String> + Send + Sync>;
+
+/// Whether this replica's store can take a write now.
+pub type WritableProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// One standing erasure, as a byte string. See [`super::byte_string`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Erasure(#[serde(with = "super::byte_string")] Vec<u8>);
+
+/// What a tablet sends a peer that fell behind.
+///
+/// **The erasures travel here because nothing else carries them.** An erasure
+/// reaches a replica as a log entry, and a replica that installs a snapshot
+/// skipped the entries behind it. The segments it then copies still hold the
+/// erased rows until a compaction rewrites them, so without the predicates it
+/// would answer a query with data an erasure removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TabletSnapshot {
+    marks: TabletMarks,
+    #[serde(default)]
+    erasures: Vec<Erasure>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +333,17 @@ pub struct TabletMarks {
     /// tablet. `docs/STORAGE.md` section 8 asks a read replica to report its
     /// exact high-water marks, and `applied_index` is that; this is beside it.
     pub last_applied_at: i64,
+    /// The position of the replica this one last copied segments from.
+    ///
+    /// **Entries up to here may already be in this store.** A catch-up copies
+    /// everything its source had sealed, and the source is usually ahead of the
+    /// snapshot this replica was sent. The entries between the two then arrive
+    /// by log as well. The store deduplicates a batch by its receipt, and a
+    /// copied segment brings rows and no receipts, so those entries are checked
+    /// row by row. Past this position nothing was copied and nothing is
+    /// checked.
+    #[serde(default)]
+    pub copied_through: u64,
 }
 
 impl TabletMachine {
@@ -257,7 +351,78 @@ impl TabletMachine {
         TabletMachine {
             store,
             marks: Mutex::new(TabletMarks::default()),
+            catch_up: None,
+            erasures: None,
+            writable: None,
         }
+    }
+
+    /// Say how this replica fetches rows when it installs a snapshot. Without
+    /// this, a replica that would need rows refuses the snapshot.
+    pub fn catching_up_with(mut self, catch_up: Arc<dyn TabletCatchUp>) -> TabletMachine {
+        self.catch_up = Some(catch_up);
+        self
+    }
+
+    /// Say where this replica's standing erasures are read from, so a snapshot
+    /// for a peer can carry them.
+    pub fn carrying_erasures_from(mut self, erasures: ErasureSource) -> TabletMachine {
+        self.erasures = Some(erasures);
+        self
+    }
+
+    /// Say how this replica knows its store can take a write. The store's own
+    /// answer is still asked; this adds what the store contract does not
+    /// report, which is the space reserve.
+    pub fn writable_when(mut self, writable: WritableProbe) -> TabletMachine {
+        self.writable = Some(writable);
+        self
+    }
+
+    /// The rows of one batch that this store does not already hold.
+    ///
+    /// See [`TabletMarks::copied_through`]. `None` means every row is held.
+    fn not_already_copied(
+        &self,
+        index: u64,
+        rows: Vec<EventRow>,
+    ) -> Result<Option<Vec<EventRow>>, String> {
+        if index > self.marks().copied_through {
+            return Ok(Some(rows));
+        }
+        let mut missing = Vec::with_capacity(rows.len());
+        for row in rows {
+            let held = self.store.lookup_event(row.event_id).map_err(|e| {
+                format!("This replica could not check a batch against the segments it copied, so it stopped rather than count the batch twice: {e}")
+            })?;
+            if held.is_none() {
+                missing.push(row);
+            }
+        }
+        Ok((!missing.is_empty()).then_some(missing))
+    }
+
+    fn read_snapshot(snapshot: &[u8]) -> Result<TabletSnapshot, String> {
+        // A snapshot from before erasures travelled is the marks alone.
+        match super::decode::<TabletSnapshot>(snapshot) {
+            Ok(whole) => Ok(whole),
+            Err(_) => Ok(TabletSnapshot {
+                marks: super::decode(snapshot)?,
+                erasures: Vec::new(),
+            }),
+        }
+    }
+
+    fn apply_erasures(&self, erasures: &[Erasure]) -> Result<(), String> {
+        for erasure in erasures {
+            let tombstone = tallyowl_store::catalog::decode_tombstone(&erasure.0)
+                .map_err(|e| format!("An erasure in a snapshot could not be read: {e}"))?;
+            // Applying one twice is applying it once. See `apply`.
+            self.store.erase(&tombstone).map_err(|e| {
+                format!("An erasure in a snapshot could not be applied, so the snapshot was not installed: {e}")
+            })?;
+        }
+        Ok(())
     }
 
     pub fn store(&self) -> Arc<dyn Store> {
@@ -269,13 +434,26 @@ impl TabletMachine {
     }
 }
 
+/// Sort a store failure into the two kinds [`GroupMachine::apply`] tells apart.
+///
+/// An argument the store refuses is refused by every replica, because every
+/// replica was handed the same bytes. Everything else is about this node's
+/// device, and another replica may well have succeeded.
+fn local_failure(what: &str, e: tallyowl_store::StoreError) -> Result<Outcome, String> {
+    match e {
+        tallyowl_store::StoreError::InvalidArgument(reason) => Ok(Outcome::Refused { reason }),
+        other => Err(format!(
+            "This replica could not {what}, so it stopped rather than skipping an entry the other replicas hold: {other}"
+        )),
+    }
+}
+
 impl GroupMachine for TabletMachine {
-    fn apply(&self, index: u64, payload: &[u8]) -> Vec<u8> {
+    fn apply(&self, index: u64, payload: &[u8]) -> Result<Vec<u8>, String> {
         let command: TabletCommand = match super::decode(payload) {
             Ok(command) => command,
-            Err(reason) => return encode_outcome(&Outcome::Refused { reason }),
+            Err(reason) => return Ok(encode_outcome(&Outcome::Refused { reason })),
         };
-        self.marks.lock().expect("tablet marks").applied_index = index;
         let outcome = match command {
             TabletCommand::Commit {
                 source_id,
@@ -285,19 +463,27 @@ impl GroupMachine for TabletMachine {
                 .map_err(|e| format!("A replicated batch could not be read: {e}"))
             {
                 Err(reason) => Outcome::Refused { reason },
-                Ok(rows) => match self.store.commit(source_id, batch_id, rows) {
-                    Ok(result) => {
-                        self.marks.lock().expect("tablet marks").last_applied_at =
-                            result.committed_at;
-                        Outcome::Committed {
-                            accepted: result.accepted,
-                            committed_at: result.committed_at,
-                            commit_watermark: result.commit_watermark,
-                            deduplicated: result.deduplicated,
+                Ok(rows) => match self.not_already_copied(index, rows)? {
+                    // Every row arrived in a copied segment. That is this
+                    // batch, committed once.
+                    None => Outcome::Committed {
+                        accepted: 0,
+                        committed_at: self.marks().last_applied_at,
+                        commit_watermark: self.store.commit_watermark(),
+                        deduplicated: true,
+                    },
+                    Some(rows) => match self.store.commit(source_id, batch_id, rows) {
+                        Ok(result) => {
+                            self.marks.lock().expect("tablet marks").last_applied_at =
+                                result.committed_at;
+                            Outcome::Committed {
+                                accepted: result.accepted,
+                                committed_at: result.committed_at,
+                                commit_watermark: result.commit_watermark,
+                                deduplicated: result.deduplicated,
+                            }
                         }
-                    }
-                    Err(e) => Outcome::Refused {
-                        reason: e.to_string(),
+                        Err(e) => local_failure("commit a replicated batch", e)?,
                     },
                 },
             },
@@ -314,9 +500,7 @@ impl GroupMachine for TabletMachine {
                         // entry replaces the same record rather than adding a
                         // second one.
                         match self.store.erase(&tombstone) {
-                            Err(e) => Outcome::Refused {
-                                reason: e.to_string(),
-                            },
+                            Err(e) => local_failure("apply a replicated erasure", e)?,
                             Ok(generation) => {
                                 let mut marks = self.marks.lock().expect("tablet marks");
                                 let before = marks.tombstone_generation;
@@ -343,7 +527,14 @@ impl GroupMachine for TabletMachine {
                 }
             }
         };
-        encode_outcome(&outcome)
+        // Only now, because an entry that failed locally was not applied and
+        // must not read as if it had been.
+        self.marks.lock().expect("tablet marks").applied_index = index;
+        Ok(encode_outcome(&outcome))
+    }
+
+    fn is_writable(&self) -> bool {
+        self.store.is_writable() && self.writable.as_ref().is_none_or(|probe| probe())
     }
 
     fn snapshot(&self) -> Vec<u8> {
@@ -356,8 +547,51 @@ impl GroupMachine for TabletMachine {
     }
 
     fn install(&self, snapshot: &[u8]) -> Result<(), String> {
-        let restored: TabletMarks = super::decode(snapshot)?;
-        *self.marks.lock().expect("tablet marks") = restored;
+        let restored = TabletMachine::read_snapshot(snapshot)?;
+        self.apply_erasures(&restored.erasures)?;
+        *self.marks.lock().expect("tablet marks") = restored.marks;
+        Ok(())
+    }
+
+    fn snapshot_for_peer(&self, state: Vec<u8>) -> Result<Vec<u8>, String> {
+        let Some(erasures) = &self.erasures else {
+            return Ok(state);
+        };
+        let whole = TabletSnapshot {
+            marks: super::decode(&state)?,
+            erasures: erasures()?.into_iter().map(Erasure).collect(),
+        };
+        super::encode(&whole)
+    }
+
+    fn install_from_peer(
+        &self,
+        snapshot: &[u8],
+        index: u64,
+        peers: &[String],
+    ) -> Result<(), String> {
+        let restored = TabletMachine::read_snapshot(snapshot)?;
+        // **The rows first, and the install fails without them.** The snapshot
+        // holds marks. A replica that installed it and fetched nothing would
+        // report itself level with the leader, count towards a quorum, win an
+        // election, and answer reads, while missing every row between where it
+        // was and `index`.
+        let held = self.marks().applied_index;
+        let mut copied_through = self.marks().copied_through;
+        if held < index {
+            let Some(catch_up) = &self.catch_up else {
+                return Err(format!(
+                    "This replica is at entry {held} and was sent a snapshot at entry {index}. A tablet snapshot carries no rows and this node was not told how to copy them, so it did not install the snapshot."
+                ));
+            };
+            copied_through = copied_through.max(catch_up.catch_up(index, peers)?);
+        }
+        self.apply_erasures(&restored.erasures)?;
+        *self.marks.lock().expect("tablet marks") = TabletMarks {
+            // This replica's own fact, not the sender's.
+            copied_through,
+            ..restored.marks
+        };
         Ok(())
     }
 

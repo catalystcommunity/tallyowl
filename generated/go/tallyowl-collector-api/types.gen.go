@@ -520,3 +520,14 @@ type PolicyVersionResponse struct {
 	SamplingRate  float64         `json:"sampling_rate" yaml:"sampling_rate"`
 	EnabledKinds  []TelemetryKind `json:"enabled_kinds" yaml:"enabled_kinds"`
 }
+
+// AlertNotifyRequest represents a structured data type
+type AlertNotifyRequest struct {
+	SignedAt  Timestamp `json:"signed_at" yaml:"signed_at"`
+	Signature string    `json:"signature" yaml:"signature"`
+	Body      []byte    `json:"body" yaml:"body"`
+}
+
+// AlertNotifyResponse represents a structured data type
+type AlertNotifyResponse struct {
+}

@@ -13,6 +13,7 @@ members = [
     "crates/tallyowl-queue",
     "crates/tallyowl-collector",
     "crates/tallyowl-head",
+    "crates/tallyowl-identity",
     "crates/tallyowl-driver-rust",
     "generated/rust/tallyowl-ingest-api",
     "generated/rust/tallyowl-collector-api",
@@ -58,6 +59,7 @@ tallyowl-store = { path = "crates/tallyowl-store", version = "0.2.1" }
 tallyowl-compat = { path = "crates/tallyowl-compat", version = "0.2.1" }
 tallyowl-queue = { path = "crates/tallyowl-queue", version = "0.2.1" }
 tallyowl-cluster = { path = "crates/tallyowl-cluster", version = "0.2.1" }
+tallyowl-identity = { path = "crates/tallyowl-identity", version = "0.2.1" }
 tallyowl-driver-rust = { path = "crates/tallyowl-driver-rust", version = "0.2.1" }
 
 # Generated from csil/. Never hand-edited. See csil/README.md.
@@ -69,7 +71,7 @@ tallyowl-cluster-api = { path = "generated/rust/tallyowl-cluster-api", version =
 # The CSIL transport family reference implementation, from the csilgen project.
 # Pinned by revision, because csilgen does not yet publish releases for it.
 # See docs/CI-CD.md section 2.
-csilgen-transport = { git = "https://github.com/catalystcommunity/csilgen", rev = "d693a94d5b722ab4da858a50469412e6ffcbe080" }
+csilgen-transport = { git = "https://github.com/catalystcommunity/csilgen", rev = "baec1dad191c4ccd522772b5172ee12ba5bf3f6c" }
 
 # The LinkKeys relying-party SDK. LinkKeys owns human authentication and
 # TallyOwl owns the resulting session and authorization; see D7.
@@ -91,7 +93,7 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 
 # The Corndogs durable task queue client, generated from the Corndogs CSIL
 # contract in that project. Pinned by revision for the same reason.
-corndogs = { git = "https://github.com/catalystcommunity/corndogs", rev = "a313433b53c2df3742210d5354353fd98b6fbc18" }
+corndogs = { git = "https://github.com/catalystcommunity/corndogs", rev = "21d018211ec895c3af5785bc18c446db6c77ee53", features = ["tls"] }
 
 # The storage format. `zstd` and `xxhash-rust` are on the hot path; `blake3`
 # gives a segment its content address, which needs collision resistance and the
@@ -140,7 +142,14 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # multi-group case that was TallyOwl's own risk: 600 instances cost 21 MiB.
 # The 0.10 line is at alpha with breaking changes, so this stays on 0.9.
 # MIT or Apache-2.0. See BENCHMARKS.md section 10.
-openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+#
+# `loosen-follower-log-revert`: a voter that lost its disk comes back with an
+# empty log. Without this the leader keeps the position it last matched for that
+# voter, which is an assertion failure in a debug build and a wrong replication
+# state in a release build. With it the leader starts that voter's replication
+# again from the beginning. The danger the feature name warns of is the voter's
+# *vote*, and `GroupRegistry::hold_votes` withholds that until it has caught up.
+openraft = { version = "0.9", features = ["serde", "storage-v2", "loosen-follower-log-revert"] }
 # openraft needs an async runtime, and `tallyowl-cluster` is the only crate that
 # has one. Every other crate stays on threads.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }

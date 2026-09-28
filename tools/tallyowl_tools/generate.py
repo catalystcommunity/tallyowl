@@ -44,9 +44,11 @@ TARGETS = ("rust", "go", "typescript")
 #:
 #: A released binary rather than one each person builds: the generated code is
 #: checked in and `gen-check` compares against it, and that comparison only
-#: means something when every machine runs the same generator. csilgen's own
-#: `--version` still reports 0.1.0 for every 0.2.x release, so the version it
-#: prints cannot be the check. `gen-check` is the check.
+#: means something when every machine runs the same generator. A release build
+#: of csilgen prints the release it came from (`csilgen 0.2.8`); only a build
+#: somebody made by hand prints the crate version, 0.1.0. So `deps` asks the
+#: fetched binary for its version and fetches again when it is not the pin, and
+#: `gen-check` stays the check that the output agrees.
 
 #: The csilgen ref the TypeScript transport is taken from.
 #:

@@ -101,7 +101,9 @@ fn erasure() -> Tombstone {
         property: Some(("end_user".to_string(), "u-042".to_string())),
         range: None,
         requested_at: BASE_TIME,
-        horizon: BASE_TIME + 30 * 86_400_000,
+        // Still standing whenever this runs. A date here would turn into a
+        // predicate past its horizon, which compaction removes.
+        horizon: i64::MAX / 2,
         reason: "The end user asked for their data to be removed.".into(),
         except_kinds: Vec::new(),
     }

@@ -61,7 +61,7 @@ class HttpRpcCarrier implements AsyncServiceTransport {
 
 async function main() {
   const client = new AsyncApiClient(new HttpRpcCarrier("http://localhost:5080"));
-  const resp = await client.tallyOwlCollector.submitBatch({ batch: { batchId: undefined as any, items: [], sealedAt: undefined as any } });
+  const resp = await client.tallyOwlAlertReceiver.notify({ signedAt: undefined as any, signature: undefined as any, body: undefined as any });
   console.log(resp);
 }
 
@@ -160,8 +160,8 @@ a WebRTC unreliable DataChannel or QUIC datagrams drop in unchanged.
 ```ts
 import { Datagram, type DatagramCarrier } from "csilgen-transport";
 import * as dgram from "node:dgram";
-import { toSubmitBatchRequestCbor, fromSubmitBatchResponseCbor } from "tallyowl-collector-api";
-import type { SubmitBatchRequest, SubmitBatchResponse } from "tallyowl-collector-api";
+import { toAlertNotifyRequestCbor, fromAlertNotifyResponseCbor } from "tallyowl-collector-api";
+import type { AlertNotifyRequest, AlertNotifyResponse } from "tallyowl-collector-api";
 
 // One example carrier: UDP via node's dgram. Datagrams are unreliable and
 // unordered, so the carrier never waits for or correlates a reply.
@@ -193,8 +193,8 @@ async function main() {
 
   // Fire-and-forget: encode the `->` request and send it. seq 0 marks an
   // unsequenced datagram.
-  const req: SubmitBatchRequest = { batch: { batchId: undefined as any, items: [], sealedAt: undefined as any } };
-  await carrier.sendDatagram(new Datagram(OP_ORD, 0, toSubmitBatchRequestCbor(req)).encode());
+  const req: AlertNotifyRequest = { signedAt: undefined as any, signature: undefined as any, body: undefined as any };
+  await carrier.sendDatagram(new Datagram(OP_ORD, 0, toAlertNotifyRequestCbor(req)).encode());
 
   // Recv path: a datagram of the RESPONSE type MAY arrive later — or never. There is
   // NO synchronous response; the caller must tolerate loss and reordering and handle
@@ -202,7 +202,7 @@ async function main() {
   const inbound = await carrier.recvDatagram();
   if (inbound !== null) {
     const dg = Datagram.decode(inbound);
-    const resp: SubmitBatchResponse = fromSubmitBatchResponseCbor(dg.payload);
+    const resp: AlertNotifyResponse = fromAlertNotifyResponseCbor(dg.payload);
     console.log("late response", resp);
   }
 }

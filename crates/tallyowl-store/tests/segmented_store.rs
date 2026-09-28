@@ -1209,3 +1209,99 @@ fn a_seal_never_covers_a_log_frame_whose_rows_it_did_not_take() {
          acknowledged batch in that frame was lost"
     );
 }
+
+#[test]
+fn the_instruments_an_alert_would_use_move_when_the_thing_they_measure_happens() {
+    // Five of these were declared and nothing anywhere moved them, so an alert
+    // on a damaged segment could never fire.
+    use tallyowl_obs::metrics::{labels, Registry};
+    use tallyowl_store::compact::{compact, CompactionSettings};
+
+    let place = directory("moving-metrics");
+    let store = eager(&place);
+    let metrics = Registry::new();
+    tallyowl_store::metrics::declare(&metrics);
+    let none = labels(&[]);
+
+    // Rows that wait for a seal are visible as rows that wait.
+    store.commit([1; 16], [1; 16], rows(10, 0)).unwrap();
+    tallyowl_store::metrics::sample(&store, &metrics);
+    assert_eq!(
+        metrics.gauge_value("tallyowl_open_buffer_rows_count", &none),
+        10
+    );
+
+    // A seal that cannot write is counted.
+    std::fs::remove_dir_all(place.join("segments")).unwrap();
+    std::fs::write(place.join("segments"), b"not a directory").unwrap();
+    assert!(store.seal().is_err());
+    std::fs::remove_file(place.join("segments")).unwrap();
+    std::fs::create_dir_all(place.join("segments")).unwrap();
+    tallyowl_store::metrics::sample(&store, &metrics);
+    assert_eq!(
+        metrics.counter_value("tallyowl_seal_failures_total", &none),
+        1
+    );
+    assert_eq!(
+        metrics.gauge_value("tallyowl_open_buffer_rows_count", &none),
+        10
+    );
+
+    // A compaction that erased rows is counted, with what it erased.
+    let segment_id = store.seal().unwrap().expect("a segment");
+    let mut predicate = erasure("u-1");
+    predicate.property = None;
+    predicate.event_ids = vec![rows(1, 3)[0].event_id];
+    store.erase(&predicate).unwrap();
+    compact(
+        &store,
+        CompactionSettings {
+            grace_ms: i64::MAX,
+            ..CompactionSettings::default()
+        },
+    )
+    .unwrap();
+    tallyowl_store::metrics::sample(&store, &metrics);
+    assert_eq!(
+        metrics.counter_value(
+            "tallyowl_compactions_total",
+            &labels(&[("outcome", "completed")])
+        ),
+        1
+    );
+    assert_eq!(
+        metrics.counter_value("tallyowl_rows_erased_total", &none),
+        1
+    );
+    let _ = segment_id;
+
+    // A segment that will not read is a damaged segment, and it is counted
+    // while it stays that way.
+    let live = store.catalog().manifests().unwrap();
+    std::fs::remove_file(place.join(&live[0].relative_path)).unwrap();
+    drop(store);
+    let store = eager(&place);
+    assert!(
+        store
+            .scan(
+                PROJECT,
+                BASE_TIME - 1,
+                BASE_TIME + 10_000,
+                TimeBasis::OccurredAt
+            )
+            .unwrap()
+            .incomplete
+    );
+    tallyowl_store::metrics::sample(&store, &metrics);
+    assert_eq!(
+        metrics.gauge_value("tallyowl_segments_damaged_count", &none),
+        1
+    );
+    assert_eq!(
+        metrics.counter_value(
+            "tallyowl_integrity_failures_total",
+            &labels(&[("tier", "local")])
+        ),
+        1
+    );
+}

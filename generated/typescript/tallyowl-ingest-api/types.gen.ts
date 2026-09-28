@@ -325,6 +325,37 @@ export interface PolicyVersionResponse {
   enabledKinds: TelemetryKind[];
 }
 
+/**
+ * One alert notification, as the head sends it to an application that
+ * declares `TallyOwlAlertReceiver`. docs/ALERTS.md section 6 and D62.
+ * 
+ * The head signs it the same way it signs a webhook: a keyed BLAKE3 hash, with
+ * the target's secret, over the decimal text of `signed_at`, a full stop, and
+ * `body`. A receiver verifies before it reads `body`, and refuses a
+ * `signed_at` that is more than five minutes from its own clock.
+ * 
+ * - `signed_at` is milliseconds since 1970, the same number a webhook sends in
+ * its timestamp header, so one verification serves both channels.
+ * - `signature` is the lowercase hexadecimal text of the 32-byte hash, the
+ * same text a webhook sends in its signature header.
+ * - `body` is bytes, not a record: it is the exact UTF-8 JSON that was signed.
+ * A receiver verifies these bytes. A record would make a receiver encode it
+ * again to verify it, and two encoders need not agree byte for byte.
+ */
+export interface AlertNotifyRequest {
+  signedAt: Timestamp;
+  signature: string;
+  body: Uint8Array;
+}
+
+/**
+ * The receiver took the notification. A receiver that refuses one answers a
+ * `ServiceError`: `unauthenticated` for a signature that does not verify or a
+ * time outside the window. The head does not send that notification again.
+ */
+export interface AlertNotifyResponse {
+}
+
 export type EventId = Uint8Array;
 
 export type BatchId = Uint8Array;
@@ -619,6 +650,13 @@ export function validateCampaignCostPayload(value: CampaignCostPayload): string[
     if (value.platform.length < 1 || value.platform.length > 128) errors.push("platform: length must be between 1 and 128");
   }
   if (value.currency.length < 3 || value.currency.length > 3) errors.push("currency: length must be between 3 and 3");
+  return errors;
+}
+
+export function validateAlertNotifyRequest(value: AlertNotifyRequest): string[] {
+  const errors: string[] = [];
+  if (value.signature.length < 64 || value.signature.length > 64) errors.push("signature: length must be between 64 and 64");
+  if (value.body.length < 1 || value.body.length > 65536) errors.push("body: length must be between 1 and 65536");
   return errors;
 }
 

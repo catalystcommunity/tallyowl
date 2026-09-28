@@ -170,6 +170,13 @@ fn cbor_read_arg(b: &[u8], pos: &mut usize, low: u8) -> Result<u64, CsilCborErro
     Ok(v)
 }
 
+/// The most elements a decoded array or map reserves before it reads them. The
+/// declared length is checked against the remaining input, but one input byte can
+/// become a much larger value, so reserving the full declared length lets a small
+/// frame reserve a large multiple of its size at every nesting level. Past this
+/// bound, the vector grows only as elements are actually read.
+const CSIL_CBOR_PREALLOC_LIMIT: usize = 1024;
+
 fn cbor_dec(b: &[u8], pos: &mut usize, depth: usize) -> Result<CsilCborValue, CsilCborError> {
     if depth > 64 {
         return Err(CsilCborError(
@@ -253,7 +260,7 @@ fn cbor_dec(b: &[u8], pos: &mut usize, depth: usize) -> Result<CsilCborValue, Cs
                 ));
             }
             let n = arg as usize;
-            let mut items = Vec::with_capacity(n);
+            let mut items = Vec::with_capacity(n.min(CSIL_CBOR_PREALLOC_LIMIT));
             for _ in 0..n {
                 items.push(cbor_dec(b, pos, depth + 1)?);
             }
@@ -266,7 +273,7 @@ fn cbor_dec(b: &[u8], pos: &mut usize, depth: usize) -> Result<CsilCborValue, Cs
                 ));
             }
             let n = arg as usize;
-            let mut entries = Vec::with_capacity(n);
+            let mut entries = Vec::with_capacity(n.min(CSIL_CBOR_PREALLOC_LIMIT));
             for _ in 0..n {
                 let k = cbor_dec(b, pos, depth + 1)?;
                 let val = cbor_dec(b, pos, depth + 1)?;
@@ -2254,6 +2261,77 @@ pub fn decode_policy_version_response(
 ) -> Result<PolicyVersionResponse, CsilCborError> {
     let csil_root = cbor_decode(csil_data)?;
     csil_dec_policy_version_response(&csil_root)
+}
+
+/// Build the canonical CBOR value tree for a AlertNotifyRequest.
+fn csil_enc_alert_notify_request(csil_v: &AlertNotifyRequest) -> CsilCborValue {
+    let mut csil_entries: Vec<(CsilCborValue, CsilCborValue)> = Vec::with_capacity(3);
+    csil_entries.push((cbor_text("body"), cbor_bytes(&csil_v.body)));
+    csil_entries.push((cbor_text("signature"), cbor_text(&csil_v.signature)));
+    csil_entries.push((cbor_text("signed_at"), cbor_int(csil_v.signed_at)));
+    CsilCborValue::Map(csil_entries)
+}
+
+/// Reconstruct a AlertNotifyRequest from a decoded CBOR value tree.
+fn csil_dec_alert_notify_request(
+    csil_root: &CsilCborValue,
+) -> Result<AlertNotifyRequest, CsilCborError> {
+    let signed_at = {
+        let csil_field = cbor_require(csil_root, "signed_at")?;
+        let csil_decode = cbor_as_i64;
+        csil_decode(csil_field)?
+    };
+    let signature = {
+        let csil_field = cbor_require(csil_root, "signature")?;
+        let csil_decode = cbor_as_text;
+        csil_decode(csil_field)?
+    };
+    let body = {
+        let csil_field = cbor_require(csil_root, "body")?;
+        let csil_decode = cbor_as_bytes;
+        csil_decode(csil_field)?
+    };
+    Ok(AlertNotifyRequest {
+        signed_at,
+        signature,
+        body,
+    })
+}
+
+/// Encode a AlertNotifyRequest to canonical CSIL CBOR bytes.
+pub fn encode_alert_notify_request(csil_v: &AlertNotifyRequest) -> Vec<u8> {
+    cbor_encode(&csil_enc_alert_notify_request(csil_v))
+}
+
+/// Decode canonical CSIL CBOR bytes into a AlertNotifyRequest.
+pub fn decode_alert_notify_request(csil_data: &[u8]) -> Result<AlertNotifyRequest, CsilCborError> {
+    let csil_root = cbor_decode(csil_data)?;
+    csil_dec_alert_notify_request(&csil_root)
+}
+
+/// Build the canonical CBOR value tree for a AlertNotifyResponse.
+fn csil_enc_alert_notify_response(_csil_v: &AlertNotifyResponse) -> CsilCborValue {
+    CsilCborValue::Map(Vec::new())
+}
+
+/// Reconstruct a AlertNotifyResponse from a decoded CBOR value tree.
+fn csil_dec_alert_notify_response(
+    _csil_root: &CsilCborValue,
+) -> Result<AlertNotifyResponse, CsilCborError> {
+    Ok(AlertNotifyResponse {})
+}
+
+/// Encode a AlertNotifyResponse to canonical CSIL CBOR bytes.
+pub fn encode_alert_notify_response(csil_v: &AlertNotifyResponse) -> Vec<u8> {
+    cbor_encode(&csil_enc_alert_notify_response(csil_v))
+}
+
+/// Decode canonical CSIL CBOR bytes into a AlertNotifyResponse.
+pub fn decode_alert_notify_response(
+    csil_data: &[u8],
+) -> Result<AlertNotifyResponse, CsilCborError> {
+    let csil_root = cbor_decode(csil_data)?;
+    csil_dec_alert_notify_response(&csil_root)
 }
 
 /// Build the canonical CBOR value tree for a TypedValue.

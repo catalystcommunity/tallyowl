@@ -8,7 +8,7 @@ pick the three things TallyOwl needs out of it:
 | What | Where it goes | Who reads it |
 | --- | --- | --- |
 | The `csilgen` command line | `.deps/bin/csilgen` | `./tools.sh gen` |
-| Every WASM generator | `~/.csilgen/generators/` | csilgen itself, at generation |
+| Every WASM generator | `.deps/csilgen-generators/<pin>/`, linked from `csil/.generators` | csilgen itself, at generation |
 | The TypeScript transport | `.deps/csilgen/transports/typescript/` | eight source files, by relative path |
 
 **Assets are chosen by shape, not by a guessed name.** The release is read from
@@ -31,7 +31,9 @@ pinned checkout, and a git clone for the transport. See L186.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import tarfile
 import urllib.error
 import urllib.request
@@ -65,18 +67,41 @@ class Release:
 
 
 def _api(url: str) -> dict | None:
-    """One GitHub API read, or `None` when there is nothing there."""
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "tallyowl-tools", "Accept": "application/vnd.github+json"},
-    )
+    """One GitHub API read, or `None` when there is nothing there.
+
+    `None` means a 404 and nothing else. Every other failure is raised, because
+    a caller reads `None` as "this release does not exist" and falls back to a
+    different source. A rate limit read that way gave one machine the release
+    asset and the next one a clone of an older tag, by whether the API happened
+    to answer.
+    """
+    headers = {"User-Agent": "tallyowl-tools", "Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
             return json.loads(response.read())
-    except urllib.error.HTTPError:
-        return None
-    except Exception:  # pragma: no cover - a network failure
-        return None
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        hint = ""
+        if error.code in (403, 429):
+            hint = (
+                " GitHub limits a caller with no token to 60 reads an hour for "
+                "each address. Set GITHUB_TOKEN and run this again, or wait an "
+                "hour."
+            )
+        raise ToolFailed(
+            f"GitHub answered {error.code} for {url}, so the csilgen release "
+            f"could not be read.{hint}"
+        ) from error
+    except (OSError, ValueError) as error:
+        raise ToolFailed(
+            f"The csilgen release at {url} could not be read: {error}. Check "
+            "the network and run this again."
+        ) from error
 
 
 def find_release(version: str) -> Release | None:
@@ -103,8 +128,16 @@ def find_release(version: str) -> Release | None:
 
 #: How each artifact is recognised. The patterns are deliberately loose about
 #: word order and separators and strict about what the thing is.
+#:
+#: The command line has two name shapes. Releases through 0.2.7 put the system
+#: first (`linux-x86_64`). Releases from 0.2.8 use the Rust target triple, which
+#: puts the machine first and a vendor between (`x86_64-unknown-linux-gnu`,
+#: `aarch64-apple-darwin`).
 PATTERNS = {
-    "cli": r"^csilgen-.*{system}[-_]{machine}.*\.(?:tar\.gz|tgz|zip)$",
+    "cli": (
+        r"^csilgen-.*(?:{system}[-_]{machine}|{machine}[-_][a-z0-9]+[-_]{system})"
+        r".*\.(?:tar\.gz|tgz|zip)$"
+    ),
     "generators": r"generators?.*\.(?:tar\.gz|tgz)$",
     "transport-typescript": r"transport[-_]typescript|typescript[-_]transport",
 }
@@ -153,6 +186,10 @@ def extract_members(archive: Path, wanted: re.Pattern[str], into: Path) -> list[
 
     Flattened on purpose: an archive may hold `generators/x.wasm` or `x.wasm`,
     and the caller wants the files rather than the layout.
+
+    Each file is written under a temporary name and moved into place, so a run
+    that stops part way leaves no short file under the real name. A later run
+    reads "the file is there" as "the file is complete".
     """
     into.mkdir(parents=True, exist_ok=True)
     written = []
@@ -161,8 +198,10 @@ def extract_members(archive: Path, wanted: re.Pattern[str], into: Path) -> list[
             base = Path(member.name).name
             if not member.isfile() or not wanted.search(base):
                 continue
-            member.name = base
+            partial = f".{base}.part"
+            member.name = partial
             bundle.extract(member, into, filter="data")
+            os.replace(into / partial, into / base)
             written.append(into / base)
     return written
 
@@ -203,17 +242,38 @@ def extract_tree(archive: Path, into: Path, strip: int = 1, marker: str = "") ->
                 "unpack for the thing that needs it."
             )
         strip = len(Path(prefix).parts) if prefix else 0
-    import shutil
-
-    if into.exists():
-        shutil.rmtree(into)
-    into.mkdir(parents=True, exist_ok=True)
+    # Unpack beside the destination and move the whole tree into place. An
+    # unpack straight into `into` that stops part way leaves a `package.json`
+    # and no `src`, and the next run takes the `package.json` as proof that the
+    # transport is there.
+    partial = into.with_name(f".{into.name}.part")
+    if partial.exists():
+        shutil.rmtree(partial)
+    partial.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive) as bundle:
         for member in bundle.getmembers():
             parts = Path(member.name).parts[strip:]
             if not parts:
                 continue
             member.name = str(Path(*parts))
-            bundle.extract(member, into, filter="data")
+            bundle.extract(member, partial, filter="data")
+    replace_tree(partial, into)
     say(f"Unpacked {archive.name} into {into}")
     return into
+
+
+def replace_tree(complete: Path, into: Path) -> None:
+    """Put a complete directory where `into` is, and remove what was there.
+
+    A directory that holds files cannot be replaced in one step, so the old one
+    moves aside first. A stop between the two moves leaves no `into` at all,
+    which a later run reads as "not fetched". It never leaves half of one.
+    """
+    aside = into.with_name(f".{into.name}.old")
+    if aside.exists():
+        shutil.rmtree(aside)
+    if into.exists():
+        os.replace(into, aside)
+    os.replace(complete, into)
+    if aside.exists():
+        shutil.rmtree(aside)

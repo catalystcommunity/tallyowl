@@ -15,6 +15,20 @@ use crate::value::{format_bytes, format_duration};
 
 const COLLECTOR_ROLES: &[&str] = &["intake", "forwarder", "compatibility-receiver"];
 
+/// Whether a name can be a DNS name on a certificate: dot-separated parts of 1
+/// to 63 letters, digits, and hyphens, with no hyphen at either end of a part,
+/// and at most 253 characters in all.
+fn is_dns_name(name: &str) -> bool {
+    name.len() <= 253
+        && name.split('.').all(|part| {
+            !part.is_empty()
+                && part.len() <= 63
+                && !part.starts_with('-')
+                && !part.ends_with('-')
+                && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
 fn refuse(setting: &str, message: String) -> ConfigError {
     ConfigError {
         setting: setting.to_string(),
@@ -62,6 +76,46 @@ pub fn check_rules(resolved: &Resolved) -> Result<(), Vec<ConfigError>> {
                 format_duration(detailed),
                 format_duration(detailed)
             ),
+        ));
+    }
+
+    // The intake frame limit is what stops an unauthenticated peer from making
+    // a collector decode a frame many times the size of a batch. A limit below
+    // the batch limit would refuse every full batch at the socket, where the
+    // app driver reads it as a lost connection and not as a setting.
+    let max_frame = resolved.integer("collector.maxFrameBytes");
+    let max_batch = resolved.integer("collector.maxBatchBytes");
+    if max_frame < max_batch {
+        errors.push(refuse(
+            "collector.maxFrameBytes",
+            format!(
+                "`collector.maxFrameBytes` is {max_frame} bytes and `collector.maxBatchBytes` is {max_batch} bytes, so intake would close the connection on every full batch. Set `collector.maxFrameBytes` to at least the batch limit. A valid example is `4MiB`."
+            ),
+        ));
+    }
+    let connections = resolved.integer("corndogs.connections");
+    if connections < 1 {
+        errors.push(refuse(
+            "corndogs.connections",
+            format!("A process needs at least one connection to the durable store, and `corndogs.connections` is {connections}. A valid example is `8`."),
+        ));
+    }
+    for key in [
+        "corndogs.callTimeout",
+        "collector.headCallTimeout",
+        "corndogs.depthInterval",
+    ] {
+        if resolved.integer(key) <= 0 {
+            errors.push(refuse(
+                key,
+                format!("`{key}` must be longer than zero. A call with no time limit is what lets one stalled dependency hold every thread that reaches it. A valid example is `30s`."),
+            ));
+        }
+    }
+    if resolved.integer("collector.maxConnections") < 0 {
+        errors.push(refuse(
+            "collector.maxConnections",
+            "`collector.maxConnections` cannot be negative. Use `0` for no limit. A valid example is `1024`.".to_string(),
         ));
     }
 
@@ -230,6 +284,40 @@ pub fn check_rules(resolved: &Resolved) -> Result<(), Vec<ConfigError>> {
         ));
     }
 
+    // L073: a scrape target is refused here and not on every scrape. A target
+    // the scraper cannot use otherwise costs one warning each interval while
+    // the collector starts normally, and an operator who wrote `https` believes
+    // the scrape is encrypted.
+    for target in resolved.list("compatibility.prometheus.targets") {
+        let problem = match target.split_once("://") {
+            Some(("http", _)) | None => target
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+                .then_some("it holds a space or a control character"),
+            Some(("https", _)) => Some(
+                "this build scrapes over HTTP only. Put the target inside a network you control and write `http://`, or leave it out",
+            ),
+            Some(_) => Some("its scheme is not one the scraper reads"),
+        };
+        if let Some(problem) = problem {
+            errors.push(refuse(
+                "compatibility.prometheus.targets",
+                format!(
+                    "The scrape target `{target}` is not usable: {problem}. Write each target as `http://host:port/metrics`."
+                ),
+            ));
+        }
+    }
+    if resolved.integer("compatibility.prometheus.workers") < 1 {
+        errors.push(refuse(
+            "compatibility.prometheus.workers",
+            format!(
+                "`compatibility.prometheus.workers` is {}. At least 1 worker must read the scrape targets. The default is 8.",
+                resolved.integer("compatibility.prometheus.workers")
+            ),
+        ));
+    }
+
     // A tablet with more than one voter has peers, and peers reach it here.
     // A node configured for replication with no address to be reached at would
     // start, elect nothing, and refuse every write, which reads as a storage
@@ -239,6 +327,25 @@ pub fn check_rules(resolved: &Resolved) -> Result<(), Vec<ConfigError>> {
             "replication.listen",
             format!(
                 "`storage.tabletVoters` is {voters}, so this node has peers, and `replication.listen` is empty so no peer can reach it. A valid example is `0.0.0.0:5200`."
+            ),
+        ));
+    }
+
+    // The advertise address is the one peers dial, so it has to name a host.
+    // A pod listens on every interface, and that address copied here would
+    // have every peer dial itself.
+    let advertise = resolved.text("replication.advertise");
+    let advertised_host = advertise
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(advertise)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if !advertise.is_empty() && matches!(advertised_host, "" | "0.0.0.0" | "::" | "*") {
+        errors.push(refuse(
+            "replication.advertise",
+            format!(
+                "`replication.advertise` is `{advertise}`, which is not an address another node can dial. Set it to this node's own reachable address. A valid example is `tallyowl-0.tallyowl:5200`."
             ),
         ));
     }
@@ -270,10 +377,384 @@ pub fn check_rules(resolved: &Resolved) -> Result<(), Vec<ConfigError>> {
         ));
     }
 
+    check_single_values(resolved, &mut errors);
+    check_addresses(resolved, &mut errors);
+    check_transport(resolved, &mut errors);
+    check_not_built(resolved, &mut errors);
+
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+/// Values that parse and then fail later, where the failure names no setting.
+fn check_single_values(resolved: &Resolved, errors: &mut Vec<ConfigError>) {
+    // `retention.detailed: 0s` keeps detailed telemetry without limit, and
+    // stored files are removed whole at the longer of the two retentions. With
+    // a rollup retention, "keep everything" therefore ended at the rollup's
+    // age. An operator who wrote zero to keep less kept everything; one who
+    // wrote it to keep everything lost it at `retention.rollup`.
+    let detailed = resolved.integer("retention.detailed");
+    let rollup = resolved.integer("retention.rollup");
+    if detailed == 0 && rollup > 0 {
+        errors.push(refuse(
+            "retention.detailed",
+            format!(
+                "`retention.detailed` is 0s, which keeps detailed telemetry without limit, and `retention.rollup` is {}, which removes whole stored files after that time. The two cannot both be true. To keep everything, set `retention.rollup` to 0s as well. To keep less, set `retention.detailed` to the time you want, for example `30d`. Zero does not mean \"keep none\" here; it does for `retention.raw`.",
+                format_duration(rollup)
+            ),
+        ));
+    }
+
+    // A session that ends the moment it is issued makes every sign-in fail with
+    // "That sign-in did not complete", which names nothing.
+    let lifetime = resolved.integer("linkkeys.sessionLifetime");
+    if lifetime < 60_000 {
+        errors.push(refuse(
+            "linkkeys.sessionLifetime",
+            format!(
+                "`linkkeys.sessionLifetime` is {}, and a session that short ends before the person who signed in can use it. Use at least `1m`. A valid example is `24h`.",
+                format_duration(lifetime)
+            ),
+        ));
+    }
+
+    // D62. A node certificate carries the node's name as a DNS name, because a
+    // TLS client checks that name and never the common name. A name that is
+    // not a DNS name would pass here and stop the head's own certificate from
+    // being issued at start, with a message about certificates rather than
+    // about this setting.
+    let node_name = resolved.text("node.name");
+    if !node_name.is_empty() && !is_dns_name(node_name) {
+        errors.push(refuse(
+            "node.name",
+            format!(
+                "`node.name` is `{node_name}`, and a node's name goes on its certificate as a DNS name. Use letters, digits, and hyphens, in parts of at most 63 characters separated by dots, with no hyphen at the start or end of a part. A valid example is `head-0`."
+            ),
+        ));
+    }
+
+    // D62. A lifetime of zero issues certificates that are expired on arrival,
+    // and a lifetime of years turns "a node that cannot renew stops within this
+    // time" into no revocation at all.
+    let hours = resolved.integer("enrollment.certificateLifetimeHours");
+    if !(1..=8760).contains(&hours) {
+        errors.push(refuse(
+            "enrollment.certificateLifetimeHours",
+            format!("`enrollment.certificateLifetimeHours` is {hours}, and it must be from 1 to 8760 (one year). The short lifetime is what stops a revoked node, so keep it short. A valid example is `24`."),
+        ));
+    }
+    let signing_certificate = !resolved.text("installation.signingCertificate").is_empty();
+    let signing_key = !resolved.text("installation.signingKey").is_empty();
+    if signing_certificate != signing_key {
+        let (set, missing) = if signing_certificate {
+            ("installation.signingCertificate", "installation.signingKey")
+        } else {
+            ("installation.signingKey", "installation.signingCertificate")
+        };
+        errors.push(refuse(
+            missing,
+            format!("`{set}` is set and `{missing}` is not. A head signs with both or with neither. `tallyowl-head ca create` makes a certificate and its key."),
+        ));
+    }
+    if signing_certificate && resolved.list("installation.authorities").is_empty() {
+        errors.push(refuse(
+            "installation.authorities",
+            "`installation.signingCertificate` is set and `installation.authorities` is empty. A head checks its signer against the authorities it trusts, and every node verifies the head against them. Add the root that signed the intermediate, for example `/etc/tallyowl/root.crt`.".to_string(),
+        ));
+    }
+
+    let keep = resolved.integer("sampling.tail.keepPercent");
+    if !(0..=100).contains(&keep) {
+        errors.push(refuse(
+            "sampling.tail.keepPercent",
+            format!("`sampling.tail.keepPercent` is {keep}, and a percentage is from 0 to 100. A valid example is `10`."),
+        ));
+    }
+
+    // The dashboard serves the path, and LinkKeys is told the whole address.
+    // When they differ, the browser returns to a path the dashboard does not
+    // serve and the sign-in ends on a 404.
+    if resolved.boolean("linkkeys.enabled") {
+        let path = resolved.text("dashboard.callbackPath");
+        let url = resolved.text("linkkeys.callbackUrl");
+        let url_path = url
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.find('/').map(|at| &rest[at..]))
+            .map(|path| path.split(['?', '#']).next().unwrap_or(path));
+        if let Some(url_path) = url_path {
+            if url_path != path {
+                errors.push(refuse(
+                    "dashboard.callbackPath",
+                    format!(
+                        "`dashboard.callbackPath` is `{path}` and the path of `linkkeys.callbackUrl` is `{url_path}`. A sign-in returns to the second and the dashboard serves the first, so every sign-in would end on a page that is not there. Make them the same. A valid example is `/sign-in/callback`."
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// An address this process binds is an IP address and a port.
+///
+/// `head.listen: localhost` used to pass every check and then stop the head
+/// with "invalid socket address", which names no setting. An address the
+/// process dials is a different thing, and takes a DNS name.
+fn check_addresses(resolved: &Resolved, errors: &mut Vec<ConfigError>) {
+    for entry in resolved.entries() {
+        let path = entry.setting.path;
+        let last = path.rsplit('.').next().unwrap_or(path);
+        if last != "listen" && !last.ends_with("Listen") {
+            continue;
+        }
+        let value = resolved.text(path);
+        // Empty is "do not listen", and each listener has its own rule for
+        // when that is legal. A `unix:` socket is a place to listen as well.
+        if value.is_empty()
+            || value.parse::<std::net::SocketAddr>().is_ok()
+            || value
+                .strip_prefix("unix:")
+                .is_some_and(|path| !path.is_empty())
+        {
+            continue;
+        }
+        errors.push(refuse(
+            path,
+            format!(
+                "`{path}` is `{value}`, and an address to listen on is an IP address and a port. A host name is not accepted here, because it can resolve to an address this host does not have. A valid example is `{}`.",
+                entry.setting.example
+            ),
+        ));
+    }
+
+    let endpoint = resolved.text("metrics.selfObservation.endpoint");
+    if !endpoint.is_empty() {
+        let usable = endpoint.rsplit_once(':').is_some_and(|(host, port)| {
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            !host.is_empty()
+                && !host.chars().any(|c| c.is_whitespace() || c.is_control() || c == '/')
+                && port.parse::<u16>().is_ok_and(|port| port != 0)
+                // `0.0.0.0` is where something listens. Nothing can dial it.
+                && !host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_unspecified())
+        });
+        if !usable {
+            errors.push(refuse(
+                "metrics.selfObservation.endpoint",
+                format!(
+                    "`metrics.selfObservation.endpoint` is `{endpoint}`, and the head dials this address, so it must be a host and a port that another process can reach. `0.0.0.0` is an address to listen on and cannot be dialed. A valid example is `tallyowl-collector:5100`."
+                ),
+            ));
+        }
+    }
+}
+
+/// Where an address is, for the D62 plaintext rule.
+#[derive(Debug, PartialEq, Eq)]
+enum Reach {
+    /// Nothing crosses a network: a loopback address or a `unix:` socket.
+    Local,
+    /// Anything else, including `0.0.0.0`, which listens on every network.
+    Network,
+}
+
+/// Classify a listen address or a dial address. A host name other than
+/// `localhost` is a network address, because it can resolve to anything.
+fn reach(address: &str) -> Reach {
+    if address
+        .strip_prefix("unix:")
+        .is_some_and(|path| !path.is_empty())
+    {
+        return Reach::Local;
+    }
+    let host = match address.rsplit_once(':') {
+        Some((host, _)) => host,
+        None => address,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        Reach::Local
+    } else {
+        Reach::Network
+    }
+}
+
+/// D62: a CSIL connection that crosses a network uses TLS.
+///
+/// Each rule names the setting whose value crosses a network, and says what
+/// makes it legal. `transport.allowPlaintext` lifts the CSIL rules and nothing
+/// else; Corndogs and the dashboard each have their own, because each is an
+/// exception with its own reason.
+fn check_transport(resolved: &Resolved, errors: &mut Vec<ConfigError>) {
+    let plaintext = resolved.boolean("transport.allowPlaintext");
+    let certificates = !resolved.list("tls.certificateDirectories").is_empty();
+    let authorities = !resolved.list("installation.authorities").is_empty();
+    let signer = !resolved.text("installation.signingCertificate").is_empty()
+        && !resolved.text("installation.signingKey").is_empty();
+    let token = !resolved.text("enrollment.roleToken").is_empty();
+
+    let mut app_facing = vec!["collector.listen"];
+    if resolved.boolean("compatibility.openTelemetry.enabled") {
+        app_facing.push("compatibility.openTelemetry.listen");
+    }
+    for path in app_facing {
+        let value = resolved.text(path);
+        if value.is_empty() || reach(value) == Reach::Local || plaintext || certificates {
+            continue;
+        }
+        errors.push(refuse(
+            path,
+            format!(
+                "`{path}` is `{value}`, which applications reach over a network, and `tls.certificateDirectories` is empty. Applications reach this listener with TLS. Set `tls.certificateDirectories` to a directory that holds `tls.crt` and `tls.key`, listen on a loopback or `unix:` address, or set `transport.allowPlaintext: true` if something else protects this network."
+            ),
+        ));
+    }
+
+    // Node to node: mutual TLS, so a node needs the authorities it trusts and
+    // an identity to show. A head that signs has one; any other node enrolls.
+    for path in ["head.listen", "replication.listen"] {
+        let value = resolved.text(path);
+        if value.is_empty() || reach(value) == Reach::Local || plaintext {
+            continue;
+        }
+        if authorities && (signer || token) {
+            continue;
+        }
+        errors.push(refuse(
+            path,
+            format!(
+                "`{path}` is `{value}`, which other nodes reach over a network, so it uses mutual TLS. Set `installation.authorities` to the certificate file of the installation authority, and either `installation.signingCertificate` and `installation.signingKey` (a head that signs) or `enrollment.roleToken` (a node that enrolls). Or listen on a loopback or `unix:` address, or set `transport.allowPlaintext: true` if something else protects this network."
+            ),
+        ));
+    }
+    let head = resolved.text("head.endpoint");
+    if !head.is_empty()
+        && reach(head) == Reach::Network
+        && !plaintext
+        && !(authorities && (signer || token))
+    {
+        errors.push(refuse(
+            "head.endpoint",
+            format!(
+                "`head.endpoint` is `{head}`, which is reached over a network, so the connection uses mutual TLS. Set `installation.authorities` and `enrollment.roleToken`, use a loopback or `unix:` address, or set `transport.allowPlaintext: true` if something else protects this network."
+            ),
+        ));
+    }
+
+    let corndogs = resolved.text("corndogs.endpoint");
+    if corndogs.starts_with("unix:") {
+        errors.push(refuse(
+            "corndogs.endpoint",
+            format!(
+                "`corndogs.endpoint` is `{corndogs}`. The Corndogs client reaches Corndogs over TCP only. A valid example is `127.0.0.1:5080`."
+            ),
+        ));
+    }
+    // A Corndogs endpoint on a network is reached over TLS (D62), with the
+    // operating system's authorities unless `corndogs.tls.caFile` names others.
+    // That is valid material, so there is nothing to refuse here. A name that
+    // is set must still be a name a certificate can carry.
+    let corndogs_name = resolved.text("corndogs.tls.serverName");
+    if !corndogs_name.is_empty() && !is_dns_name(corndogs_name) {
+        errors.push(refuse(
+            "corndogs.tls.serverName",
+            format!(
+                "`corndogs.tls.serverName` is `{corndogs_name}`, and a certificate carries a DNS name. Use letters, digits, hyphens, and dots. A valid example is `corndogs.tallyowl.svc`."
+            ),
+        ));
+    }
+
+    let dashboard = resolved.text("dashboard.listen");
+    if resolved.boolean("dashboard.enabled")
+        && !dashboard.is_empty()
+        && reach(dashboard) == Reach::Network
+        && !resolved.boolean("dashboard.allowPlaintext")
+    {
+        errors.push(refuse(
+            "dashboard.listen",
+            format!(
+                "`dashboard.listen` is `{dashboard}`, which is reached over a network, and the dashboard serves plaintext and carries session tokens. Put it behind a gateway that ends TLS and set `dashboard.allowPlaintext: true`, or listen on a loopback address."
+            ),
+        ));
+    }
+}
+
+/// Settings this release parses and nothing reads.
+///
+/// **A setting that does nothing must not look as if it does something.** Each
+/// of these is documented, was accepted with any value, and changed nothing:
+/// an operator who turned catalog snapshots on had none. The default stays
+/// accepted, so a configuration that names the default still starts.
+const NOT_BUILT: &[(&str, &str)] = &[
+    (
+        "integrity.scrub.period",
+        "No background scrub runs. `integrity.mode: verify-on-read` checks every page when a query reads it",
+    ),
+    (
+        "integrity.scrub.rateLimit",
+        "No background scrub runs. `integrity.mode: verify-on-read` checks every page when a query reads it",
+    ),
+    (
+        "catalog.snapshots.enabled",
+        "No periodic catalog snapshot is taken. `tallyowl-head snapshot <directory>` takes one when you run it, and `tallyowl-head rebuild` rebuilds a lost catalog from the stored files",
+    ),
+    (
+        "catalog.snapshots.period",
+        "No periodic catalog snapshot is taken. `tallyowl-head snapshot <directory>` takes one when you run it",
+    ),
+    (
+        "catalog.snapshots.keep",
+        "No periodic catalog snapshot is taken. `tallyowl-head snapshot <directory>` takes one when you run it",
+    ),
+    (
+        "storage.coldTier.enabled",
+        "No data moves to object storage. Every stored file stays on the local volume until its retention ends",
+    ),
+    (
+        "placement.slowNode.factor",
+        "No node is measured against its peers, so no node is reported or demoted as slow",
+    ),
+    (
+        "placement.slowNode.duration",
+        "No node is measured against its peers, so no node is reported or demoted as slow",
+    ),
+    (
+        "retention.audit",
+        "Control-plane, deletion, and export records are kept without limit",
+    ),
+];
+
+fn check_not_built(resolved: &Resolved, errors: &mut Vec<ConfigError>) {
+    for (path, instead) in NOT_BUILT {
+        let Some(entry) = resolved.get(path) else {
+            continue;
+        };
+        let default = crate::value::parse(&entry.setting.kind, entry.setting.default).ok();
+        if default.as_ref() == Some(&entry.value) {
+            continue;
+        }
+        errors.push(refuse(
+            path,
+            format!(
+                "`{path}` is `{}`, and this release does not build what it controls. {instead}. Remove the setting, or set it to the default, `{}`.",
+                entry.value.to_display(),
+                entry.setting.default
+            ),
+        ));
+    }
+    if resolved.text("integrity.mode") == "scrub" {
+        errors.push(refuse(
+            "integrity.mode",
+            "`integrity.mode` is `scrub`, and this release does not build the background scrub. Nothing would read the stored files on a schedule. Use `verify-on-read`, which checks every page when a query reads it.".to_string(),
+        ));
     }
 }
 
@@ -310,7 +791,7 @@ mod tests {
     #[test]
     fn local_quorum_is_accepted_on_a_tablet_with_more_than_one_voter() {
         assert!(with(
-            "storage:\n  receiptPolicy: local-quorum\n  tabletVoters: 3\nreplication:\n  listen: 0.0.0.0:5200\n"
+            "storage:\n  receiptPolicy: local-quorum\n  tabletVoters: 3\nreplication:\n  listen: 0.0.0.0:5200\ntransport:\n  allowPlaintext: true\n"
         )
         .is_ok());
     }
@@ -362,7 +843,7 @@ mod tests {
         let errors = refusal("installation:\n  profile: home\ncell:\n  controllers: 3\n");
         assert_eq!(errors[0].setting, "cell.controllers");
 
-        let replicated = "installation:\n  profile: replicated\nreplication:\n  listen: 0.0.0.0:5200\nstorage:\n  receiptPolicy: local-quorum\n  tabletVoters: 3\ncell:\n  controllers: ";
+        let replicated = "installation:\n  profile: replicated\ntransport:\n  allowPlaintext: true\nreplication:\n  listen: 0.0.0.0:5200\nstorage:\n  receiptPolicy: local-quorum\n  tabletVoters: 3\ncell:\n  controllers: ";
         assert!(with(&format!("{replicated}3\n")).is_ok());
         assert!(with(&format!("{replicated}5\n")).is_ok());
         let errors = with(&format!("{replicated}4\n")).unwrap_err();
@@ -386,9 +867,12 @@ mod tests {
     fn catalog_snapshots_need_at_least_two_when_they_are_on() {
         let errors = refusal("catalog:\n  snapshots:\n    enabled: true\n    keep: 1\n");
         assert_eq!(errors[0].setting, "catalog.snapshots.keep");
-        assert!(with("catalog:\n  snapshots:\n    enabled: true\n    keep: 2\n").is_ok());
-        // Off by default, and the count then does not matter.
-        assert!(with("catalog:\n  snapshots:\n    keep: 1\n").is_ok());
+        // D59's rule stays for the release that builds periodic snapshots. This
+        // one does not, so turning them on is refused whatever the count is:
+        // see `a_setting_nothing_reads_is_refused_unless_it_holds_its_default`.
+        let errors = refusal("catalog:\n  snapshots:\n    enabled: true\n    keep: 2\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].setting, "catalog.snapshots.enabled");
     }
 
     #[test]
@@ -410,6 +894,20 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.message.contains("no peer can reach it")));
+    }
+
+    #[test]
+    fn an_advertise_address_nobody_can_dial_is_refused() {
+        // A pod listens on every interface. That address copied into the
+        // advertise setting would have every peer dial itself.
+        for unspecified in ["0.0.0.0:5200", "[::]:5200", ":5200"] {
+            let errors = refusal(&format!("replication:\n  advertise: \"{unspecified}\"\n"));
+            assert!(
+                errors.iter().any(|e| e.setting == "replication.advertise"),
+                "`{unspecified}` was accepted"
+            );
+        }
+        assert!(with("replication:\n  advertise: \"tallyowl-0.tallyowl:5200\"\n").is_ok());
     }
 
     #[test]
@@ -465,5 +963,338 @@ mod tests {
         );
         // And the defaults satisfy it, which is what a home installation gets.
         assert!(with("").is_ok());
+    }
+
+    #[test]
+    fn a_scrape_target_the_scraper_cannot_use_is_refused_before_the_collector_starts() {
+        // L073. Found on every scrape instead, this is one warning an interval
+        // from a collector that started normally.
+        let errors = refusal(
+            "compatibility:\n  prometheus:\n    targets:\n      - https://node.example:9100/metrics\n",
+        );
+        assert_eq!(errors[0].setting, "compatibility.prometheus.targets");
+        assert!(
+            errors[0]
+                .message
+                .contains("https://node.example:9100/metrics"),
+            "{}",
+            errors[0].message
+        );
+        assert!(errors[0].message.contains("http://host:port/metrics"));
+
+        assert!(
+            with("compatibility:\n  prometheus:\n    targets:\n      - ftp://node/metrics\n")
+                .is_err()
+        );
+        assert!(with(
+            "compatibility:\n  prometheus:\n    targets:\n      - http://[::1]:9100/metrics\n      - node.example:9100\n"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_scrape_with_no_worker_is_refused() {
+        let errors = refusal("compatibility:\n  prometheus:\n    workers: 0\n");
+        assert_eq!(errors[0].setting, "compatibility.prometheus.workers");
+    }
+
+    fn refused_for(yaml: &str, setting: &str) -> String {
+        refusal(yaml)
+            .into_iter()
+            .find(|error| error.setting == setting)
+            .unwrap_or_else(|| panic!("`{setting}` was not refused"))
+            .message
+    }
+
+    #[test]
+    fn a_certificate_lifetime_is_at_least_an_hour_and_at_most_a_year() {
+        for hours in ["0", "-1", "8761"] {
+            let message = refused_for(
+                &format!("enrollment:\n  certificateLifetimeHours: {hours}\n"),
+                "enrollment.certificateLifetimeHours",
+            );
+            assert!(message.contains("from 1 to 8760"), "{message}");
+        }
+        assert!(with("enrollment:\n  certificateLifetimeHours: 1\n").is_ok());
+    }
+
+    #[test]
+    fn a_signer_needs_its_key_and_an_authority_it_chains_to() {
+        let message = refused_for(
+            "installation:\n  signingCertificate: /tls/intermediate.crt\n  authorities:\n    - /tls/root.crt\n",
+            "installation.signingKey",
+        );
+        assert!(
+            message.contains("installation.signingCertificate"),
+            "{message}"
+        );
+        let message = refused_for(
+            "installation:\n  signingKey: file:/tls/intermediate.key\n",
+            "installation.signingCertificate",
+        );
+        assert!(message.contains("ca create"), "{message}");
+        let message = refused_for(
+            "installation:\n  signingCertificate: /tls/intermediate.crt\n  signingKey: file:/tls/intermediate.key\n",
+            "installation.authorities",
+        );
+        assert!(message.contains("root"), "{message}");
+        assert!(with(
+            "installation:\n  signingCertificate: /tls/intermediate.crt\n  signingKey: file:/tls/intermediate.key\n  authorities:\n    - /tls/root.crt\n"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn keep_everything_and_a_rollup_retention_cannot_both_be_true() {
+        let message = refused_for("retention:\n  detailed: 0s\n", "retention.detailed");
+        assert!(message.contains("retention.rollup"), "{message}");
+        assert!(message.contains("retention.raw"), "{message}");
+        // Both zero is one consistent meaning, and so is the ordinary case.
+        assert!(with("retention:\n  detailed: 0s\n  rollup: 0s\n").is_ok());
+        assert!(with("retention:\n  detailed: 30d\n").is_ok());
+    }
+
+    #[test]
+    fn a_negative_length_of_time_does_not_parse() {
+        let inputs = Inputs {
+            file: flatten_yaml("retention:\n  detailed: -5m\n").expect("valid YAML"),
+            ..Inputs::default()
+        };
+        let errors = resolve(&inputs).expect_err("refused");
+        assert!(errors[0].message.contains("retention.detailed"));
+        assert!(
+            errors[0].message.contains("cannot be negative"),
+            "{}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn a_node_name_that_cannot_go_on_a_certificate_is_refused() {
+        for name in [
+            "head_0",
+            "-head",
+            "head-",
+            "head..0",
+            "héad",
+            &"a".repeat(64),
+        ] {
+            refused_for(&format!("node:\n  name: \"{name}\"\n"), "node.name");
+        }
+        for name in [
+            "head-0",
+            "node-10-0-0-7-5200",
+            "head-0.tallyowl-nodes.prod.svc",
+        ] {
+            assert!(with(&format!("node:\n  name: {name}\n")).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_session_that_ends_at_once_and_a_percentage_over_a_hundred_are_refused() {
+        refused_for(
+            "linkkeys:\n  sessionLifetime: 0s\n",
+            "linkkeys.sessionLifetime",
+        );
+        assert!(with("linkkeys:\n  sessionLifetime: 1m\n").is_ok());
+        refused_for(
+            "sampling:\n  tail:\n    keepPercent: 500\n",
+            "sampling.tail.keepPercent",
+        );
+        refused_for(
+            "sampling:\n  tail:\n    keepPercent: -1\n",
+            "sampling.tail.keepPercent",
+        );
+        assert!(with("sampling:\n  tail:\n    keepPercent: 0\n").is_ok());
+    }
+
+    #[test]
+    fn an_address_to_listen_on_is_refused_by_name_when_it_is_a_host_name() {
+        let message = refused_for("head:\n  listen: localhost\n", "head.listen");
+        assert!(message.contains("`localhost`"), "{message}");
+        refused_for(
+            "dashboard:\n  listen: dashboard.internal:5120\n",
+            "dashboard.listen",
+        );
+        refused_for(
+            "collector:\n  operationalListen: \"5101\"\n",
+            "collector.operationalListen",
+        );
+        let open = "transport:\n  allowPlaintext: true\n";
+        assert!(with(&format!("{open}head:\n  listen: \"[::]:5110\"\n")).is_ok());
+        assert!(with(&format!("{open}head:\n  listen: 0.0.0.0:5110\n")).is_ok());
+        assert!(with("head:\n  listen: unix:/run/tallyowl/head.sock\n").is_ok());
+        refused_for("head:\n  listen: \"unix:\"\n", "head.listen");
+    }
+
+    // ---- D62: a CSIL connection that crosses a network uses TLS --------------
+
+    #[test]
+    fn an_intake_on_a_network_address_with_no_certificate_is_refused_by_name() {
+        let message = refused_for("collector:\n  listen: 0.0.0.0:5100\n", "collector.listen");
+        assert!(message.contains("`0.0.0.0:5100`"), "{message}");
+        assert!(message.contains("tls.certificateDirectories"), "{message}");
+        assert!(message.contains("transport.allowPlaintext"), "{message}");
+
+        assert!(with(
+            "collector:\n  listen: 0.0.0.0:5100\ntls:\n  certificateDirectories: /etc/tallyowl/tls\n"
+        )
+        .is_ok());
+        assert!(
+            with("collector:\n  listen: 0.0.0.0:5100\ntransport:\n  allowPlaintext: true\n")
+                .is_ok()
+        );
+        assert!(with("collector:\n  listen: unix:/run/tallyowl/intake.sock\n").is_ok());
+        assert!(with("collector:\n  listen: \"[::1]:5100\"\n").is_ok());
+    }
+
+    #[test]
+    fn an_opentelemetry_receiver_follows_the_intake_rule_only_when_it_is_on() {
+        let off = "compatibility:\n  openTelemetry:\n    listen: 0.0.0.0:4318\n";
+        assert!(with(off).is_ok());
+        let on = "compatibility:\n  openTelemetry:\n    enabled: true\n    listen: 0.0.0.0:4318\n";
+        refused_for(on, "compatibility.openTelemetry.listen");
+    }
+
+    #[test]
+    fn a_node_listener_on_a_network_needs_authorities_and_an_identity() {
+        let message = refused_for("head:\n  listen: 0.0.0.0:5110\n", "head.listen");
+        assert!(message.contains("installation.authorities"), "{message}");
+        assert!(message.contains("enrollment.roleToken"), "{message}");
+
+        // Authorities alone are not an identity to show.
+        refused_for(
+            "head:\n  listen: 0.0.0.0:5110\ninstallation:\n  authorities: /etc/tallyowl/ca.crt\n",
+            "head.listen",
+        );
+        refused_for(
+            "replication:\n  listen: 0.0.0.0:5200\n",
+            "replication.listen",
+        );
+    }
+
+    #[test]
+    fn a_network_head_endpoint_needs_an_identity_for_the_collector() {
+        let message = refused_for("head:\n  endpoint: tallyowl:5110\n", "head.endpoint");
+        assert!(message.contains("mutual TLS"), "{message}");
+        assert!(with("head:\n  endpoint: unix:/run/tallyowl/head.sock\n").is_ok());
+    }
+
+    #[test]
+    fn corndogs_over_a_network_is_reached_over_tls_and_needs_no_exception() {
+        // Before Corndogs had TLS, a network endpoint needed
+        // `corndogs.allowPlaintext`. That setting is gone (D62): the hop uses
+        // TLS, with the system's authorities or `corndogs.tls.caFile`.
+        assert!(with("corndogs:\n  endpoint: corndogs:5080\n").is_ok());
+        assert!(with(
+            "corndogs:\n  endpoint: corndogs:5080\n  tls:\n    caFile: /etc/tallyowl/root.crt\n    serverName: corndogs.tallyowl.svc\n"
+        )
+        .is_ok());
+        refused_for(
+            "corndogs:\n  endpoint: corndogs:5080\n  tls:\n    serverName: \"not a name\"\n",
+            "corndogs.tls.serverName",
+        );
+        let message = refused_for(
+            "corndogs:\n  endpoint: unix:/run/corndogs.sock\n",
+            "corndogs.endpoint",
+        );
+        assert!(message.contains("TCP only"), "{message}");
+    }
+
+    #[test]
+    fn a_dashboard_on_a_network_needs_the_gateway_setting() {
+        let message = refused_for("dashboard:\n  listen: 0.0.0.0:5120\n", "dashboard.listen");
+        assert!(message.contains("dashboard.allowPlaintext"), "{message}");
+        assert!(with("dashboard:\n  listen: 0.0.0.0:5120\n  allowPlaintext: true\n").is_ok());
+        assert!(with("dashboard:\n  enabled: false\n  listen: 0.0.0.0:5120\n").is_ok());
+    }
+
+    #[test]
+    fn the_home_profile_needs_no_certificate_at_all() {
+        assert!(with("").is_ok());
+        assert!(with("installation:\n  profile: home\n").is_ok());
+    }
+
+    #[test]
+    fn the_address_the_head_dials_takes_a_name_and_refuses_what_nothing_can_dial() {
+        let key = "metrics.selfObservation.endpoint";
+        let yaml =
+            |value: &str| format!("metrics:\n  selfObservation:\n    endpoint: \"{value}\"\n");
+        assert!(with(&yaml("tallyowl-collector:5100")).is_ok());
+        assert!(with(&yaml("10.0.0.7:5100")).is_ok());
+        assert!(with(&yaml("[fd00::7]:5100")).is_ok());
+        for unusable in [
+            "0.0.0.0:5100",
+            "[::]:5100",
+            "tallyowl-collector",
+            ":5100",
+            "a b:5100",
+            "host:0",
+        ] {
+            let message = refused_for(&yaml(unusable), key);
+            assert!(message.contains(unusable), "{message}");
+        }
+    }
+
+    #[test]
+    fn the_callback_path_must_be_the_path_of_the_callback_address() {
+        let yaml = |path: &str| {
+            format!(
+                "linkkeys:\n  enabled: true\n  trustedDomains: id.example\n  callbackUrl: https://owl.example/auth/return?x=1\ndashboard:\n  callbackPath: {path}\n"
+            )
+        };
+        let message = refused_for(&yaml("/sign-in/callback"), "dashboard.callbackPath");
+        assert!(message.contains("/auth/return"), "{message}");
+        assert!(with(&yaml("/auth/return")).is_ok());
+    }
+
+    #[test]
+    fn a_setting_nothing_reads_is_refused_unless_it_holds_its_default() {
+        for (yaml, setting) in [
+            (
+                "catalog:\n  snapshots:\n    enabled: true\n",
+                "catalog.snapshots.enabled",
+            ),
+            (
+                "catalog:\n  snapshots:\n    period: 5m\n",
+                "catalog.snapshots.period",
+            ),
+            (
+                "catalog:\n  snapshots:\n    keep: 5\n",
+                "catalog.snapshots.keep",
+            ),
+            (
+                "storage:\n  coldTier:\n    enabled: true\n",
+                "storage.coldTier.enabled",
+            ),
+            (
+                "integrity:\n  scrub:\n    period: 1d\n",
+                "integrity.scrub.period",
+            ),
+            (
+                "integrity:\n  scrub:\n    rateLimit: 1MiB\n",
+                "integrity.scrub.rateLimit",
+            ),
+            ("integrity:\n  mode: scrub\n", "integrity.mode"),
+            (
+                "placement:\n  slowNode:\n    factor: 9\n",
+                "placement.slowNode.factor",
+            ),
+            (
+                "placement:\n  slowNode:\n    duration: 1m\n",
+                "placement.slowNode.duration",
+            ),
+            ("retention:\n  audit: 30d\n", "retention.audit"),
+        ] {
+            let message = refused_for(yaml, setting);
+            assert!(message.contains("does not build"), "{message}");
+        }
+        // The default, written out, still starts. An existing configuration
+        // that names it is not broken by this.
+        assert!(
+            with("catalog:\n  snapshots:\n    enabled: false\n    keep: 2\n    period: 1h\n")
+                .is_ok()
+        );
+        assert!(with("integrity:\n  mode: none\n").is_ok());
     }
 }

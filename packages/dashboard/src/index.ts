@@ -20,7 +20,15 @@ import {
   toQueryRequestCbor,
 } from "./control-api.ts";
 import { eventBreakdown, eventTrend, metricNames, metricRate } from "./queries.ts";
-import { begin, complete, forgetSession, heldSession, type Storage } from "./sign-in.ts";
+import {
+  begin,
+  complete,
+  forgetSession,
+  heldSession,
+  holdSession,
+  isSessionToken,
+  type Storage,
+} from "./sign-in.ts";
 import { Control, ControlError, TransportFailure } from "./transport.ts";
 import * as view from "./view.ts";
 
@@ -32,7 +40,11 @@ export interface Options {
   readonly root: HTMLElement;
   readonly location: string;
   readonly callbackUrl: string;
-  readonly projectId: Uint8Array;
+  /// The project to draw. When the host names none, the dashboard asks the head
+  /// which projects this session can read and draws the first.
+  readonly projectId?: Uint8Array;
+  /// Said above the sign-in prompt. A session that ended says so here.
+  readonly notice?: string;
   /// Injected so a test has a fixed clock. A chart whose range moved between
   /// runs would not be testable.
   readonly now: () => number;
@@ -61,9 +73,33 @@ export async function render(options: Options): Promise<void> {
   }
 
   if (control.session() === undefined) {
+    if (options.notice !== undefined) root.append(view.failure(options.notice));
     root.append(signInPrompt(options));
     return;
   }
+
+  // The project comes first, and nothing is asked about a project until there
+  // is one. The page used to draw once against a project ID of all zeros, and
+  // every load put three failed queries in the head's log.
+  let projectId = options.projectId;
+  if (projectId === undefined) {
+    try {
+      projectId = await firstProject(control);
+    } catch (cause) {
+      if (sessionEnded(cause)) return signInAgain(options);
+      root.append(view.failure(readable(cause)));
+      return;
+    }
+    if (projectId === undefined) {
+      root.append(
+        view.failure(
+          "This account can read no project yet. Ask the person who runs TallyOwl to give you a role in a workspace.",
+        ),
+      );
+      return;
+    }
+  }
+  const drawn = { ...options, projectId };
 
   if (options.readiness !== undefined) {
     try {
@@ -82,18 +118,19 @@ export async function render(options: Options): Promise<void> {
 
   try {
     const trend = fromQueryResponseCbor(
-      await control.call("run-query", toQueryRequestCbor(eventTrend(options.projectId, range, HOUR_MS))),
+      await control.call("run-query", toQueryRequestCbor(eventTrend(projectId, range, HOUR_MS))),
     );
     root.append(view.chart(view.pointsFrom(trend.columns, trend.rows)));
 
     const breakdown = fromQueryResponseCbor(
       await control.call(
         "run-query",
-        toQueryRequestCbor(eventBreakdown(options.projectId, range, 10)),
+        toQueryRequestCbor(eventBreakdown(projectId, range, 10)),
       ),
     );
     root.append(view.breakdown(breakdown.columns, breakdown.rows));
   } catch (cause) {
+    if (sessionEnded(cause)) return signInAgain(options);
     root.append(view.failure(readable(cause)));
   }
 
@@ -103,7 +140,7 @@ export async function render(options: Options): Promise<void> {
     const names = fromQueryResponseCbor(
       await control.call(
         "run-query",
-        toQueryRequestCbor(metricNames(options.projectId, range, 20)),
+        toQueryRequestCbor(metricNames(projectId, range, 20)),
       ),
     );
     const available = view.metricNamesFrom(names.columns, names.rows);
@@ -113,20 +150,43 @@ export async function render(options: Options): Promise<void> {
         : available[0];
       root.append(
         view.metricChooser(available, chosen, (name) => {
-          void render({ ...options, metricName: name });
+          void render({ ...drawn, metricName: name });
         }),
       );
       const rate = fromQueryResponseCbor(
         await control.call(
           "run-query",
-          toQueryRequestCbor(metricRate(options.projectId, chosen, range, HOUR_MS)),
+          toQueryRequestCbor(metricRate(projectId, chosen, range, HOUR_MS)),
         ),
       );
       root.append(view.metricChart(chosen, view.ratePointsFrom(rate.columns, rate.rows)));
     }
   } catch (cause) {
+    if (sessionEnded(cause)) return signInAgain(options);
     root.append(view.failure(readable(cause)));
   }
+}
+
+/// Whether the head refused the session this tab holds.
+function sessionEnded(cause: unknown): boolean {
+  return cause instanceof ControlError && cause.code === "unauthenticated";
+}
+
+/// Forget a session the head no longer accepts, and offer the sign-in again.
+///
+/// The session used to stay in the tab. Every panel then said "This credential
+/// is not valid. Ask the person who runs TallyOwl for a new one", which is
+/// written for an application key, and the sign-in form never came back until
+/// the tab closed. The person only has to sign in again, so that is what the
+/// page says and offers.
+function signInAgain(options: Options): Promise<void> {
+  forgetSession(options.storage);
+  options.control.withSession(undefined);
+  return render({
+    ...options,
+    projectId: undefined,
+    notice: "Your session ended. Sign in again.",
+  });
 }
 
 function signInPrompt(options: Options): HTMLElement {
@@ -154,6 +214,49 @@ function signInPrompt(options: Options): HTMLElement {
         form.append(view.failure(readable(cause)));
       });
   });
+
+  const prompt = document.createElement("section");
+  prompt.append(form, sessionTokenForm(options));
+  return prompt;
+}
+
+/// The way in for an installation with no LinkKeys domain.
+///
+/// `linkkeys.enabled` is `false` by default, and `tallyowl-head session create`
+/// then prints a session token. The page had no field that took one, so the
+/// only way to use it was to write `sessionStorage` by hand in the browser's
+/// developer tools.
+function sessionTokenForm(options: Options): HTMLElement {
+  const form = document.createElement("form");
+  const label = document.createElement("label");
+  label.textContent = "Or paste a session token from `tallyowl-head session create`";
+  const input = document.createElement("input");
+  input.name = "session-token";
+  // A token is a credential, so it is not shown as it is typed and the browser
+  // is asked not to remember it.
+  input.type = "password";
+  input.autocomplete = "off";
+  input.required = true;
+  label.append(input);
+
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.textContent = "Use this token";
+  form.append(label, submit);
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!isSessionToken(input.value)) {
+      form.append(
+        view.failure(
+          "That is not a session token. A session token starts with `tos_`. A key that starts with `tow_` belongs to an application and cannot sign a person in.",
+        ),
+      );
+      return;
+    }
+    holdSession(options.control, options.storage, input.value);
+    void render({ ...options, notice: undefined });
+  });
   return form;
 }
 
@@ -180,37 +283,38 @@ export async function firstProject(control: Control): Promise<Uint8Array | undef
   return fromProjectListCbor(payload).projects[0]?.projectId;
 }
 
+/// Where a sign-in returns to, as the head serves it.
+///
+/// The head writes `dashboard.callbackPath` into the document. The page used to
+/// assume `/sign-in/callback`, and an installation that configured another
+/// path had every sign-in refused with "That is not this installation's
+/// sign-in address".
+export function callbackPath(read: (name: string) => string | null | undefined): string {
+  const configured = read("tallyowl-callback-path");
+  return configured !== null && configured !== undefined && configured.startsWith("/")
+    ? configured
+    : "/sign-in/callback";
+}
+
 /// Start the dashboard against the real page. `boot.ts` calls this.
 export async function start(): Promise<void> {
   const root = document.getElementById("dashboard");
   if (root === null) return;
 
   const control = new Control().withSession(heldSession(globalThis.sessionStorage));
-  const options = {
+  const path = callbackPath((name) =>
+    document.querySelector(`meta[name="${name}"]`)?.getAttribute("content"),
+  );
+  await render({
     control,
     storage: globalThis.sessionStorage,
     root,
     location: globalThis.location.href,
-    callbackUrl: `${globalThis.location.origin}/sign-in/callback`,
+    callbackUrl: `${globalThis.location.origin}${path}`,
     now: () => Date.now(),
     readiness: async () => {
       const response = await fetch("/api/health");
       return (await response.json()) as view.HealthReport;
     },
-  };
-
-  // The project is resolved after any sign-in, because listing projects needs
-  // a session.
-  await render({ ...options, projectId: new Uint8Array(16) });
-  if (control.session() === undefined) return;
-  try {
-    const projectId = await firstProject(control);
-    if (projectId === undefined) {
-      root.append(view.failure("This account can read no project yet."));
-      return;
-    }
-    await render({ ...options, projectId });
-  } catch (cause) {
-    root.append(view.failure(readable(cause)));
-  }
+  });
 }

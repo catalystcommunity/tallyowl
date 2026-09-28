@@ -657,7 +657,12 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 [[package]]
 name = "corndogs"
 version = "0.0.0"
-source = "git+https://github.com/catalystcommunity/corndogs?rev=a313433b53c2df3742210d5354353fd98b6fbc18#a313433b53c2df3742210d5354353fd98b6fbc18"
+source = "git+https://github.com/catalystcommunity/corndogs?rev=21d018211ec895c3af5785bc18c446db6c77ee53#21d018211ec895c3af5785bc18c446db6c77ee53"
+dependencies = [
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -708,7 +713,7 @@ dependencies = [
 [[package]]
 name = "csilgen-transport"
 version = "0.1.0"
-source = "git+https://github.com/catalystcommunity/csilgen?rev=d693a94d5b722ab4da858a50469412e6ffcbe080#d693a94d5b722ab4da858a50469412e6ffcbe080"
+source = "git+https://github.com/catalystcommunity/csilgen?rev=baec1dad191c4ccd522772b5172ee12ba5bf3f6c#baec1dad191c4ccd522772b5172ee12ba5bf3f6c"
 dependencies = [
  "ciborium",
  "ciborium-io",
@@ -2497,6 +2502,7 @@ dependencies = [
  "blake3",
  "ciborium",
  "openraft",
+ "rcgen",
  "redb",
  "serde",
  "tallyowl-cluster-api",
@@ -2517,7 +2523,10 @@ name = "tallyowl-collector"
 version = "0.2.1"
 dependencies = [
  "corndogs",
- "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=d693a94d5b722ab4da858a50469412e6ffcbe080)",
+ "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=baec1dad191c4ccd522772b5172ee12ba5bf3f6c)",
+ "libc",
+ "rcgen",
+ "rustls",
  "serde_json",
  "tallyowl-cluster",
  "tallyowl-collector-api",
@@ -2526,11 +2535,13 @@ dependencies = [
  "tallyowl-control-api",
  "tallyowl-driver-rust",
  "tallyowl-head",
+ "tallyowl-identity",
  "tallyowl-obs",
  "tallyowl-queue",
  "tallyowl-rpc",
  "tallyowl-store",
  "tallyowl-wire",
+ "time",
  "zstd",
 ]
 
@@ -2543,6 +2554,7 @@ name = "tallyowl-compat"
 version = "0.2.1"
 dependencies = [
  "getrandom 0.3.4",
+ "rustls",
  "tallyowl-collector-api",
  "tallyowl-obs",
  "tallyowl-wire",
@@ -2563,7 +2575,10 @@ version = "0.2.1"
 name = "tallyowl-driver-rust"
 version = "0.2.1"
 dependencies = [
+ "blake3",
  "getrandom 0.3.4",
+ "rcgen",
+ "rustls-pemfile",
  "tallyowl-collector-api",
  "tallyowl-config",
  "tallyowl-control-api",
@@ -2600,8 +2615,9 @@ dependencies = [
  "blake3",
  "chrono",
  "chrono-tz",
- "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=d693a94d5b722ab4da858a50469412e6ffcbe080)",
+ "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=baec1dad191c4ccd522772b5172ee12ba5bf3f6c)",
  "getrandom 0.3.4",
+ "libc",
  "linkkeys-local-rp",
  "rcgen",
  "rustls",
@@ -2615,12 +2631,28 @@ dependencies = [
  "tallyowl-control-api",
  "tallyowl-driver-rust",
  "tallyowl-export",
+ "tallyowl-identity",
  "tallyowl-obs",
  "tallyowl-queue",
  "tallyowl-rpc",
  "tallyowl-store",
  "tallyowl-wire",
  "webpki-roots",
+ "x509-parser",
+]
+
+[[package]]
+name = "tallyowl-identity"
+version = "0.2.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "rcgen",
+ "tallyowl-cluster",
+ "tallyowl-config",
+ "tallyowl-control-api",
+ "tallyowl-obs",
+ "tallyowl-rpc",
+ "tallyowl-store",
  "x509-parser",
 ]
 
@@ -2641,18 +2673,22 @@ name = "tallyowl-queue"
 version = "0.2.1"
 dependencies = [
  "corndogs",
+ "rcgen",
  "tallyowl-obs",
+ "tallyowl-rpc",
 ]
 
 [[package]]
 name = "tallyowl-rpc"
 version = "0.2.1"
 dependencies = [
- "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=d693a94d5b722ab4da858a50469412e6ffcbe080)",
+ "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=baec1dad191c4ccd522772b5172ee12ba5bf3f6c)",
  "rcgen",
  "rustls",
+ "rustls-native-certs",
  "rustls-pemfile",
  "tallyowl-obs",
+ "time",
  "x509-parser",
 ]
 

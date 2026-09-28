@@ -225,6 +225,10 @@ pub fn config_with(
             heartbeat_interval: 150,
             election_timeout_min: 300,
             election_timeout_max: 600,
+            // The byte budget in `storage::MAX_APPEND_BYTES` is the bound that
+            // matters. This one keeps an append of small entries short enough
+            // to be answered inside one heartbeat.
+            max_payload_entries: 64,
             snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(snapshot_every.max(1)),
             max_in_snapshot_log_to_keep: keep_after_snapshot,
             ..Default::default()

@@ -9,7 +9,7 @@ again.
 | File | Contract |
 | --- | --- |
 | `types/common.csil` | Shared types. No service. Every entry specification includes it. |
-| `tallyowl-ingest.csil` | Telemetry envelopes and capture operations. An application includes this file. |
+| `tallyowl-ingest.csil` | Telemetry envelopes and capture operations, and `TallyOwlAlertReceiver`, which an application declares to receive signed alert callbacks. An application includes this file. |
 | `tallyowl-collector.csil` | Durable intake, batch transfer, receipts, policy, and health. |
 | `tallyowl-control.csil` | The query algebra, alerts, and administration. |
 | `tallyowl-cluster.csil` | Replicated storage: consensus transport, snapshot and segment transfer, distributed query, node health, and topology. Node to node and operator only; no application reaches it. |
@@ -26,6 +26,7 @@ service. Assign a wire ID one time and never use it again for something else.
 | `TallyOwlControl` | 3 |
 | `TallyOwlReplication` | 4 |
 | `TallyOwlCluster` | 5 |
+| `TallyOwlAlertReceiver` | 6 |
 
 csilgen needs a wire ID on every operation of a service or on none of them. A
 partial set is a hard error.

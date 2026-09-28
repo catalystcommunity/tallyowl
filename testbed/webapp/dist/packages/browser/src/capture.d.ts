@@ -1,7 +1,7 @@
 import type { ConversionPayload, ErrorPayload, EventPayload, PageViewPayload, TelemetryItem } from "./collector-api.ts";
 import { write, type Value } from "./value.ts";
 export declare const SDK_NAME = "tallyowl-browser";
-export declare const SDK_VERSION = "0.2.0";
+export declare const SDK_VERSION = "0.2.1";
 /** Milliseconds since the Unix epoch. Every time TallyOwl stores is this. */
 export declare const nowMs: () => number;
 /**
@@ -48,8 +48,29 @@ export declare class Capture {
     /** The anonymous identifier the host gave this browser. It is opaque and has
      * project scope. */
     withAnonymousId(anonymousId: string): this;
+    /** The same method under the name the Go app driver uses. */
+    withAnonymous(anonymousId: string): this;
+    /**
+     * Join this item to a trace, so a browser event lines up with the backend
+     * request that served it.
+     *
+     * `trace` is a 16-byte trace ID, its 32 hexadecimal characters, or a whole
+     * `traceparent` value. A value this package cannot read leaves the item with
+     * no trace: joining two unrelated traces is worse than joining none.
+     */
+    withTrace(trace: Uint8Array | string, spanId?: Uint8Array | string): this;
     get eventId(): Uint8Array;
 }
+/**
+ * Read a trace ID, and a span ID when a `traceparent` value carries one.
+ *
+ * It returns `undefined` for anything it cannot read, which includes an ID of
+ * all zeros and a `traceparent` version other than `00`.
+ */
+export declare function parseTrace(trace: Uint8Array | string): {
+    traceId: Uint8Array;
+    spanId?: Uint8Array;
+} | undefined;
 /** Which payload field an item carries. */
 export declare function payloadName(item: TelemetryItem): string;
 export { write };

@@ -236,6 +236,7 @@ impl Installation {
                     receipt_policy: ReceiptPolicy::LocalOne,
                     open_traces: None,
                     policy: None,
+                    sources: None,
                 }),
                 enrollment: Arc::new(tallyowl_head::enrollment::EnrollmentService {
                     store: Arc::clone(&segmented),

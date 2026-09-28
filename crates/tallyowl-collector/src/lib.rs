@@ -17,6 +17,7 @@ pub mod series;
 pub mod service;
 pub mod task;
 pub mod tenancy;
+pub mod transport;
 
 #[cfg(test)]
 mod tests;

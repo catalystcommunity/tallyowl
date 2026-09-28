@@ -43,11 +43,32 @@ const CATALOG: TableDefinition<&str, &[u8]> = TableDefinition::new("catalog");
 /// Every stored locator run lives under this prefix.
 const LOCATOR_PREFIX: &str = "locator/";
 
+/// Every stored receipt lives under this prefix.
+const RECEIPT_PREFIX: &str = "receipt/";
+
 /// The maintained sum of every stored locator run's value length. It moves
 /// in the same transaction as the run keys it counts (`write_durable`,
 /// `remove_durable`), so it can never disagree with the stored runs. It is
 /// deliberately outside the `locator/` range so it does not count itself.
 const LOCATOR_BYTES_KEY: &str = "tablet/0000/locator_bytes";
+
+/// The maintained count of stored receipts. It moves in the same transaction
+/// as every receipt write and removal, for the same reason the locator-byte
+/// total does: the sampler used to materialise every receipt to count them.
+const RECEIPT_COUNT_KEY: &str = "tablet/0000/receipt-count";
+
+/// How far compaction has applied the standing predicates. See
+/// [`Catalog::erasure_applied`].
+const ERASURE_APPLIED_KEY: &str = "tablet/0000/erasure-applied";
+
+/// The append-log position every locally sealed segment covers up to.
+///
+/// **Only a seal moves it**, in the transaction that publishes the seal's
+/// segments. It used to be derived from the highest `log_range` any manifest
+/// named, and a segment copied from another node carries that node's log
+/// positions: one installed segment moved this store's checkpoint past frames
+/// its own log had not sealed yet, and the next restart did not replay them.
+const LOG_CHECKPOINT_KEY: &str = "tablet/0000/log-checkpoint";
 
 /// The independently durable erasure ledger.
 ///
@@ -213,11 +234,229 @@ impl Tombstone {
     }
 }
 
+/// Every active predicate, indexed by what it names.
+///
+/// A predicate names events, or a value of one key, or only a time range. A row
+/// is asked about through the first two by a hash probe, so the cost of one row
+/// follows the number of distinct keys predicates use and not the number of
+/// predicates. [`Tombstone::hides`] still decides: the index only chooses which
+/// predicates are asked.
+pub struct TombstoneSet {
+    all: Vec<Tombstone>,
+    by_project: std::collections::HashMap<[u8; 16], ProjectPredicates>,
+}
+
+#[derive(Default)]
+struct ProjectPredicates {
+    by_event: std::collections::HashMap<[u8; 16], Vec<usize>>,
+    by_key: std::collections::HashMap<String, std::collections::HashMap<String, Vec<usize>>>,
+    rest: Vec<usize>,
+}
+
+impl TombstoneSet {
+    pub fn new(all: Vec<Tombstone>) -> TombstoneSet {
+        let mut by_project: std::collections::HashMap<[u8; 16], ProjectPredicates> =
+            std::collections::HashMap::new();
+        for (index, tombstone) in all.iter().enumerate() {
+            let project = by_project.entry(tombstone.project_id).or_default();
+            if !tombstone.event_ids.is_empty() {
+                for event_id in &tombstone.event_ids {
+                    project.by_event.entry(*event_id).or_default().push(index);
+                }
+            } else if let Some((key, value)) = &tombstone.property {
+                project
+                    .by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .entry(value.clone())
+                    .or_default()
+                    .push(index);
+            } else {
+                project.rest.push(index);
+            }
+        }
+        TombstoneSet { all, by_project }
+    }
+
+    pub fn all(&self) -> &[Tombstone] {
+        &self.all
+    }
+
+    pub fn len(&self) -> usize {
+        self.all.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.all.is_empty()
+    }
+
+    /// Whether any active predicate hides one row.
+    pub fn hides(&self, row: &crate::row::EventRow) -> bool {
+        let Some(project) = self.by_project.get(&row.project_id) else {
+            return false;
+        };
+        let decides =
+            |indexes: &Vec<usize>| indexes.iter().any(|index| self.all[*index].hides(row));
+        if project.by_event.get(&row.event_id).is_some_and(decides) {
+            return true;
+        }
+        for (key, by_value) in &project.by_key {
+            let held = correlation_of(row, key)
+                .or_else(|| row.properties.get(key).map(|(value, _)| value.to_display()));
+            if let Some(held) = held {
+                if by_value.get(&held).is_some_and(decides) {
+                    return true;
+                }
+            }
+        }
+        decides(&project.rest)
+    }
+}
+
 /// The transactional catalog.
 pub struct Catalog {
     database: Database,
     ledger: Database,
     directory: PathBuf,
+    /// Decoded views of the two record sets every read needs, kept until a
+    /// write changes them. One process owns one data directory, so a write
+    /// through this value is the only thing that can change either set.
+    manifest_cache: ViewCache<SegmentRecords>,
+    tombstone_cache: ViewCache<TombstoneSet>,
+    /// One erasure at a time. See [`Catalog::commit_tombstone`].
+    tombstone_turn: std::sync::Mutex<()>,
+    /// The authority this head signs node certificates with, when it is a
+    /// signer. It comes from configuration at start and is held in memory
+    /// only: the catalog never writes a signing key. See D62 and
+    /// [`Catalog::certificate_authority`].
+    pub(crate) signer: std::sync::RwLock<Option<std::sync::Arc<crate::certificates::Authority>>>,
+}
+
+/// A decoded view and the write epoch it was read at.
+///
+/// A reader notes the epoch, reads, and stores the view under the epoch it
+/// noted. A writer commits and then advances the epoch. A view read around a
+/// write is therefore stored under an epoch that has already passed, and the
+/// next reader reads again rather than trusting it.
+struct ViewCache<T> {
+    epoch: std::sync::atomic::AtomicU64,
+    held: std::sync::Mutex<Option<(u64, std::sync::Arc<T>)>>,
+}
+
+impl<T> ViewCache<T> {
+    fn new() -> ViewCache<T> {
+        ViewCache {
+            epoch: std::sync::atomic::AtomicU64::new(0),
+            held: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn invalidate(&self) {
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn get(
+        &self,
+        read: impl FnOnce() -> Result<T, CatalogError>,
+    ) -> Result<std::sync::Arc<T>, CatalogError> {
+        let epoch = self.epoch.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some((held_at, view)) = self.held.lock().expect("view cache lock").as_ref() {
+            if *held_at == epoch {
+                return Ok(std::sync::Arc::clone(view));
+            }
+        }
+        let view = std::sync::Arc::new(read()?);
+        *self.held.lock().expect("view cache lock") = Some((epoch, std::sync::Arc::clone(&view)));
+        Ok(view)
+    }
+}
+
+/// Every segment record, split into what is live and what was retired.
+struct SegmentRecords {
+    live: Vec<Manifest>,
+    retired: Vec<[u8; 16]>,
+}
+
+/// One open write transaction over the catalog table.
+///
+/// The two maintained totals move with the keys they count, so a caller that
+/// writes through this cannot leave either one behind.
+pub(crate) struct Writer<'a, 'txn> {
+    table: &'a mut redb::Table<'txn, &'static str, &'static [u8]>,
+    locator_delta: i128,
+    receipt_delta: i128,
+}
+
+impl Writer<'_, '_> {
+    pub(crate) fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CatalogError> {
+        Ok(self
+            .table
+            .get(key)
+            .map_err(|e| unavailable("be read", e))?
+            .map(|held| held.value().to_vec()))
+    }
+
+    pub(crate) fn put(&mut self, key: &str, value: &[u8]) -> Result<(), CatalogError> {
+        let old = self
+            .table
+            .insert(key, value)
+            .map_err(|e| unavailable("be written", e))?
+            .map(|held| held.value().len());
+        if key.starts_with(LOCATOR_PREFIX) {
+            self.locator_delta += value.len() as i128 - old.unwrap_or(0) as i128;
+        }
+        if key.starts_with(RECEIPT_PREFIX) && old.is_none() {
+            self.receipt_delta += 1;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remove(&mut self, key: &str) -> Result<(), CatalogError> {
+        let old = self
+            .table
+            .remove(key)
+            .map_err(|e| unavailable("be written", e))?
+            .map(|held| held.value().len());
+        if let Some(old) = old {
+            if key.starts_with(LOCATOR_PREFIX) {
+                self.locator_delta -= old as i128;
+            }
+            if key.starts_with(RECEIPT_PREFIX) {
+                self.receipt_delta -= 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every key and value under one prefix, as this transaction sees them.
+    pub(crate) fn scan(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, CatalogError> {
+        let mut upper = prefix.to_string();
+        upper.push('\u{10ffff}');
+        let mut out = Vec::new();
+        for row in self
+            .table
+            .range(prefix..upper.as_str())
+            .map_err(|e| unavailable("be read", e))?
+        {
+            let (key, value) = row.map_err(|e| unavailable("be read", e))?;
+            out.push((key.value().to_string(), value.value().to_vec()));
+        }
+        Ok(out)
+    }
+
+    fn unsigned(&self, key: &str, name: &str) -> Result<Option<u64>, CatalogError> {
+        match self.get(key)? {
+            Some(bytes) => Ok(Some(field(&decode(&bytes)?, name))),
+            None => Ok(None),
+        }
+    }
+
+    fn put_unsigned(&mut self, key: &str, name: &str, value: u64) -> Result<(), CatalogError> {
+        self.put(
+            key,
+            &cbor::encode(&MapBuilder::new().put(name, Value::Unsigned(value)).build()),
+        )
+    }
 }
 
 impl Catalog {
@@ -237,6 +476,10 @@ impl Catalog {
             database,
             ledger,
             directory,
+            manifest_cache: ViewCache::new(),
+            tombstone_cache: ViewCache::new(),
+            tombstone_turn: std::sync::Mutex::new(()),
+            signer: std::sync::RwLock::new(None),
         };
         catalog.check_version()?;
         Ok(catalog)
@@ -292,12 +535,20 @@ impl Catalog {
             .map(|value| value.value().to_vec()))
     }
 
-    /// Write several keys in one durable transaction.
+    /// Run `work` inside one durable write transaction.
     ///
-    /// One transaction is what makes a receipt and a log position atomic, and
-    /// what makes a generation publish atomically. A query sees the old
-    /// generation or the new one, never a mixture.
-    pub(crate) fn write_durable(&self, entries: &[(String, Vec<u8>)]) -> Result<(), CatalogError> {
+    /// **A read-modify-write belongs in here, and nowhere else.** The engine
+    /// admits one writer at a time, so what `work` reads through its `Writer`
+    /// cannot change before what it writes commits. The generation used to be
+    /// read in its own transaction and written back in another, and two
+    /// publishers could then both write generation `G + 1`.
+    ///
+    /// An error from `work` abandons the transaction, so nothing it wrote
+    /// lands.
+    pub(crate) fn transact<T>(
+        &self,
+        work: impl FnOnce(&mut Writer<'_, '_>) -> Result<T, CatalogError>,
+    ) -> Result<T, CatalogError> {
         let mut transaction = self
             .database
             .begin_write()
@@ -307,64 +558,52 @@ impl Catalog {
         transaction
             .set_durability(Durability::Immediate)
             .map_err(|e| unavailable("be written", e))?;
+        let out;
         {
             let mut table = transaction
                 .open_table(CATALOG)
                 .map_err(|e| unavailable("be written", e))?;
-            // The locator-byte total moves in the same transaction as the run
-            // keys it counts, here and in `remove_durable`, so the gauge can
-            // never disagree with the stored runs. The sampler used to sum the
-            // stored values on every read — 2.7 GB touched every ten seconds on
-            // a consolidated soak-aged catalog.
-            let mut delta: i128 = 0;
-            for (key, value) in entries {
-                if key.starts_with(LOCATOR_PREFIX) {
-                    let old = table
-                        .get(key.as_str())
-                        .map_err(|e| unavailable("be written", e))?
-                        .map(|held| held.value().len() as i128)
-                        .unwrap_or(0);
-                    delta += value.len() as i128 - old;
-                }
-                table
-                    .insert(key.as_str(), value.as_slice())
-                    .map_err(|e| unavailable("be written", e))?;
-            }
-            Self::shift_locator_bytes(&mut table, delta)?;
+            let mut writer = Writer {
+                table: &mut table,
+                locator_delta: 0,
+                receipt_delta: 0,
+            };
+            out = work(&mut writer)?;
+            // The maintained totals move in the same transaction as the keys
+            // they count, so neither can disagree with what is stored. The
+            // sampler used to sum the stored runs on every read — 2.7 GB
+            // touched every ten seconds on a consolidated soak-aged catalog.
+            let (locator_delta, receipt_delta) = (writer.locator_delta, writer.receipt_delta);
+            Self::shift_locator_bytes(&mut table, locator_delta)?;
+            Self::shift_receipt_count(&mut table, receipt_delta)?;
         }
         transaction
             .commit()
-            .map_err(|e| unavailable("be written", e))
+            .map_err(|e| unavailable("be written", e))?;
+        Ok(out)
+    }
+
+    /// Write several keys in one durable transaction.
+    ///
+    /// One transaction is what makes a receipt and a log position atomic, and
+    /// what makes a generation publish atomically. A query sees the old
+    /// generation or the new one, never a mixture.
+    pub(crate) fn write_durable(&self, entries: &[(String, Vec<u8>)]) -> Result<(), CatalogError> {
+        self.transact(|writer| {
+            for (key, value) in entries {
+                writer.put(key, value)?;
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn remove_durable(&self, keys: &[String]) -> Result<(), CatalogError> {
-        let mut transaction = self
-            .database
-            .begin_write()
-            .map_err(|e| unavailable("be written", e))?;
-        transaction
-            .set_durability(Durability::Immediate)
-            .map_err(|e| unavailable("be written", e))?;
-        {
-            let mut table = transaction
-                .open_table(CATALOG)
-                .map_err(|e| unavailable("be written", e))?;
-            let mut delta: i128 = 0;
+        self.transact(|writer| {
             for key in keys {
-                let removed = table
-                    .remove(key.as_str())
-                    .map_err(|e| unavailable("be written", e))?;
-                if key.starts_with(LOCATOR_PREFIX) {
-                    if let Some(held) = removed {
-                        delta -= held.value().len() as i128;
-                    }
-                }
+                writer.remove(key)?;
             }
-            Self::shift_locator_bytes(&mut table, delta)?;
-        }
-        transaction
-            .commit()
-            .map_err(|e| unavailable("be written", e))
+            Ok(())
+        })
     }
 
     /// Move the maintained locator-byte total by `delta`, inside the caller's
@@ -390,6 +629,41 @@ impl Catalog {
             .insert(
                 LOCATOR_BYTES_KEY,
                 cbor::encode(&MapBuilder::new().put("b", Value::Unsigned(total)).build())
+                    .as_slice(),
+            )
+            .map_err(|e| unavailable("be written", e))?;
+        Ok(())
+    }
+
+    /// Move the maintained receipt count by `delta`, inside the caller's open
+    /// transaction.
+    ///
+    /// A catalog written before the count existed has no key, and this leaves
+    /// it absent: [`Catalog::receipt_count`] counts once, exactly, and stores
+    /// the result. Starting a count from zero here would store a wrong one.
+    fn shift_receipt_count(
+        table: &mut redb::Table<&str, &[u8]>,
+        delta: i128,
+    ) -> Result<(), CatalogError> {
+        if delta == 0 {
+            return Ok(());
+        }
+        let Some(held) = table
+            .get(RECEIPT_COUNT_KEY)
+            .map_err(|e| unavailable("be written", e))?
+            .map(|value| {
+                decode(value.value())
+                    .map(|decoded| field(&decoded, "n") as i128)
+                    .unwrap_or(0)
+            })
+        else {
+            return Ok(());
+        };
+        let total = (held + delta).max(0) as u64;
+        table
+            .insert(
+                RECEIPT_COUNT_KEY,
+                cbor::encode(&MapBuilder::new().put("n", Value::Unsigned(total)).build())
                     .as_slice(),
             )
             .map_err(|e| unavailable("be written", e))?;
@@ -462,21 +736,35 @@ impl Catalog {
             .put("wm", Value::Unsigned(receipt.commit_watermark))
             .put("log", Value::Unsigned(receipt.log_position))
             .build();
-        self.write_durable(&[
-            (
-                Self::receipt_key(receipt.source_id, receipt.batch_id),
-                cbor::encode(&value),
-            ),
-            (
-                "tablet/0000/watermark".to_string(),
-                cbor::encode(
+        self.transact(|writer| {
+            writer.put(
+                &Self::receipt_key(receipt.source_id, receipt.batch_id),
+                &cbor::encode(&value),
+            )?;
+            // Two commits reach here in either order, so the stored pair is
+            // the highest of each and never simply the last one written. A
+            // watermark that went backwards would hand the same number to two
+            // batches after a restart.
+            let (held_watermark, held_log) = match writer.get("tablet/0000/watermark")? {
+                Some(bytes) => {
+                    let held = decode(&bytes)?;
+                    (field(&held, "wm"), field(&held, "log"))
+                }
+                None => (0, 0),
+            };
+            writer.put(
+                "tablet/0000/watermark",
+                &cbor::encode(
                     &MapBuilder::new()
-                        .put("wm", Value::Unsigned(receipt.commit_watermark))
-                        .put("log", Value::Unsigned(receipt.log_position))
+                        .put(
+                            "wm",
+                            Value::Unsigned(receipt.commit_watermark.max(held_watermark)),
+                        )
+                        .put("log", Value::Unsigned(receipt.log_position.max(held_log)))
                         .build(),
                 ),
-            ),
-        ])
+            )
+        })
     }
 
     /// The current commit watermark and the highest log position it covers.
@@ -491,8 +779,34 @@ impl Catalog {
     /// How many receipts the catalog holds. `docs/DELIVERY.md` section 6
     /// requires the deduplication window to outlive the retry window, so this is
     /// an operational figure rather than a query one.
+    ///
+    /// This reads one maintained key. It used to materialise every receipt to
+    /// count them, every ten seconds, for the sampler: a 72-hour window at 100
+    /// batches each second is 26 million entries. A catalog written before the
+    /// count existed pays one exact count, inside a write transaction so no
+    /// concurrent receipt is missed, and never pays it again.
     pub fn receipt_count(&self) -> Result<usize, CatalogError> {
-        Ok(self.scan("receipt/")?.len())
+        if let Some(bytes) = self.read(RECEIPT_COUNT_KEY)? {
+            return Ok(field(&decode(&bytes)?, "n") as usize);
+        }
+        self.transact(|writer| {
+            if let Some(held) = writer.unsigned(RECEIPT_COUNT_KEY, "n")? {
+                return Ok(held as usize);
+            }
+            let mut upper = RECEIPT_PREFIX.to_string();
+            upper.push('\u{10ffff}');
+            let mut count = 0u64;
+            for row in writer
+                .table
+                .range(RECEIPT_PREFIX..upper.as_str())
+                .map_err(|e| unavailable("be read", e))?
+            {
+                row.map_err(|e| unavailable("be read", e))?;
+                count += 1;
+            }
+            writer.put_unsigned(RECEIPT_COUNT_KEY, "n", count)?;
+            Ok(count as usize)
+        })
     }
 
     /// Remove every receipt committed before `before_ms`, and report how many
@@ -551,39 +865,103 @@ impl Catalog {
         manifests: &[Manifest],
         locator: &Locator,
     ) -> Result<u64, CatalogError> {
-        let generation = self.generation()? + 1;
-        let mut entries: Vec<(String, Vec<u8>)> = manifests
-            .iter()
-            .map(|manifest| {
+        self.publish_in_one_transaction(&[], manifests, locator, None)
+    }
+
+    /// Publish what a seal built, and move the log checkpoint with it.
+    ///
+    /// The checkpoint moves in the same transaction as the segments that cover
+    /// the range, so a crash leaves both or neither. **Nothing else moves
+    /// it.** See [`LOG_CHECKPOINT_KEY`].
+    pub fn publish_sealed(
+        &self,
+        manifests: &[Manifest],
+        locator: &Locator,
+        checkpoint: u64,
+    ) -> Result<u64, CatalogError> {
+        self.publish_in_one_transaction(&[], manifests, locator, Some(checkpoint))
+    }
+
+    /// Retire, publish, and index in one transaction, under one generation
+    /// that is allocated inside it.
+    fn publish_in_one_transaction(
+        &self,
+        retire: &[[u8; 16]],
+        publish: &[Manifest],
+        locator: &Locator,
+        checkpoint: Option<u64>,
+    ) -> Result<u64, CatalogError> {
+        let generation = self.transact(|writer| {
+            let generation = writer.unsigned("tablet/0000/generation", "g")?.unwrap_or(0) + 1;
+
+            for segment_id in retire {
+                // An empty tier marks the segment retired at this generation.
+                // The record stays so a query that pinned an older generation
+                // can still find what it resolved.
+                let retired = MapBuilder::new()
+                    .put("id", Value::Bytes(segment_id.to_vec()))
+                    .put("g", Value::Unsigned(generation))
+                    .put("tier", Value::text(""))
+                    .build();
+                writer.put(
+                    &Self::segment_key(generation, *segment_id),
+                    &cbor::encode(&retired),
+                )?;
+            }
+            for manifest in publish {
                 let mut manifest = manifest.clone();
                 manifest.generation = generation;
-                (
-                    Self::segment_key(generation, manifest.segment_id),
-                    cbor::encode(&manifest_to_cbor(&manifest)),
-                )
-            })
-            .collect();
-
-        for run in locator.runs() {
-            if run.is_empty() {
-                continue;
+                writer.put(
+                    &Self::segment_key(generation, manifest.segment_id),
+                    &cbor::encode(&manifest_to_cbor(&manifest)),
+                )?;
             }
-            entries.push((
-                format!("locator/0000/{:016x}/{generation:016x}", run.bucket()),
-                run.encode(),
-            ));
-        }
+            // FAILURE_MODES.md section 8.4 rule 1. The generation is unique to
+            // this transaction, so this key cannot land on another
+            // publisher's run.
+            for run in locator.runs() {
+                if run.is_empty() {
+                    continue;
+                }
+                writer.put(&Self::locator_key(run.bucket(), generation), &run.encode())?;
+            }
+            writer.put_unsigned("tablet/0000/generation", "g", generation)?;
 
-        entries.push((
-            "tablet/0000/generation".to_string(),
-            cbor::encode(
-                &MapBuilder::new()
-                    .put("g", Value::Unsigned(generation))
-                    .build(),
-            ),
-        ));
-        self.write_durable(&entries)?;
-        Ok(generation)
+            if let Some(checkpoint) = checkpoint {
+                let held = writer.unsigned(LOG_CHECKPOINT_KEY, "p")?.unwrap_or(0);
+                writer.put_unsigned(LOG_CHECKPOINT_KEY, "p", checkpoint.max(held))?;
+            }
+            Ok(generation)
+        });
+        // After the commit and before anybody is told, so no reader that
+        // learns of this publish can still be answered from the older view.
+        self.manifest_cache.invalidate();
+        generation
+    }
+
+    fn locator_key(bucket: i64, generation: u64) -> String {
+        format!("locator/0000/{bucket:016x}/{generation:016x}")
+    }
+
+    /// The append-log position every locally sealed segment covers up to, when
+    /// one was ever recorded.
+    ///
+    /// `None` is a catalog written before the checkpoint was its own record.
+    /// The store then replays the whole append log once and records one.
+    pub fn log_checkpoint(&self) -> Result<Option<u64>, CatalogError> {
+        match self.read(LOG_CHECKPOINT_KEY)? {
+            Some(bytes) => Ok(Some(field(&decode(&bytes)?, "p"))),
+            None => Ok(None),
+        }
+    }
+
+    /// Record a checkpoint outside a seal. Only the one-time upgrade of a
+    /// catalog that has none calls this.
+    pub(crate) fn record_log_checkpoint(&self, checkpoint: u64) -> Result<(), CatalogError> {
+        self.transact(|writer| {
+            let held = writer.unsigned(LOG_CHECKPOINT_KEY, "p")?.unwrap_or(0);
+            writer.put_unsigned(LOG_CHECKPOINT_KEY, "p", checkpoint.max(held))
+        })
     }
 
     /// Every locator run, combined bucket by bucket and sealed once.
@@ -599,6 +977,38 @@ impl Catalog {
             })?);
         }
         Ok(Locator::from_all_runs(runs))
+    }
+
+    /// Every time bucket that holds a stored run. Only the keys are read.
+    pub fn locator_buckets(&self) -> Result<std::collections::BTreeSet<i64>, CatalogError> {
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|e| unavailable("be read", e))?;
+        let table = match transaction.open_table(CATALOG) {
+            Ok(table) => table,
+            Err(_) => return Ok(std::collections::BTreeSet::new()),
+        };
+        let mut upper = LOCATOR_PREFIX.to_string();
+        upper.push('\u{10ffff}');
+        let mut out = std::collections::BTreeSet::new();
+        for row in table
+            .range(LOCATOR_PREFIX..upper.as_str())
+            .map_err(|e| unavailable("be read", e))?
+        {
+            let (key, _) = row.map_err(|e| unavailable("be read", e))?;
+            // `locator/0000/<bucket>/<generation>`, and the bucket was written
+            // as the two's-complement bits of a signed number.
+            if let Some(bucket) = key
+                .value()
+                .split('/')
+                .nth(2)
+                .and_then(|text| u64::from_str_radix(text, 16).ok())
+            {
+                out.insert(bucket as i64);
+            }
+        }
+        Ok(out)
     }
 
     /// The bytes every stored locator run occupies, without combining them.
@@ -656,6 +1066,12 @@ impl Catalog {
 
     /// Replace every locator run with the ones given, in one transaction.
     ///
+    /// **Not while a seal can run.** This removes every stored run it did not
+    /// write, and that includes a run a seal published after the caller read
+    /// the runs it combined. The store uses
+    /// [`Catalog::consolidate_locator`], which does not have that window. This
+    /// is for a rebuild that owns the catalog.
+    ///
     /// Compaction combines runs incrementally, and this is where the combined
     /// set lands. Writing before removing keeps a query from ever seeing a
     /// window with no runs at all.
@@ -671,10 +1087,7 @@ impl Catalog {
             if run.is_empty() {
                 continue;
             }
-            entries.push((
-                format!("locator/0000/{:016x}/{generation:016x}", run.bucket()),
-                run.encode(),
-            ));
+            entries.push((Self::locator_key(run.bucket(), generation), run.encode()));
         }
         self.write_durable(&entries)?;
         // A key that was just rewritten must not then be removed.
@@ -683,6 +1096,67 @@ impl Catalog {
             .filter(|key| !entries.iter().any(|(written, _)| written == key))
             .collect();
         self.remove_durable(&stale)
+    }
+
+    /// Combine the stored runs of some time buckets, and drop what names a
+    /// retired segment.
+    ///
+    /// **One bucket, one transaction, and the runs are read inside it.**
+    /// [`Catalog::replace_locator`] reads every run, combines them outside any
+    /// transaction, and then removes every key it did not write. A seal that
+    /// published a run in between had that run removed, and the locator prunes:
+    /// a lookup for a value another segment also held then skipped the sealed
+    /// segment and answered short, with nothing marked incomplete. Here the
+    /// engine's single writer means a run is either already in the bucket when
+    /// it is read, and is kept, or lands afterwards under its own key.
+    ///
+    /// Only named retired segments are dropped, never "whatever is not live":
+    /// a list of live segments read before the transaction would not name a
+    /// segment sealed since, and that segment's entries would go.
+    pub fn consolidate_locator(
+        &self,
+        buckets: &std::collections::BTreeSet<i64>,
+        retired: &std::collections::HashSet<[u8; 16]>,
+    ) -> Result<(), CatalogError> {
+        for bucket in buckets {
+            let prefix = format!("locator/0000/{bucket:016x}/");
+            self.transact(|writer| {
+                let stored = writer.scan(&prefix)?;
+                if stored.is_empty() {
+                    return Ok(());
+                }
+                let mut runs = Vec::with_capacity(stored.len());
+                for (_, bytes) in &stored {
+                    runs.push(LocatorRun::decode(bytes).map_err(|e| {
+                        CatalogError::Damaged(format!("A stored index run could not be read. {e}"))
+                    })?);
+                }
+                let mut combined = Locator::from_all_runs(runs);
+                combined.retain_segments(&|id| !retired.contains(id));
+
+                // The newest key holds the result, so a key is never reused
+                // for different content by a later publish.
+                let keep = stored
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .max()
+                    .expect("the bucket holds a run");
+                for (key, _) in &stored {
+                    if *key != keep {
+                        writer.remove(key)?;
+                    }
+                }
+                let encoded = combined
+                    .runs()
+                    .find(|run| !run.is_empty())
+                    .map(LocatorRun::encode);
+                match encoded {
+                    Some(encoded) => writer.put(&keep, &encoded),
+                    None => writer.remove(&keep),
+                }
+            })?;
+        }
+        Ok(())
     }
 
     /// The current manifest generation.
@@ -698,25 +1172,89 @@ impl Catalog {
     /// A segment stays live until a later generation replaces it, and this
     /// returns the newest entry for each segment ID.
     pub fn manifests(&self) -> Result<Vec<Manifest>, CatalogError> {
-        let mut newest: BTreeMap<[u8; 16], Manifest> = BTreeMap::new();
-        for (_, bytes) in self.scan("segment/")? {
-            let manifest = manifest_from_cbor(&decode(&bytes)?)?;
-            newest
-                .entry(manifest.segment_id)
-                .and_modify(|held| {
-                    if manifest.generation > held.generation {
-                        *held = manifest.clone();
-                    }
-                })
-                .or_insert(manifest);
+        Ok(self.segment_records()?.live.clone())
+    }
+
+    /// Segments whose newest record says they were retired.
+    pub fn retired_segments(&self) -> Result<Vec<[u8; 16]>, CatalogError> {
+        Ok(self.segment_records()?.retired.clone())
+    }
+
+    /// Every segment record, decoded once for each change to them.
+    ///
+    /// A query, a seal, and the sampler each read this, several times over,
+    /// and each read used to scan and decode every record ever written.
+    fn segment_records(&self) -> Result<std::sync::Arc<SegmentRecords>, CatalogError> {
+        self.manifest_cache.get(|| {
+            let mut newest: BTreeMap<[u8; 16], Manifest> = BTreeMap::new();
+            for (_, bytes) in self.scan("segment/")? {
+                let manifest = manifest_from_cbor(&decode(&bytes)?)?;
+                newest
+                    .entry(manifest.segment_id)
+                    .and_modify(|held| {
+                        if manifest.generation > held.generation {
+                            *held = manifest.clone();
+                        }
+                    })
+                    .or_insert(manifest);
+            }
+            // A retired segment carries a generation and no rows, which is how
+            // a compaction says "this one is gone" without deleting the record
+            // a pinned query may still be reading.
+            let (live, retired): (Vec<Manifest>, Vec<Manifest>) = newest
+                .into_values()
+                .partition(|manifest| !manifest.tier.is_empty());
+            Ok(SegmentRecords {
+                live,
+                retired: retired.into_iter().map(|m| m.segment_id).collect(),
+            })
+        })
+    }
+
+    /// Remove every record of segments that were retired and whose files are
+    /// gone.
+    ///
+    /// A retire marker exists for a query that pinned an older generation. The
+    /// caller has already waited out the pins and the grace period and removed
+    /// the files, so nothing can resolve these any more, and keeping them made
+    /// every read of the segment catalog pay for every segment ever written.
+    ///
+    /// A segment that is live again in this transaction's view is left alone.
+    pub fn forget_retired_segments(&self, gone: &[[u8; 16]]) -> Result<usize, CatalogError> {
+        if gone.is_empty() {
+            return Ok(0);
         }
-        // A retired segment carries a generation and no rows, which is how a
-        // compaction says "this one is gone" without deleting the record a
-        // pinned query may still be reading.
-        Ok(newest
-            .into_values()
-            .filter(|manifest| !manifest.tier.is_empty())
-            .collect())
+        let gone: std::collections::HashSet<[u8; 16]> = gone.iter().copied().collect();
+        let removed = self.transact(|writer| {
+            let mut newest: BTreeMap<[u8; 16], (u64, bool)> = BTreeMap::new();
+            let mut keys: Vec<(String, [u8; 16])> = Vec::new();
+            for (key, bytes) in writer.scan("segment/")? {
+                let manifest = manifest_from_cbor(&decode(&bytes)?)?;
+                if !gone.contains(&manifest.segment_id) {
+                    continue;
+                }
+                let live = !manifest.tier.is_empty();
+                newest
+                    .entry(manifest.segment_id)
+                    .and_modify(|held| {
+                        if manifest.generation > held.0 {
+                            *held = (manifest.generation, live);
+                        }
+                    })
+                    .or_insert((manifest.generation, live));
+                keys.push((key, manifest.segment_id));
+            }
+            let mut removed = 0;
+            for (key, segment_id) in keys {
+                if newest.get(&segment_id).is_some_and(|(_, live)| !live) {
+                    writer.remove(&key)?;
+                    removed += 1;
+                }
+            }
+            Ok(removed)
+        });
+        self.manifest_cache.invalidate();
+        removed
     }
 
     /// Retire segments and publish replacements in one transaction.
@@ -724,41 +1262,22 @@ impl Catalog {
     /// FAILURE_MODES.md section 8.1 rule 2 again. A compaction that published
     /// its replacements and then retired the sources would let a query see both.
     pub fn swap(&self, retire: &[[u8; 16]], publish: &[Manifest]) -> Result<u64, CatalogError> {
-        let generation = self.generation()? + 1;
-        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        self.swap_with_locator(retire, publish, &Locator::new())
+    }
 
-        for segment_id in retire {
-            // An empty tier marks the segment retired at this generation. The
-            // record stays so a query that pinned an older generation can still
-            // find what it resolved.
-            let retired = MapBuilder::new()
-                .put("id", Value::Bytes(segment_id.to_vec()))
-                .put("g", Value::Unsigned(generation))
-                .put("tier", Value::text(""))
-                .build();
-            entries.push((
-                Self::segment_key(generation, *segment_id),
-                cbor::encode(&retired),
-            ));
-        }
-        for manifest in publish {
-            let mut manifest = manifest.clone();
-            manifest.generation = generation;
-            entries.push((
-                Self::segment_key(generation, manifest.segment_id),
-                cbor::encode(&manifest_to_cbor(&manifest)),
-            ));
-        }
-        entries.push((
-            "tablet/0000/generation".to_string(),
-            cbor::encode(
-                &MapBuilder::new()
-                    .put("g", Value::Unsigned(generation))
-                    .build(),
-            ),
-        ));
-        self.write_durable(&entries)?;
-        Ok(generation)
+    /// Retire, publish, and index the replacements, in one transaction.
+    ///
+    /// FAILURE_MODES.md section 8.4 rule 1 holds for a replacement exactly as
+    /// it does for a seal. A replacement published without its runs is pruned
+    /// out of every exact lookup that another segment still names, and a
+    /// process that died before the runs followed left that permanent.
+    pub fn swap_with_locator(
+        &self,
+        retire: &[[u8; 16]],
+        publish: &[Manifest],
+        locator: &Locator,
+    ) -> Result<u64, CatalogError> {
+        self.publish_in_one_transaction(retire, publish, locator, None)
     }
 
     /// Rebuild the segment catalog by scanning manifests.
@@ -774,6 +1293,7 @@ impl Catalog {
             .map(|(key, _)| key)
             .collect();
         self.remove_durable(&existing)?;
+        self.manifest_cache.invalidate();
         self.publish(manifests)
     }
 
@@ -791,6 +1311,13 @@ impl Catalog {
     /// The ledger entry is written first and in its own database, so a catalog
     /// rebuild cannot undo the erasure.
     pub fn commit_tombstone(&self, tombstone: &Tombstone) -> Result<u64, CatalogError> {
+        // One erasure at a time. The generation is read, written to the
+        // ledger, and then written to the catalog, and the ledger is a second
+        // database, so one transaction cannot cover all three. Two erasures
+        // that interleaved here shared a generation, and compaction compares
+        // that number to decide whether an erasure landed while it was working.
+        let _turn = self.tombstone_turn.lock().expect("tombstone turn");
+
         let generation = self.tombstone_generation()? + 1;
         let mut tombstone = tombstone.clone();
         tombstone.generation = generation;
@@ -800,7 +1327,7 @@ impl Catalog {
         // rebuild can undo is not an erasure.
         self.write_ledger(&tombstone.tombstone_id, &encoded)?;
 
-        self.write_durable(&[
+        let written = self.write_durable(&[
             (
                 format!(
                     "tombstone/0000/{generation:016x}/{}",
@@ -816,7 +1343,9 @@ impl Catalog {
                         .build(),
                 ),
             ),
-        ])?;
+        ]);
+        self.tombstone_cache.invalidate();
+        written?;
         Ok(generation)
     }
 
@@ -829,10 +1358,91 @@ impl Catalog {
 
     /// Every active predicate.
     pub fn tombstones(&self) -> Result<Vec<Tombstone>, CatalogError> {
-        self.scan("tombstone/")?
+        Ok(self.tombstone_set()?.all.clone())
+    }
+
+    /// Every active predicate, decoded once for each change to them and
+    /// indexed so that asking about one row does not read them all.
+    ///
+    /// A read used to decode every stored predicate and then compare every
+    /// row against every one of them. Tail sampling writes one predicate for
+    /// each dropped trace, which is millions in a day.
+    pub fn tombstone_set(&self) -> Result<std::sync::Arc<TombstoneSet>, CatalogError> {
+        self.tombstone_cache.get(|| {
+            let all = self
+                .scan("tombstone/")?
+                .into_iter()
+                .map(|(_, bytes)| tombstone_from_cbor(&decode(&bytes)?))
+                .collect::<Result<Vec<Tombstone>, CatalogError>>()?;
+            Ok(TombstoneSet::new(all))
+        })
+    }
+
+    /// How far the physical half of erasure has reached.
+    ///
+    /// `(tombstone generation, manifest generation)`: every predicate at or
+    /// below the first has been applied to every segment published at or below
+    /// the second. Compaction reads a segment only when one of the two is newer
+    /// than this, which is what stops a standing predicate from making every
+    /// pass read its whole project again.
+    pub fn erasure_applied(&self) -> Result<(u64, u64), CatalogError> {
+        let Some(bytes) = self.read(ERASURE_APPLIED_KEY)? else {
+            return Ok((0, 0));
+        };
+        let value = decode(&bytes)?;
+        Ok((field(&value, "tg"), field(&value, "mg")))
+    }
+
+    /// Record how far a complete erasure pass reached. It never moves back.
+    pub fn record_erasure_applied(
+        &self,
+        tombstone_generation: u64,
+        manifest_generation: u64,
+    ) -> Result<(), CatalogError> {
+        self.transact(|writer| {
+            let (held_tg, held_mg) = match writer.get(ERASURE_APPLIED_KEY)? {
+                Some(bytes) => {
+                    let held = decode(&bytes)?;
+                    (field(&held, "tg"), field(&held, "mg"))
+                }
+                None => (0, 0),
+            };
+            writer.put(
+                ERASURE_APPLIED_KEY,
+                &cbor::encode(
+                    &MapBuilder::new()
+                        .put("tg", Value::Unsigned(tombstone_generation.max(held_tg)))
+                        .put("mg", Value::Unsigned(manifest_generation.max(held_mg)))
+                        .build(),
+                ),
+            )
+        })
+    }
+
+    /// Remove predicates that have nothing left to do.
+    ///
+    /// The caller has established both halves of the rule: the horizon has
+    /// passed, so the predicate no longer owes anything to a late arrival, and
+    /// a complete compaction pass has applied it to every segment that could
+    /// hold a matching row. **The erasure ledger keeps its entry.** The ledger
+    /// is the record that the erasure happened; this is only the working set a
+    /// read has to apply.
+    pub fn retire_tombstones(&self, tombstone_ids: &[[u8; 16]]) -> Result<usize, CatalogError> {
+        if tombstone_ids.is_empty() {
+            return Ok(0);
+        }
+        let retire: std::collections::HashSet<[u8; 16]> = tombstone_ids.iter().copied().collect();
+        let keys: Vec<String> = self
+            .scan("tombstone/")?
             .into_iter()
-            .map(|(_, bytes)| tombstone_from_cbor(&decode(&bytes)?))
-            .collect()
+            .filter_map(|(key, bytes)| {
+                let tombstone = tombstone_from_cbor(&decode(&bytes).ok()?).ok()?;
+                retire.contains(&tombstone.tombstone_id).then_some(key)
+            })
+            .collect();
+        let removed = self.remove_durable(&keys).map(|()| keys.len());
+        self.tombstone_cache.invalidate();
+        removed
     }
 
     // -----------------------------------------------------------------------
@@ -1157,6 +1767,7 @@ impl Catalog {
                 cbor::encode(&MapBuilder::new().put("g", Value::Unsigned(highest)).build()),
             ));
             self.write_durable(&writes)?;
+            self.tombstone_cache.invalidate();
         }
         Ok(entries.len())
     }

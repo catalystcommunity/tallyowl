@@ -28,6 +28,25 @@ installation:
   # `home` is one head, one collector, and one Corndogs. It is the smallest
   # supported production deployment, which is why the development loop uses it.
   profile: home
+  # The authorities this process trusts for a connection between TallyOwl
+  # services, as PEM files. List two to replace an authority with no outage.
+  # A process whose every connection is on loopback or a unix socket needs none.
+  # `tallyowl-head ca create <directory>` makes a root and an intermediate.
+  authorities: []
+  # A head that signs node certificates: the intermediate authority's PEM file
+  # (followed by the certificates above it) and a reference to its key. Both,
+  # or neither. Every head that signs uses the same pair. See D62.
+  signingCertificate: ""
+  signingKey: ""
+
+enrollment:
+  # The most hours a node certificate is valid. A node renews at two thirds of
+  # it, so it continues through a head outage of one third. There is no
+  # revocation list: a node that cannot renew stops within this time.
+  certificateLifetimeHours: 24
+  # The role token this process enrolls with over a network. A reference, never
+  # a value: `file:` or `env:`.
+  roleToken: ""
 
 cell:
   id: home
@@ -44,6 +63,13 @@ cell:
 # ---------------------------------------------------------------------------
 corndogs:
   endpoint: 127.0.0.1:5080
+  # An endpoint that is not loopback is reached over TLS (D62).
+  tls:
+    # A PEM file of the authorities that sign the Corndogs certificate. Empty
+    # means the operating system's trusted authorities.
+    caFile: ""
+    # The name on the Corndogs certificate. Empty means the endpoint's host.
+    serverName: ""
   backend: file
   # One fsynced copy and no redundancy. Redundancy is an operator choice and is
   # not part of the word "durable".
@@ -62,6 +88,15 @@ corndogs:
   # Nothing retries without this sweep. Retry, backoff, and dead-worker recovery
   # all stop when it stops, and readiness fails with it.
   sweepInterval: 1s
+  # How many connections one process keeps to the durable store. The durable
+  # store combines commits across connections. A quiet process opens one.
+  connections: 8
+  # How long one call to the durable store may take before the caller is told
+  # that the durable store did not answer.
+  callTimeout: 30s
+  # How often the forwarder asks the durable store what each queue holds. The
+  # durable store keeps the counts as records, so a count costs little.
+  depthInterval: 2s
 
 # ---------------------------------------------------------------------------
 # The collector
@@ -92,16 +127,52 @@ collector:
   # A secret is a reference, never a value. Write `file:/path` or `env:NAME`.
   # Make one with `tallyowl-head provision <project>`, which prints it once.
   apiKey: ""
+  # The largest frame intake reads from an app driver. It must be at least
+  # `maxBatchBytes`. A larger frame is refused before memory is used for it.
+  maxFrameBytes: 4MiB
+  # The most intake connections at one time. Each one uses a thread. `0` turns
+  # the limit off.
+  maxConnections: 1024
+  # Close an intake connection that sends nothing for this long and has no
+  # request in progress. An app driver reconnects on its next batch.
+  idleTimeout: 5m
+  # How long to wait for one answer from the head. Keep it shorter than the
+  # 30 second claim the forwarder holds on a batch.
+  headCallTimeout: 20s
+  # How long a collector that was told to stop waits for work in progress.
+  shutdownGrace: 10s
+
+# ---------------------------------------------------------------------------
+# Alert notifications
+# ---------------------------------------------------------------------------
+alerts:
+  # The webhook hosts that may be at a loopback, private, or link-local address.
+  # The head refuses such an address unless its host is here, because a webhook
+  # address comes from a project administrator and the request leaves from the
+  # head. A home installation that sends to a receiver on the same host lists
+  # it, for example "127.0.0.1". "*" permits every address.
+  allowedPrivateTargets: ""
+  # How many notifications the head delivers at the same time.
+  notificationWorkers: 4
 
 # ---------------------------------------------------------------------------
 # The head
 # ---------------------------------------------------------------------------
 head:
+  # How long the head waits for the requests it already accepted when it is
+  # told to stop. Keep it shorter than the time the host allows.
+  shutdownGrace: 20s
   listen: 127.0.0.1:5110
   operationalListen: 127.0.0.1:5111
   # The address a collector forwarder reaches. An application never knows it.
   endpoint: 127.0.0.1:5110
   dataDir: ./data/head
+
+# The head refuses an item whose workspace or project is not the one its
+# source belongs to. It also refuses a batch whose source it has no record of,
+# unless this is false.
+ingest:
+  requireKnownSource: true
 
 # ---------------------------------------------------------------------------
 # Tail sampling
@@ -127,6 +198,9 @@ dashboard:
   # service but `TallyOwlControl`.
   enabled: true
   listen: 127.0.0.1:5120
+  # The dashboard serves plaintext. On an address that is not loopback, put it
+  # behind a gateway that ends TLS and set this to true. D62.
+  allowPlaintext: false
   # `./tools.sh build` writes the bundle here.
   assets: packages/dashboard/dist
   # The path part of `linkkeys.callbackUrl`. A sign-in returns here.
@@ -204,8 +278,16 @@ metrics:
   # A downsample pass rolls delta points up to this resolution. DATA_MODEL.md
   # section 6 names one minute, then hourly.
   downsampleResolution: 1h
+  # A closed window waits this long before the pass rolls it up, so a point
+  # that arrives a little late is in the rollup.
+  downsampleLatenessGrace: 5m
   maxSeriesForEachMetric: 100000
+  # Bytes in one reading of every active series of one metric: the sum of the
+  # latest point of each series. A steady metric does not fill this budget.
   maxBytesForEachMetric: 64MiB
+  # Metric names one project may hold in one collector. Keep a metric name
+  # fixed, and put a value that changes in a label.
+  maxMetricNamesForEachProject: 10000
   maxLabels: 32
   maxLabelValueBytes: 1024
   maxLabelBytes: 4096
@@ -217,6 +299,10 @@ metrics:
     # Off. Self-metrics cost ingest capacity that an installation may want for
     # its own data.
     enabled: false
+    # The collector the head sends its own instruments to, as `host:port`. A
+    # DNS name is accepted: the head dials this address and does not bind it.
+    # Empty uses `collector.listen`, which is right on one host.
+    endpoint: ""
     period: 60s
 
 # ---------------------------------------------------------------------------
@@ -278,9 +364,18 @@ placement:
 # ---------------------------------------------------------------------------
 replication:
   listen: ""
+  # The address other storage nodes dial to reach this one. Empty means
+  # `listen`. Set it when this node listens on every interface, as a pod does,
+  # because a peer cannot dial 0.0.0.0. For example: tallyowl-0.tallyowl:5200
+  advertise: ""
   # A cell normally learns its peers from its controller quorum. This is what a
-  # first bootstrap uses.
+  # first bootstrap uses. Each entry is `address` or `name@address`. The list
+  # may include this node: the entry with this node's own advertise address is
+  # skipped, so every node can be given the same list.
   peers: ""
+  # The memory one consensus group's log file may use as a cache. A node holds
+  # one file for each tablet it has.
+  logCacheBytes: 16MiB
   # Longer than an election, so an ordinary leader change costs a retry rather
   # than a refusal.
   writeTimeout: 10s
@@ -300,6 +395,9 @@ query:
   alertConcurrency: 1
   identityRefresh: 5m
   maxExpressionDepth: 16
+  # How many queries one project may run at the same time. One more is
+  # refused at once with `resource-exhausted`.
+  maxConcurrentForEachProject: 8
   # A query that needs more tablets than this is refused with a typed error that
   # names both numbers, rather than opening a connection to every tablet.
   maxFanOut: 256
@@ -318,9 +416,16 @@ compatibility:
     listen: 127.0.0.1:4318
   # Scraping is outbound and there is no default target.
   prometheus:
+    # Write each target as http://host:port/metrics. A target with https is
+    # refused, because this build scrapes over HTTP only.
     targets: []
     interval: 60s
+    # The limit for one full scrape, from the connection to the last byte.
     timeout: 5s
+    # A response larger than this fails the scrape, and nothing from it is kept.
+    maxBodyBytes: 16MiB
+    # How many targets the collector reads at one time.
+    workers: 8
 
 # ---------------------------------------------------------------------------
 # Sign-in
@@ -329,6 +434,22 @@ compatibility:
 # With no trusted domains there is nothing to accept, so this is off; an
 # operator issues a session with `tallyowl-head session create` instead.
 # ---------------------------------------------------------------------------
+# D62: a CSIL connection that crosses a network uses TLS. A loopback or
+# `unix:` address needs none of this.
+tls:
+  # Directories for collector intake and the OpenTelemetry receiver. Each holds
+  # `tls.crt` (the chain, leaf first) and `tls.key`. Two directories let a
+  # certificate be replaced before it expires, with no outage.
+  certificateDirectories: []
+  # How often certificate files and trusted authorities are read again.
+  reloadInterval: 30s
+
+transport:
+  # Serve and dial CSIL in plaintext on a network address. Use this only on a
+  # network that something else protects. The service logs each exposed
+  # listener.
+  allowPlaintext: false
+
 linkkeys:
   enabled: false
   trustedDomains: ""

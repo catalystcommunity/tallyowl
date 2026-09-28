@@ -64,6 +64,14 @@ COPY --from=dashboard /src/packages/dashboard/dist /usr/local/share/tallyowl/das
 USER 65532:65532
 WORKDIR /var/lib/tallyowl
 
+# There is no init process, and none is needed. A service runs as process 1
+# here, and the kernel gives process 1 only the signals it has a handler for.
+# A binary with a SIGTERM handler therefore drains when the pod stops. A binary
+# with none ignores SIGTERM and runs until the kubelet sends SIGKILL at the end
+# of `terminationGracePeriodSeconds`. An init process would turn that into an
+# immediate stop with no drain, which is not better. SIGTERM is the default
+# stop signal, so there is no STOPSIGNAL line. See docs/DEPLOYMENT.md section 7.
+
 # There is no default service. Each chart names the binary it runs, and an
 # image that starts a service by itself starts the wrong one half the time.
 CMD ["tallyowl-head", "--help"]

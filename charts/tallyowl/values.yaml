@@ -7,8 +7,8 @@
 # See docs/DEPLOYMENT.md section 8 and docs/PLAN.md Phase 1.
 #
 # Keys under `image`, `replicas`, `resources`, `persistence`, `topologySpread`,
-# `affinity`, and `disruption` are deployment concerns rather than TallyOwl
-# settings, and the parity test ignores them.
+# `affinity`, `disruption`, and `deployment` are deployment concerns rather than
+# TallyOwl settings, and the parity test ignores them.
 
 # The head and the collector are one image, and each chart selects its binary
 # with `command`. An empty tag means the chart's `appVersion`, which is the
@@ -20,7 +20,25 @@ image:
 
 replicas: 1
 
-resources: {}
+# A pod with no requests has the BestEffort class. The node evicts that class
+# first and the kernel stops it first when memory is short, and this pod holds
+# the data.
+#
+# The memory numbers come from measurement. BENCHMARKS.md section 24 measured
+# 7.5 GiB resident on a store of 4.4 GiB and 46,000 segments, and 2.1 GiB with
+# the locator cache bounded. One consolidation pass holds its rows decompressed:
+# a 64 MiB pass measured 12 to 22 GiB, which is why `compaction.coldGroupBatch`
+# defaults to 32 MiB. The limit below is sized for that default. Raise the
+# limit before you raise `compaction.coldGroupBatch`.
+#
+# There is no CPU limit. A CPU limit throttles a seal and a consensus heartbeat
+# together, and a throttled heartbeat starts an election.
+resources:
+  requests:
+    cpu: "1"
+    memory: 4Gi
+  limits:
+    memory: 12Gi
 
 # The image runs as user and group 65532 and cannot write as root. `fsGroup`
 # is the same number, because a mounted volume arrives owned by root and a
@@ -30,6 +48,8 @@ securityContext:
   runAsUser: 65532
   runAsGroup: 65532
   fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
 
 persistence:
   enabled: true
@@ -75,9 +95,12 @@ affinity:
 # rounds in the wrong direction, and this number has to hold when the set is
 # already smaller than it should be.
 # ---------------------------------------------------------------------------
+# An empty `minAvailable` means a majority: floor(replicas / 2) + 1. That is two
+# of three and three of five. The chart refuses a lower number, because a
+# budget below a majority lets one drain end a quorum.
 disruption:
   enabled: true
-  minAvailable: 2
+  minAvailable: ""
 
 # ---------------------------------------------------------------------------
 # The Corndogs beside the head
@@ -87,9 +110,160 @@ disruption:
 # own Corndogs and leaves this off. This is a deployment concern: the TallyOwl
 # settings under `corndogs` above describe how to reach it either way.
 # ---------------------------------------------------------------------------
+# The image tag is the Corndogs build that the TallyOwl queue client is built
+# against. The workspace `Cargo.toml` pins the client at the commit of the
+# release `corndogs/v0.7.6` (`21d0182`), and this is that release's image. This line is the
+# only place the chart names the tag. The queue carries every receipt, so its
+# version must not change because a pod moved to another node. The chart
+# refuses the tag `latest`.
+#
+# The chart also refuses this container when `persistence.enabled` is false.
+# The queue would be on the container file system, and a collector would call
+# a batch durable that a pod restart deletes.
 corndogsDeployment:
   enabled: false
-  image: containers.catalystsquad.com/public/catalystcommunity/corndogs:latest
+  image: containers.catalystsquad.com/public/catalystcommunity/corndogs:0.7.6
+  # The pull policy of the Corndogs image. Empty means `image.pullPolicy`, the
+  # policy of the TallyOwl image. Set it when the two images come from
+  # different places, for example a TallyOwl image built locally with
+  # `image.pullPolicy: Never` and a Corndogs image from its registry.
+  imagePullPolicy: ""
+  # A `kubernetes.io/tls` Secret with the certificate Corndogs serves (D62).
+  # Collectors reach this Corndogs over the pod network, so the chart refuses
+  # an empty value unless `transport.allowPlaintext` is set. Sign the
+  # certificate with the installation authority, and give it the DNS names
+  # `<release>-corndogs` and `<release>-corndogs.<namespace>.svc`. The head
+  # reaches its sidecar over TLS as well, by the second name.
+  tlsSecret: ""
+  # Health and metrics of the queue. It answers `/healthz`.
+  operationalPort: 8080
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+# ---------------------------------------------------------------------------
+# The pod
+#
+# Everything here is a deployment concern. None of it reaches the settings
+# ConfigMap.
+# ---------------------------------------------------------------------------
+deployment:
+  podAnnotations: {}
+
+  # How long the kubelet waits after SIGTERM before it sends SIGKILL. A head
+  # that handles SIGTERM seals its open rows and releases its claims in this
+  # time. A head that does not handle SIGTERM runs until the time ends.
+  terminationGracePeriodSeconds: 120
+
+  # The restrictions of the Pod Security `restricted` profile. The head writes
+  # only below `head.dataDir`, which is on the data volume, so the root file
+  # system is read-only.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # The kubelet starts the liveness and readiness probes after this probe
+  # passes. It asks `/livez`, which answers before the store opens, so a long
+  # recovery of the append log never fails it. The default waits five minutes
+  # for the operational port.
+  startupProbe:
+    periodSeconds: 5
+    failureThreshold: 60
+
+  # The collector key for `metrics.selfObservation`. Name a Secret and the
+  # chart sets `collector.apiKey` to `env:SECRET_TALLYOWL_API_KEY` and fills that
+  # variable from the Secret. The value never appears in a manifest.
+  apiKeySecret:
+    name: ""
+    key: api-key
+
+  # Where the head sends its own metrics when `metrics.selfObservation.enabled`
+  # is true: the address of a collector Service, for example
+  # `tallyowl-collector:5100`. The head dials `collector.listen`, and in a pod
+  # that setting is a bind address, which nothing can dial. The chart refuses
+  # self-observation with no address here.
+  selfObservationCollector: ""
+
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  # Transport security (D62). In a pod, `head.listen` and `replication.listen`
+  # are reached over the pod network, so they use mutual TLS, and the chart
+  # refuses a render with neither these Secrets nor `transport.allowPlaintext`.
+  #
+  # `tallyowl-head ca create <directory>` makes a root and an intermediate. Then:
+  #
+  #   kubectl create secret tls tallyowl-signing \
+  #     --cert=<directory>/intermediate.crt --key=<directory>/intermediate.key
+  #   kubectl create secret generic tallyowl-authority \
+  #     --from-file=ca.crt=<directory>/root.crt
+  #
+  # docs/DEPLOYMENT.md section 7c gives the whole procedure.
+  tls:
+    # A Secret of type `kubernetes.io/tls` that holds the intermediate
+    # authority: `tls.crt` (the intermediate, then the certificates above it)
+    # and `tls.key`. Every head signs with it, and issues its own node
+    # certificate with it. The chart sets `installation.signingCertificate`
+    # and `installation.signingKey`.
+    signingSecret: ""
+    # The authorities every head and collector trusts, one Secret each. `key`
+    # is the file in the Secret, `ca.crt` when it is empty. List two while an
+    # authority is replaced. The chart adds each to `installation.authorities`.
+    authorities: []
+    #   - secretName: tallyowl-authority
+    #     key: ca.crt
+
+  # A ServiceMonitor for a cluster that runs the Prometheus operator. The
+  # rules file for TallyOwl itself is in `deploy/monitoring/`.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+  # The queue port carries no transport security and no authentication in
+  # this release, because Corndogs has no TLS yet (D62). This policy limits it,
+  # and the ingest and replication ports, to the pods of this release and to
+  # the pods that `collectorSelector` names. Turn it on in every installation
+  # whose collectors reach this Corndogs over the network. It is off by
+  # default because a cluster with no policy controller ignores it, and that
+  # must not look like protection.
+  networkPolicy:
+    enabled: false
+    # Pod labels of the collector release, which reaches ingest and the queue.
+    collectorSelector:
+      app.kubernetes.io/name: tallyowl-collector
+    # Extra `from` entries for the dashboard and operational ports. Empty
+    # means every pod in the namespace.
+    extraIngressFrom: []
+
+  # One administration verb against the data volume, as a Job.
+  #
+  # Each verb of `tallyowl-head` that changes the store opens the data
+  # directory, and a running head holds the lock on it. So the verb cannot run
+  # with `kubectl exec`. Scale the StatefulSet to zero, install with this
+  # enabled, read the Job log, and scale back. docs/DEPLOYMENT.md section 9
+  # gives the exact commands. This needs downtime.
+  maintenance:
+    enabled: false
+    # The pod whose volume the Job mounts: `data-<release>-<ordinal>`.
+    ordinal: 0
+    # The verb and its arguments, for example ["provision", "shop"].
+    args: []
+    # A whole command in place of `tallyowl-head <args>`. `restore` writes only
+    # into an empty data directory, so moving the old one aside needs this:
+    # ["mv", "/var/lib/tallyowl/data/head", "/var/lib/tallyowl/data/head.old"].
+    command: []
+    # A second volume for `snapshot` and `restore`, which write outside the
+    # data directory. Empty means none.
+    backupClaim: ""
+    backupMountPath: /var/lib/tallyowl/backup
 
 # ---------------------------------------------------------------------------
 # What the pod binds, and where the dashboard bundle is
@@ -159,6 +333,25 @@ installation:
   # `home` is one head, one collector, and one Corndogs. It is the smallest
   # supported production deployment, which is why the development loop uses it.
   profile: home
+  # The authorities this process trusts for a connection between TallyOwl
+  # services, as PEM files. List two to replace an authority with no outage.
+  # A process whose every connection is on loopback or a unix socket needs none.
+  # `tallyowl-head ca create <directory>` makes a root and an intermediate.
+  authorities: []
+  # A head that signs node certificates: the intermediate authority's PEM file
+  # (followed by the certificates above it) and a reference to its key. Both,
+  # or neither. Every head that signs uses the same pair. See D62.
+  signingCertificate: ""
+  signingKey: ""
+
+enrollment:
+  # The most hours a node certificate is valid. A node renews at two thirds of
+  # it, so it continues through a head outage of one third. There is no
+  # revocation list: a node that cannot renew stops within this time.
+  certificateLifetimeHours: 24
+  # The role token this process enrolls with over a network. A reference, never
+  # a value: `file:` or `env:`.
+  roleToken: ""
 
 cell:
   id: home
@@ -175,6 +368,11 @@ cell:
 # ---------------------------------------------------------------------------
 corndogs:
   endpoint: 127.0.0.1:5080
+  # An endpoint that is not loopback is reached over TLS (D62). The head
+  # reaches its own sidecar on loopback, in plaintext.
+  tls:
+    caFile: ""
+    serverName: ""
   backend: file
   # One fsynced copy and no redundancy. Redundancy is an operator choice and is
   # not part of the word "durable".
@@ -193,6 +391,15 @@ corndogs:
   # Nothing retries without this sweep. Retry, backoff, and dead-worker recovery
   # all stop when it stops, and readiness fails with it.
   sweepInterval: 1s
+  # How many connections one process keeps to the durable store. The durable
+  # store combines commits across connections. A quiet process opens one.
+  connections: 8
+  # How long one call to the durable store may take before the caller is told
+  # that the durable store did not answer.
+  callTimeout: 30s
+  # How often the forwarder asks the durable store what each queue holds. The
+  # durable store keeps the counts as records, so a count costs little.
+  depthInterval: 2s
 
 # ---------------------------------------------------------------------------
 # The collector
@@ -223,16 +430,52 @@ collector:
   # A secret is a reference, never a value. Write `file:/path` or `env:NAME`.
   # Make one with `tallyowl-head provision <project>`, which prints it once.
   apiKey: ""
+  # The largest frame intake reads from an app driver. It must be at least
+  # `maxBatchBytes`. A larger frame is refused before memory is used for it.
+  maxFrameBytes: 4MiB
+  # The most intake connections at one time. Each one uses a thread. `0` turns
+  # the limit off.
+  maxConnections: 1024
+  # Close an intake connection that sends nothing for this long and has no
+  # request in progress. An app driver reconnects on its next batch.
+  idleTimeout: 5m
+  # How long to wait for one answer from the head. Keep it shorter than the
+  # 30 second claim the forwarder holds on a batch.
+  headCallTimeout: 20s
+  # How long a collector that was told to stop waits for work in progress.
+  shutdownGrace: 10s
+
+# ---------------------------------------------------------------------------
+# Alert notifications
+# ---------------------------------------------------------------------------
+alerts:
+  # The webhook hosts that may be at a loopback, private, or link-local address.
+  # The head refuses such an address unless its host is here, because a webhook
+  # address comes from a project administrator and the request leaves from the
+  # head. A home installation that sends to a receiver on the same host lists
+  # it, for example "127.0.0.1". "*" permits every address.
+  allowedPrivateTargets: ""
+  # How many notifications the head delivers at the same time.
+  notificationWorkers: 4
 
 # ---------------------------------------------------------------------------
 # The head
 # ---------------------------------------------------------------------------
 head:
+  # How long the head waits for the requests it already accepted when it is
+  # told to stop. Keep it shorter than the time the host allows.
+  shutdownGrace: 20s
   listen: 127.0.0.1:5110
   operationalListen: 127.0.0.1:5111
   # The address a collector forwarder reaches. An application never knows it.
   endpoint: 127.0.0.1:5110
   dataDir: ./data/head
+
+# The head refuses an item whose workspace or project is not the one its
+# source belongs to. It also refuses a batch whose source it has no record of,
+# unless this is false.
+ingest:
+  requireKnownSource: true
 
 # ---------------------------------------------------------------------------
 # Tail sampling
@@ -258,6 +501,12 @@ dashboard:
   # service but `TallyOwlControl`.
   enabled: true
   listen: 127.0.0.1:5120
+  # The dashboard serves plaintext. On an address that is not loopback, put it
+  # behind a gateway that ends TLS and set this to true. D62. The chart sets it
+  # when `gateway.enabled` and `gateway.dashboard.enabled` are both true, and
+  # refuses a render that exposes the dashboard in any other way unless this
+  # is true or `dashboard.enabled` is false.
+  allowPlaintext: false
   # `./tools.sh build` writes the bundle here.
   assets: packages/dashboard/dist
   # The path part of `linkkeys.callbackUrl`. A sign-in returns here.
@@ -335,7 +584,13 @@ metrics:
   # A downsample pass rolls delta points up to this resolution. DATA_MODEL.md
   # section 6 names one minute, then hourly.
   downsampleResolution: 1h
+  # A closed window waits this long before the pass rolls it up, so a point
+  # that arrives a little late is in the rollup.
+  downsampleLatenessGrace: 5m
   maxSeriesForEachMetric: 100000
+  # Metric names one project may hold in one collector. Keep a metric name
+  # fixed, and put a value that changes in a label.
+  maxMetricNamesForEachProject: 10000
   maxBytesForEachMetric: 64MiB
   maxLabels: 32
   maxLabelValueBytes: 1024
@@ -348,6 +603,10 @@ metrics:
     # Off. Self-metrics cost ingest capacity that an installation may want for
     # its own data.
     enabled: false
+    # The collector the head sends its own instruments to, as `host:port`. A
+    # DNS name is accepted: the head dials this address and does not bind it.
+    # Empty uses `collector.listen`, which is right on one host.
+    endpoint: ""
     period: 60s
 
 # ---------------------------------------------------------------------------
@@ -409,8 +668,16 @@ placement:
 # ---------------------------------------------------------------------------
 replication:
   listen: ""
+  # The address other storage nodes dial to reach this one. Empty means
+  # `listen`. A pod listens on every interface, and a peer cannot dial 0.0.0.0.
+  advertise: ""
   # A cell normally learns its peers from its controller quorum. This is what a
   # first bootstrap uses.
+  #
+  # Leave this empty in a cluster. The chart writes one address for each
+  # replica, in the form `<release>-<n>.<release>-nodes.<namespace>.svc:<port>`,
+  # and gives each pod its own address in `replication.advertise`. A bind
+  # address such as 0.0.0.0 is never a peer address, and the chart refuses one.
   peers: ""
   # Longer than an election, so an ordinary leader change costs a retry rather
   # than a refusal.
@@ -419,6 +686,9 @@ replication:
   # seal makes a segment, so a smaller number here means more small segments.
   snapshotEvery: 4096
   keepAfterSnapshot: 512
+  # The memory one consensus group's log file may use as a cache. A node holds
+  # one file for each tablet it has.
+  logCacheBytes: 16MiB
 
 query:
   maxRuntime: 30s
@@ -431,6 +701,9 @@ query:
   alertConcurrency: 1
   identityRefresh: 5m
   maxExpressionDepth: 16
+  # How many queries one project may run at the same time. One more is
+  # refused at once with `resource-exhausted`.
+  maxConcurrentForEachProject: 8
   # A query that needs more tablets than this is refused with a typed error that
   # names both numbers, rather than opening a connection to every tablet.
   maxFanOut: 256
@@ -449,9 +722,16 @@ compatibility:
     listen: 127.0.0.1:4318
   # Scraping is outbound and there is no default target.
   prometheus:
+    # Write each target as http://host:port/metrics. A target with https is
+    # refused, because this build scrapes over HTTP only.
     targets: []
     interval: 60s
+    # The limit for one full scrape, from the connection to the last byte.
     timeout: 5s
+    # A response larger than this fails the scrape, and nothing from it is kept.
+    maxBodyBytes: 16MiB
+    # How many targets the collector reads at one time.
+    workers: 8
 
 # ---------------------------------------------------------------------------
 # Sign-in
@@ -460,6 +740,22 @@ compatibility:
 # With no trusted domains there is nothing to accept, so this is off; an
 # operator issues a session with `tallyowl-head session create` instead.
 # ---------------------------------------------------------------------------
+# D62: a CSIL connection that crosses a network uses TLS. A loopback or
+# `unix:` address needs none of this.
+tls:
+  # Directories for collector intake and the OpenTelemetry receiver. Each holds
+  # `tls.crt` (the chain, leaf first) and `tls.key`. Two directories let a
+  # certificate be replaced before it expires, with no outage.
+  certificateDirectories: []
+  # How often certificate files and trusted authorities are read again.
+  reloadInterval: 30s
+
+transport:
+  # Serve and dial CSIL in plaintext on a network address. Use this only on a
+  # network that something else protects. The service logs each exposed
+  # listener.
+  allowPlaintext: false
+
 linkkeys:
   enabled: false
   trustedDomains: ""

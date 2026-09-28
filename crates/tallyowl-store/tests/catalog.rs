@@ -376,3 +376,249 @@ fn a_generation_rises_and_never_repeats() {
     }
     assert_eq!(seen, vec![1, 2, 3, 4, 5]);
 }
+
+// ---------------------------------------------------------------------------
+// Generations and locator runs under concurrent publishers
+// ---------------------------------------------------------------------------
+
+use tallyowl_store::locator::{Locator, LocatorRun};
+
+fn run_naming(bucket: i64, value: &str, segment: [u8; 16]) -> LocatorRun {
+    let mut run = LocatorRun::new(bucket);
+    run.add("p:end_user", value.as_bytes(), segment);
+    run.seal();
+    run
+}
+
+#[test]
+fn publishers_that_run_together_never_share_a_generation() {
+    // The generation was read in one transaction and written in another, so
+    // two publishers both wrote `G + 1`, and their locator runs for one time
+    // bucket landed on one key.
+    let catalog = std::sync::Arc::new(Catalog::open(directory("concurrent-generations")).unwrap());
+    let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let workers: Vec<_> = (0..8u8)
+        .map(|worker| {
+            let catalog = std::sync::Arc::clone(&catalog);
+            let start = std::sync::Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                (0..5u8)
+                    .map(|n| {
+                        let id = worker * 10 + n + 1;
+                        catalog
+                            .publish_with_locator(
+                                &[manifest(id)],
+                                &Locator::from_runs([run_naming(0, &format!("u-{id}"), [id; 16])]),
+                            )
+                            .unwrap()
+                    })
+                    .collect::<Vec<u64>>()
+            })
+        })
+        .collect();
+    let mut seen: Vec<u64> = workers
+        .into_iter()
+        .flat_map(|worker| worker.join().unwrap())
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(seen, (1..=40).collect::<Vec<u64>>());
+
+    // Every publisher's run is still there.
+    let locator = catalog.locator().unwrap();
+    for id in (0..8u8).flat_map(|worker| (0..5u8).map(move |n| worker * 10 + n + 1)) {
+        assert_eq!(
+            locator.candidates("p:end_user", format!("u-{id}").as_bytes(), None),
+            vec![[id; 16]],
+            "a publisher's locator run was overwritten"
+        );
+    }
+}
+
+#[test]
+fn a_replacement_is_indexed_in_the_transaction_that_publishes_it() {
+    // A process that stopped between the swap and a later index write left a
+    // replacement no exact lookup could find, for ever.
+    let catalog = Catalog::open(directory("swap-runs")).unwrap();
+    catalog
+        .publish_with_locator(
+            &[manifest(1), manifest(2)],
+            &Locator::from_runs([{
+                let mut run = LocatorRun::new(0);
+                run.add("p:end_user", b"u-042", [1; 16]);
+                run.add("p:end_user", b"u-042", [2; 16]);
+                run.seal();
+                run
+            }]),
+        )
+        .unwrap();
+
+    catalog
+        .swap_with_locator(
+            &[[1; 16]],
+            &[manifest(3)],
+            &Locator::from_runs([run_naming(0, "u-042", [3; 16])]),
+        )
+        .unwrap();
+
+    // Nothing else has run. The replacement is already named.
+    let named = catalog
+        .locator()
+        .unwrap()
+        .candidates("p:end_user", b"u-042", None);
+    assert!(named.contains(&[3; 16]), "the replacement has no run");
+    assert!(named.contains(&[2; 16]));
+}
+
+#[test]
+fn combining_a_buckets_runs_keeps_a_run_that_was_published_beside_it() {
+    let catalog = Catalog::open(directory("consolidate")).unwrap();
+    catalog
+        .publish_with_locator(
+            &[manifest(1)],
+            &Locator::from_runs([run_naming(0, "u-042", [1; 16])]),
+        )
+        .unwrap();
+    catalog
+        .swap_with_locator(
+            &[[1; 16]],
+            &[manifest(3)],
+            &Locator::from_runs([run_naming(0, "u-042", [3; 16])]),
+        )
+        .unwrap();
+    // A seal publishes while the compaction that did the swap is still working.
+    catalog
+        .publish_with_locator(
+            &[manifest(4)],
+            &Locator::from_runs([run_naming(0, "u-042", [4; 16])]),
+        )
+        .unwrap();
+
+    let buckets = std::collections::BTreeSet::from([0i64]);
+    let retired = std::collections::HashSet::from([[1u8; 16]]);
+    catalog.consolidate_locator(&buckets, &retired).unwrap();
+
+    let named = catalog
+        .locator()
+        .unwrap()
+        .candidates("p:end_user", b"u-042", None);
+    assert!(named.contains(&[4; 16]), "the seal's run was removed");
+    assert!(named.contains(&[3; 16]));
+    assert!(
+        !named.contains(&[1; 16]),
+        "a retired segment is still named"
+    );
+    assert_eq!(
+        catalog.locator_buckets().unwrap().len(),
+        1,
+        "the bucket's runs were not combined"
+    );
+    assert!(catalog.locator_bytes().unwrap() > 0);
+}
+
+#[test]
+fn the_receipt_count_follows_every_write_and_removal() {
+    let catalog = Catalog::open(directory("receipt-count")).unwrap();
+    assert_eq!(catalog.receipt_count().unwrap(), 0);
+    for n in 1..=5u8 {
+        catalog
+            .commit_receipt(&Receipt {
+                source_id: [1; 16],
+                batch_id: [n; 16],
+                accepted: 1,
+                committed_at: BASE_TIME + i64::from(n),
+                commit_watermark: u64::from(n),
+                log_position: u64::from(n),
+            })
+            .unwrap();
+    }
+    // A receipt written twice is one receipt.
+    catalog
+        .commit_receipt(&Receipt {
+            source_id: [1; 16],
+            batch_id: [5; 16],
+            accepted: 1,
+            committed_at: BASE_TIME + 5,
+            commit_watermark: 5,
+            log_position: 5,
+        })
+        .unwrap();
+    assert_eq!(catalog.receipt_count().unwrap(), 5);
+    assert_eq!(catalog.expire_receipts(BASE_TIME + 3).unwrap(), 2);
+    assert_eq!(catalog.receipt_count().unwrap(), 3);
+}
+
+#[test]
+fn the_stored_watermark_never_goes_backwards() {
+    // Two commits reach the catalog in either order. The lower one written
+    // last used to win, and a restart then handed out a watermark twice.
+    let catalog = Catalog::open(directory("watermark-max")).unwrap();
+    for (watermark, position) in [(7u64, 70u64), (6, 60)] {
+        catalog
+            .commit_receipt(&Receipt {
+                source_id: [1; 16],
+                batch_id: [watermark as u8; 16],
+                accepted: 1,
+                committed_at: BASE_TIME,
+                commit_watermark: watermark,
+                log_position: position,
+            })
+            .unwrap();
+    }
+    assert_eq!(catalog.watermark().unwrap(), (7, 70));
+}
+
+#[test]
+fn asking_about_one_row_does_not_depend_on_how_many_predicates_stand() {
+    // Not a timing: the index has to give the same answers the predicates do.
+    let catalog = Catalog::open(directory("tombstone-index")).unwrap();
+    for n in 1..=50u8 {
+        let mut predicate = tombstone(n);
+        predicate.property = Some(("trace_id".to_string(), format!("{:032x}", n)));
+        catalog.commit_tombstone(&predicate).unwrap();
+    }
+    let mut by_event = tombstone(60);
+    by_event.property = None;
+    by_event.event_ids = vec![[60; 16]];
+    catalog.commit_tombstone(&by_event).unwrap();
+    let mut by_range = tombstone(61);
+    by_range.property = None;
+    by_range.range = Some((BASE_TIME + 5_000, BASE_TIME + 6_000));
+    catalog.commit_tombstone(&by_range).unwrap();
+
+    let set = catalog.tombstone_set().unwrap();
+    let all = catalog.tombstones().unwrap();
+    assert_eq!(set.len(), 52);
+
+    let mut traced = EventRow::new([1; 16], "span", "a", BASE_TIME);
+    traced.project_id = PROJECT;
+    traced.trace_id = Some({
+        let mut id = [0u8; 16];
+        id[15] = 7;
+        id
+    });
+    let mut named = EventRow::new([60; 16], "event", "a", BASE_TIME);
+    named.project_id = PROJECT;
+    let mut ranged = EventRow::new([2; 16], "event", "a", BASE_TIME + 5_500);
+    ranged.project_id = PROJECT;
+    let mut free = EventRow::new([3; 16], "event", "a", BASE_TIME);
+    free.project_id = PROJECT;
+    let mut elsewhere = traced.clone();
+    elsewhere.project_id = [4; 16];
+    let by_property = free.clone().with_property(
+        "trace_id",
+        PropertyValue::Text(format!("{:032x}", 9)),
+        "client",
+    );
+
+    for row in [&traced, &named, &ranged, &free, &elsewhere, &by_property] {
+        assert_eq!(
+            set.hides(row),
+            all.iter().any(|predicate| predicate.hides(row)),
+            "the index and the predicates disagree"
+        );
+    }
+    assert!(set.hides(&traced) && set.hides(&named) && set.hides(&ranged));
+    assert!(set.hides(&by_property));
+    assert!(!set.hides(&free) && !set.hides(&elsewhere));
+}

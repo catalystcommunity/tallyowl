@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RpcRequest, RpcResponse } from "../../../.deps/csilgen/transports/typescript/src/rpc.js";
 import { fromCaptureRequestCbor, toCaptureCriticalResponseCbor, toCaptureResponseCbor, } from "../../../generated/typescript/tallyowl-ingest-api/codec.gen.js";
-import { FUNNEL, close, fail, open, purchase, walk } from "../src/index.js";
+import { FUNNEL, close, fail, open, purchase, record, walk } from "../src/index.js";
 import { HostRouter, defaultRoutes, unloadSender } from "../src/router.js";
 /// seedstore's route. It records every URL it was asked for, because "never
 /// contacts a TallyOwl domain" is only proved by looking at the addresses.
@@ -107,10 +107,15 @@ test("an unload flush reaches the host's own route and nothing else", async () =
     const beaconed = [];
     const host = seedstore();
     const storefront = open(host.router);
-    const flushNow = storefront.client.attachUnloadFlush(unloadSender(defaultRoutes, (url, payload) => {
+    const sender = unloadSender(defaultRoutes, (url, payload) => {
         beaconed.push({ url, bytes: payload.size });
         return true;
-    }), { addEventListener: () => { }, visibilityState: "visible" });
+    });
+    storefront.client.attachUnloadFlush(sender, {
+        addEventListener: () => { },
+        visibilityState: "visible",
+    });
+    const flushNow = () => storefront.client.flushOnUnload(sender);
     await walk(storefront, ["catalogue-viewed"]);
     storefront.client.capture((await import("../../../packages/browser/src/index.js")).Capture.event("tab-closing"));
     flushNow();
@@ -121,6 +126,28 @@ test("an unload flush reaches the host's own route and nothing else", async () =
     // produce a request.
     flushNow();
     assert.equal(beaconed.length, 1);
+});
+test("a beacon the browser refused is counted, not lost quietly", async () => {
+    // `sendBeacon` returns false when the browser's quota is used. A sender that
+    // threw that answer away would leave the dropped count at zero.
+    const storefront = open(seedstore().router);
+    const refused = unloadSender(defaultRoutes, () => false);
+    assert.equal(refused(new Uint8Array([1])), false);
+    const before = storefront.client.buffered;
+    assert.ok(before > 0);
+    assert.equal(storefront.client.flushOnUnload(refused), 0);
+    assert.equal(storefront.client.droppedCount, before);
+});
+test("a click that the host does not take rejects nothing and keeps its events", async () => {
+    const failing = (async () => {
+        throw new Error("seedstore is unreachable.");
+    });
+    const storefront = open(new HostRouter(defaultRoutes, failing));
+    const buffered = storefront.client.buffered;
+    record(storefront, ["catalogue-viewed"]);
+    assert.equal(await storefront.client.flushSafely(), undefined);
+    assert.equal(storefront.client.buffered, buffered + 1);
+    assert.equal(storefront.client.droppedCount, 0);
 });
 test("a rejection from the host arrives as a typed failure", async () => {
     const failing = (async () => {

@@ -106,11 +106,14 @@ class Stamping(unittest.TestCase):
         self.assertIn("name", json.loads(manifest.read_text()))
 
     def test_the_path_dependencies_all_move_together(self) -> None:
-        """Fifteen crates, one version. A stale one publishes the wrong crate."""
+        """Sixteen crates, one version. A stale one publishes the wrong crate.
+
+        The sixteenth is `tallyowl-identity`, which D62 added.
+        """
         release.set_version("9.9.9-rc.7", self.root, regenerate=False)
         site = next(s for s in release.SITES if "path dependencies" in s.what)
         found = release.read_site(site, self.root)
-        self.assertEqual(len(found), 15)
+        self.assertEqual(len(found), 16)
         self.assertEqual(set(found), {"9.9.9-rc.7"})
 
     def test_a_disagreement_names_the_files_that_disagree(self) -> None:

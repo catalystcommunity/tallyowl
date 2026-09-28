@@ -1528,6 +1528,43 @@ pub struct PolicyVersionResponse {
     pub enabled_kinds: Vec<TelemetryKind>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlertNotifyRequest {
+    pub signed_at: Timestamp,
+    /// constraint: size in 64..=64
+    pub signature: String,
+    /// constraint: size in 1..=65536
+    pub body: Vec<u8>,
+}
+
+impl AlertNotifyRequest {
+    /// Validate this value against the constraints declared in the CSIL spec.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        {
+            let v = &self.signature;
+            if v.len() < 64usize || v.len() > 64usize {
+                return Err(ValidationError {
+                    field: "signature".to_string(),
+                    message: "length must be in 64..=64".to_string(),
+                });
+            }
+        }
+        {
+            let v = &self.body;
+            if v.is_empty() || v.len() > 65536usize {
+                return Err(ValidationError {
+                    field: "body".to_string(),
+                    message: "length must be in 1..=65536".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlertNotifyResponse {}
+
 /// SamplingClause_mode variants
 #[derive(Debug, Clone, PartialEq)]
 pub enum SamplingClause_mode {

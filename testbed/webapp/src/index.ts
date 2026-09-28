@@ -50,6 +50,15 @@ export async function walk(
   storefront: Storefront,
   steps: readonly FunnelStep[],
 ): Promise<void> {
+  record(storefront, steps);
+  await storefront.client.flush();
+}
+
+/// Buffer `steps` of the funnel and send nothing.
+///
+/// This is the form for an event handler. A click handler has nobody to give a
+/// rejected promise to, so it records here and lets `flushSafely` send.
+export function record(storefront: Storefront, steps: readonly FunnelStep[]): void {
   for (const step of steps) {
     storefront.client.capture(
       Capture.event(step)
@@ -57,7 +66,6 @@ export async function walk(
         .withProperty("surface", text("web")),
     );
   }
-  await storefront.client.flush();
 }
 
 /// Record a purchase. Money travels as an exact decimal and never as a float.
@@ -124,13 +132,17 @@ export function start(routes: HostRoutes = defaultRoutes): void {
   const storefront = open(new HostRouter(routes));
   // The unload flush reaches seedstore's own route, never a TallyOwl address.
   storefront.client.attachUnloadFlush(unloadSender(routes), globalThis.document);
+  storefront.client.start();
 
   root.replaceChildren();
   for (const step of FUNNEL) {
     const button = document.createElement("button");
     button.textContent = step;
     button.addEventListener("click", () => {
-      void walk(storefront, [step]);
+      record(storefront, [step]);
+      // `flushSafely` never rejects. What seedstore's route did not take stays
+      // buffered, and the flush timer sends it again.
+      void storefront.client.flushSafely();
     });
     root.append(button);
   }

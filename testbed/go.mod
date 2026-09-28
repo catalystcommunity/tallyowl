@@ -6,12 +6,17 @@ require (
 	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api v0.2.1
 	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-ingest-api v0.2.1
 	github.com/CatalystCommunity/tallyowl/packages/driver-go v0.2.1
-	github.com/catalystcommunity/csilgen/transports/go v0.0.0-20260801235357-d693a94d5b72
+	github.com/catalystcommunity/csilgen/transports/go v0.0.0-20260926220402-baec1dad191c
 )
 
 replace github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api => ../generated/go/tallyowl-collector-api
 
 require github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-control-api v0.2.1
+
+require (
+	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
+	lukechampine.com/blake3 v1.4.1 // indirect
+)
 
 replace github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-control-api => ../generated/go/tallyowl-control-api
 

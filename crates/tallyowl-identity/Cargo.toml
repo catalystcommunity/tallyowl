@@ -1,0 +1,31 @@
+[package]
+name = "tallyowl-identity"
+description = "A TallyOwl service's own identity: enrollment, in-process renewal, and the trust it verifies peers against. D62."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tallyowl_identity"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tallyowl-obs = { workspace = true }
+tallyowl-config = { workspace = true }
+tallyowl-rpc = { workspace = true }
+tallyowl-store = { workspace = true }
+tallyowl-control-api = { workspace = true }
+# The process makes its own key and its own certificate request. The key never
+# leaves the process. AGENTS.md: "Each enrolled node generates its private key."
+rcgen = { workspace = true }
+getrandom = { workspace = true }
+
+[dev-dependencies]
+# One test pins this crate's node-naming rule to the cluster's, because a
+# consensus sender check compares the two.
+tallyowl-cluster = { workspace = true }
+x509-parser = { workspace = true }

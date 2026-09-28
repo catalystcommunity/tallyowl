@@ -136,10 +136,17 @@ impl Intake {
         metrics.declare(
             "tallyowl_metric_series_bytes",
             tallyowl_obs::MetricKind::Gauge,
-            "Bytes of metric points this collector is accounting for.",
+            "Bytes in one reading of every active metric series this collector is accounting for.",
             &[],
         )
         .unwrap_or_else(|e| panic!("the metric `tallyowl_metric_series_bytes` is not a name the registry accepts: {}", e.0));
+        metrics.declare(
+            "tallyowl_metric_names_active_count",
+            tallyowl_obs::MetricKind::Gauge,
+            "Metric names this collector is accounting for, across every project.",
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("the metric `tallyowl_metric_names_active_count` is not a name the registry accepts: {}", e.0));
         metrics.declare(
             "tallyowl_metric_series_refused_total",
             tallyowl_obs::MetricKind::Counter,
@@ -163,6 +170,29 @@ impl Intake {
         .unwrap_or_else(|e| panic!("the metric `tallyowl_metric_merge_skipped_total` is not a name the registry accepts: {}", e.0));
     }
 
+    /// Resolve the credential a connection presented, and count a refusal.
+    ///
+    /// This is separate from `submit_as` so the service can do it **before it
+    /// decodes the batch**. A frame is a caller-controlled size and its decoded
+    /// form is larger, so a caller that has proved nothing must not be able to
+    /// make this collector build one.
+    pub fn authenticate(&self, credential: &str) -> Result<Tenancy, TallyOwlError> {
+        self.tenancy.resolve(credential).inspect_err(|error| {
+            // Two causes, and an operator acts on them differently: a wrong
+            // key is the application's, and a key this collector could not
+            // check is the head's.
+            let reason = if error.code == ErrorCode::Unauthenticated {
+                "unauthenticated"
+            } else {
+                "key-check-unavailable"
+            };
+            self.metrics.increment(
+                "tallyowl_batches_refused_total",
+                &labels(&[("reason", reason)]),
+            );
+        })
+    }
+
     /// Accept a batch, or refuse it.
     ///
     /// `credential` comes from the connection, never from the payload.
@@ -171,13 +201,16 @@ impl Intake {
         credential: &str,
         request: SubmitBatchRequest,
     ) -> Result<Accepted, TallyOwlError> {
-        let tenancy = self.tenancy.resolve(credential).inspect_err(|_| {
-            self.metrics.increment(
-                "tallyowl_batches_refused_total",
-                &labels(&[("reason", "unauthenticated")]),
-            );
-        })?;
+        let tenancy = self.authenticate(credential)?;
+        self.submit_as(tenancy, request)
+    }
 
+    /// Accept a batch from a caller `authenticate` already resolved.
+    pub fn submit_as(
+        &self,
+        tenancy: Tenancy,
+        request: SubmitBatchRequest,
+    ) -> Result<Accepted, TallyOwlError> {
         // The protocol version, before anything else looks at the batch. A
         // client this build cannot read gets one clear answer rather than a
         // partial acceptance, and it gets it here instead of after the batch
@@ -301,17 +334,21 @@ impl Intake {
                 refused_by_policy,
             );
         }
-        // A batch the policy emptied is not written to the durable queue at
-        // all. A kill switch that still cost a queue write and a delivery would
-        // not be a kill switch.
-        if kept.is_empty() && rejected.is_empty() && refused_by_policy > 0 {
+        // A batch with nothing left to keep is not written to the durable
+        // queue at all. A kill switch that still cost a queue write and a
+        // delivery would not be a kill switch, and a batch whose every item was
+        // rejected is the poison payload `docs/DELIVERY.md` section 3 keeps out
+        // of the delivery queue. The receipt still names each rejected item, so
+        // the producer learns what it learned before.
+        if kept.is_empty() && (!rejected.is_empty() || refused_by_policy > 0) {
+            self.publish_series_cost();
             return Ok(Accepted {
                 response: SubmitBatchResponse {
                     batch_id,
                     accepted: 0,
                     durable_copies: self.durable_copies,
                     queued_at: now_ms(),
-                    rejected: None,
+                    rejected: (!rejected.is_empty()).then_some(rejected),
                     policy_version: self.policy.as_ref().map(|held| held.version()),
                 },
                 task_uuid: String::new(),
@@ -406,6 +443,10 @@ impl Intake {
     /// Publish what the ledger holds, so an operator sees the cost through the
     /// same endpoint as everything else.
     fn publish_series_cost(&self) {
+        // The idle sweep rides on this call, so a collector that stopped
+        // receiving metric points still gives its series back. It does work
+        // only when a sweep is due, and the read below costs nothing.
+        self.series.sweep_if_due(now_ms());
         let pressure = self.series.pressure();
         self.metrics.set_gauge(
             "tallyowl_metric_series_active_count",
@@ -416,6 +457,11 @@ impl Intake {
             "tallyowl_metric_series_bytes",
             &labels(&[]),
             pressure.active_bytes as i64,
+        );
+        self.metrics.set_gauge(
+            "tallyowl_metric_names_active_count",
+            &labels(&[]),
+            pressure.active_metrics as i64,
         );
     }
 
@@ -447,6 +493,46 @@ impl Intake {
             return Err(TallyOwlError::invalid_argument(
                 "This item has no time. Set the time the thing happened, in milliseconds since 1970.",
             ));
+        }
+        // One count for each bound. The contract does not say so in its types,
+        // so the check is here: every producer TallyOwl ships sends `counts[i]`
+        // for `bounds[i]`, and the head refuses any other shape at query time.
+        // Refusing it here names the item, and keeps a shape nobody can read
+        // out of the durable queue.
+        if let Some(histogram) = item
+            .metric_point
+            .as_ref()
+            .and_then(|point| point.histogram_value.as_ref())
+        {
+            if histogram.counts.len() != histogram.bounds.len() {
+                return Err(TallyOwlError::invalid_argument(format!(
+                    "This histogram has {} bucket counts and {} bounds. Send one count for each bound.",
+                    histogram.counts.len(),
+                    histogram.bounds.len()
+                )));
+            }
+        }
+        // An exact number names its own exponent, and the head renders it. One
+        // with an exponent of a trillion is a few bytes here and a terabyte
+        // there. The head refuses it too, but a durable task that the head
+        // rejects item by item for a day is a worse place to learn that than a
+        // receipt that names the item now.
+        let decimals = envelope
+            .properties
+            .iter()
+            .filter_map(|property| property.value.decimal_value.as_ref())
+            .chain(
+                envelope
+                    .measurements
+                    .iter()
+                    .flatten()
+                    .filter_map(|measurement| measurement.decimal_value.as_ref()),
+            )
+            .chain(item.conversion.as_ref().and_then(|c| c.value.as_ref()))
+            .chain(item.campaign_cost.as_ref().map(|c| &c.cost));
+        for decimal in decimals {
+            tallyowl_wire::check_decimal(decimal.exponent)
+                .map_err(|refusal| TallyOwlError::invalid_argument(refusal.message))?;
         }
         Ok(())
     }

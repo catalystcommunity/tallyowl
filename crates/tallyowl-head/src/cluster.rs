@@ -34,8 +34,9 @@ use tallyowl_cluster::plane::ControlPlane;
 use tallyowl_cluster::query::Partial;
 use tallyowl_cluster::raft::machine::{ControllerMachine, TabletMachine};
 use tallyowl_cluster::replicated::ReplicatedStore;
+use tallyowl_cluster::security::PeerSecurity;
 use tallyowl_cluster::service::{PartialSource, ReplicationService};
-use tallyowl_cluster::topology::{ControllerCommand, Member, ReceiptPolicy, Topology};
+use tallyowl_cluster::topology::{ControllerCommand, ReceiptPolicy, Topology};
 use tallyowl_cluster::transfer::{StoreSegments, TabletSegments};
 use tallyowl_cluster_api::types::ReplicaStatus;
 use tallyowl_config::Config;
@@ -77,7 +78,51 @@ impl Cluster {
     pub fn is_replicated(&self) -> bool {
         self.plane.is_some()
     }
+
+    /// Put this node's consensus groups on its metrics endpoint, and log a
+    /// group by name the first time it is seen stopped.
+    ///
+    /// A home installation has no group and this does nothing. See
+    /// `tallyowl_cluster::metrics` for why the gauges are sums.
+    pub fn export_metrics(
+        &self,
+        metrics: &Arc<tallyowl_obs::metrics::Registry>,
+        logger: &Arc<Logger>,
+    ) {
+        let Some(registry) = self.registry.as_ref() else {
+            return;
+        };
+        tallyowl_cluster::metrics::declare(metrics);
+        let registry = Arc::clone(registry);
+        let metrics = Arc::clone(metrics);
+        let logger = Arc::clone(logger);
+        let reporting = Arc::clone(&logger);
+        let spawned = std::thread::Builder::new()
+            .name("tallyowl-consensus-metrics".into())
+            .spawn(move || {
+                let mut sampler = tallyowl_cluster::metrics::Sampler::default();
+                loop {
+                    for stopped in sampler.sample(&registry, &metrics) {
+                        logger.error(
+                            "A consensus group stopped on this node after a storage failure. It takes no write and no message until this node restarts. Check this node's data volume, then restart it.",
+                            &[("group", &stopped)],
+                        );
+                    }
+                    std::thread::sleep(CONSENSUS_SAMPLE_EVERY);
+                }
+            });
+        if let Err(e) = spawned {
+            reporting.warning(
+                "The consensus metrics could not be started, so this node's group gauges will not move.",
+                &[("reason", &e.to_string())],
+            );
+        }
+    }
 }
+
+/// How often the consensus gauges are read. Reading them takes no lock a write
+/// waits on.
+const CONSENSUS_SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Answers a partial aggregate from the local replica.
 struct LocalReplica {
@@ -266,6 +311,32 @@ fn to_id(bytes: &[u8]) -> Result<[u8; 16], TallyOwlError> {
     })
 }
 
+/// How this node reaches its peers and proves itself to them. D62.
+///
+/// `identity` and `trust` together mean mutual TLS on the replication listener
+/// and on every peer connection. `None` in either means plaintext, which is
+/// legal only on a loopback or unix `replication.listen`, or with
+/// `allow_plaintext` (`transport.allowPlaintext`).
+#[derive(Clone, Default)]
+pub struct Security {
+    pub identity: Option<Arc<dyn tallyowl_rpc::material::IdentitySource>>,
+    pub trust: Option<Arc<dyn tallyowl_rpc::trust::TrustSource>>,
+    pub allow_plaintext: bool,
+}
+
+impl Security {
+    fn for_peers(&self) -> PeerSecurity {
+        match (&self.identity, &self.trust) {
+            (Some(identity), Some(trust)) => PeerSecurity::mutual(
+                Arc::clone(identity),
+                Arc::clone(trust),
+                self.allow_plaintext,
+            ),
+            _ => PeerSecurity::plaintext(self.allow_plaintext),
+        }
+    }
+}
+
 /// Start replicated storage, or do nothing.
 ///
 /// The local store comes back unchanged when this installation has one node,
@@ -275,6 +346,7 @@ pub fn start(
     config: &Config,
     segmented: Arc<SegmentedStore>,
     logger: &Logger,
+    security: Security,
 ) -> Result<Cluster, Box<dyn std::error::Error>> {
     let local: Arc<dyn Store> = Arc::clone(&segmented) as Arc<dyn Store>;
     let listen = config.text("replication.listen");
@@ -291,23 +363,45 @@ pub fn start(
         return Ok(Cluster::alone(local));
     }
 
-    let node = {
-        let configured = config.text("node.name");
-        if configured.is_empty() {
-            // A node with no name takes one from its address, which is stable
-            // for as long as the address is. An enrolled node is given a name
-            // by the control plane and sets it here.
-            format!("node-{}", listen.replace(['.', ':'], "-"))
-        } else {
-            configured.to_string()
-        }
-    };
+    // Refused before anything opens: a plaintext replication listener on a
+    // network address carries every row this node holds.
+    let peer_security = security.for_peers();
+    peer_security.check_listen(listen)?;
+
     let region = config.text("cell.region").to_string();
     let cell = config.text("cell.id").to_string();
     let domain = config.text("node.failureDomain").to_string();
 
+    // This node, and whatever peers configuration named. A cell normally learns
+    // its peers from its controller quorum; these are what a first bootstrap
+    // uses. **Every node has to read the same voter set out of its
+    // configuration**, because a consensus identity is a hash of a node's name,
+    // and `tallyowl_cluster::seed` holds the rule that makes that so: what this
+    // node is called, which address its peers dial, and which entry in the peer
+    // list is this node itself.
+    let peers = config.list("replication.peers");
+    let seed = tallyowl_cluster::seed::seed(&tallyowl_cluster::seed::SeedSettings {
+        name: config.text("node.name"),
+        listen,
+        advertise: config.text("replication.advertise"),
+        peers: &peers,
+        region: &region,
+        domain: &domain,
+    })?;
+    let node = seed.node.clone();
+    let members = seed.members.clone();
+
     let root = std::path::Path::new(config.text("head.dataDir")).join("consensus");
-    let registry = GroupRegistry::new(node.clone(), listen, Some(root))?;
+    // The registry is told the address peers dial, not the one this node binds.
+    // It is what unsafe recovery writes into a voter set of one.
+    let registry = GroupRegistry::new(node.clone(), seed.address.clone(), Some(root))?;
+    // Before any group starts, so no connection is opened with another
+    // transport.
+    registry.set_security(peer_security.clone());
+    for member in &members {
+        peer_security.remember(&member.address, &member.node);
+    }
+    registry.set_log_cache_bytes(config.bytes("replication.logCacheBytes").max(0) as u64);
     registry.set_write_timeout(std::time::Duration::from_millis(
         config.duration_ms("replication.writeTimeout").max(1) as u64,
     ));
@@ -324,27 +418,6 @@ pub fn start(
         "remote-one" => ReceiptPolicy::RemoteOne,
         _ => ReceiptPolicy::LocalOne,
     };
-
-    // This node, and whatever peers configuration named. A cell normally learns
-    // its peers from its controller quorum; these are what a first bootstrap
-    // uses.
-    let mut members = vec![Member::voter(node.clone(), listen)
-        .in_region(&region)
-        .in_domain(&domain)];
-    for (index, peer) in config.list("replication.peers").iter().enumerate() {
-        let peer = peer.trim();
-        if peer.is_empty() {
-            continue;
-        }
-        members.push(
-            Member::voter(format!("node-{}", peer.replace(['.', ':'], "-")), peer)
-                .in_region(&region)
-                // Without a told domain, each peer counts as its own. Assuming
-                // they share one would make placement believe a spread it does
-                // not have.
-                .in_domain(format!("peer-{index}")),
-        );
-    }
 
     {
         let mut held = topology.lock().expect("topology");
@@ -392,12 +465,39 @@ pub fn start(
     )?;
 
     let group = GroupKey::Tablet(FIRST_TABLET.into());
-    registry.start(
-        group.clone(),
-        Arc::new(TabletMachine::new(Arc::clone(&local))),
-        members.clone(),
-        0,
-    )?;
+
+    // The sealed segments this node serves and adopts. A replica behind a
+    // purged log catches up through these, and a tablet movement copies them.
+    // See `tallyowl_cluster::transfer` and L087.
+    let reporting = Arc::clone(&registry);
+    let reporting_group = group.clone();
+    let segments: Arc<dyn TabletSegments> = Arc::new(
+        StoreSegments::new(FIRST_TABLET, Arc::clone(&segmented))
+            .reporting_applied(Arc::new(move || reporting.applied_index(&reporting_group))),
+    );
+
+    // The tablet's state machine, told the three things the store contract does
+    // not carry: how to copy the rows a snapshot stands for, which erasures a
+    // snapshot for a peer must hold, and that a store inside its space reserve
+    // cannot take a write.
+    let erasures = Arc::clone(&segmented);
+    let space = Arc::clone(&segmented);
+    let machine = TabletMachine::new(Arc::clone(&local))
+        .catching_up_with(Arc::new(
+            tallyowl_cluster::transfer::SegmentCatchUp::new(FIRST_TABLET, Arc::clone(&segments))
+                .secured_by(peer_security.clone()),
+        ))
+        .carrying_erasures_from(Arc::new(move || {
+            Ok(erasures
+                .catalog()
+                .tombstones()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(tallyowl_store::catalog::encode_tombstone)
+                .collect())
+        }))
+        .writable_when(Arc::new(move || !space.space().is_inside_reserve()));
+    registry.start(group.clone(), Arc::new(machine), members.clone(), 0)?;
 
     let controller = Controller {
         mode: Mode::parse(config.text("placement.mode")).unwrap_or(Mode::RecommendOnly),
@@ -436,15 +536,6 @@ pub fn start(
             identity: Default::default(),
         })),
     });
-    // The sealed segments this node serves and adopts. A replica behind a
-    // purged log catches up through these, and a tablet movement copies them.
-    // See `tallyowl_cluster::transfer` and L087.
-    let reporting = Arc::clone(&registry);
-    let reporting_group = group.clone();
-    let segments: Arc<dyn TabletSegments> = Arc::new(
-        StoreSegments::new(FIRST_TABLET, Arc::clone(&segmented))
-            .reporting_applied(Arc::new(move || reporting.applied_index(&reporting_group))),
-    );
     let replication = ReplicationService::new(
         Arc::clone(&registry),
         Arc::clone(&topology),
@@ -457,13 +548,17 @@ pub fn start(
     let dispatcher = Arc::new(Both {
         replication,
         cluster: cluster_service,
+        security: peer_security.clone(),
     }) as Arc<dyn Dispatcher>;
 
-    let server = tallyowl_rpc::serve(
-        listen,
-        dispatcher,
-        tallyowl_cluster::raft::network::MAX_FRAME_BYTES,
-    )?;
+    let options =
+        tallyowl_rpc::ServerOptions::new(tallyowl_cluster::raft::network::MAX_FRAME_BYTES);
+    let server = match (peer_security.identity(), peer_security.trust()) {
+        (Some(identity), Some(trust)) => {
+            tallyowl_rpc::tls::serve_mutual(listen, dispatcher, options, identity, trust)?
+        }
+        _ => tallyowl_rpc::serve_with(listen, dispatcher, options)?,
+    };
     logger.info(
         "Serving replication and cluster control. An application never reaches this address.",
         &[
@@ -475,10 +570,31 @@ pub fn start(
         ],
     );
 
-    // A group that already has a log keeps the membership it committed. One
-    // that does not is created here, which is the only place a voter set is
-    // created and which a role token can never reach.
+    // A group that already has a log keeps the membership it committed, and
+    // nothing here touches it.
+    //
+    // A group with no state at all is one of two things, and this node cannot
+    // tell which from its own disk: a first install, or a voter that lost its
+    // volume. Creating a voter set is right for the first and dangerous for the
+    // second, so the peers are asked. **If any of them already holds data, the
+    // cell exists**: this node creates nothing and holds its vote until a
+    // leader has brought it level. See `GroupRegistry::hold_votes`.
+    let established = members
+        .iter()
+        .filter(|member| member.node != node)
+        .any(|member| peer_holds_data(&member.address, &peer_security));
     for (key, what) in [(&controllers, "cell controller quorum"), (&group, "tablet")] {
+        if registry.has_history(key) {
+            continue;
+        }
+        if established {
+            registry.hold_votes(key);
+            logger.warning(
+                "This node has no consensus state and its peers already run this cell, so it did not create a voter set. It does not vote until it holds everything the leader has committed. If this node replaced one that was lost, this is expected and needs no action.",
+                &[("group", what), ("node", &node)],
+            );
+            continue;
+        }
         if let Err(e) = registry.bootstrap(key, &members) {
             logger.info(
                 "This group already has a voter set, so it was not created again.",
@@ -496,7 +612,12 @@ pub fn start(
             Arc::clone(&registry),
             source.clone() as Arc<dyn PartialSource>,
         )
-        .with_max_fan_out(config.integer("query.maxFanOut").max(1) as usize),
+        .with_max_fan_out(config.integer("query.maxFanOut").max(1) as usize)
+        // One tablet that never answers is named in the result. It does not
+        // hold the query past the time a query may run.
+        .with_tablet_deadline(std::time::Duration::from_millis(
+            config.duration_ms("query.maxRuntime").max(1) as u64,
+        )),
     );
 
     let replicated = Arc::new(
@@ -521,6 +642,31 @@ pub fn start(
     })
 }
 
+/// Whether the node at one address already holds committed data.
+///
+/// Asked once at start, of each peer, to tell a first install from a node that
+/// came back empty into a cell that exists. A peer that does not answer counts
+/// as holding nothing: on a first install none of them answers yet.
+fn peer_holds_data(address: &str, security: &PeerSecurity) -> bool {
+    use tallyowl_cluster_api::codec::{decode_replica_status, encode_replica_status_request};
+    use tallyowl_cluster_api::types::ReplicaStatusRequest;
+    let client = security.client(
+        address,
+        tallyowl_cluster::raft::network::MAX_FRAME_BYTES,
+        tallyowl_cluster::raft::network::CONSENSUS_CONNECT_TIMEOUT,
+        tallyowl_cluster::raft::network::CONSENSUS_IO_TIMEOUT,
+    );
+    client
+        .call(
+            tallyowl_cluster::raft::network::REPLICATION_SERVICE,
+            "replica-status",
+            encode_replica_status_request(&ReplicaStatusRequest { tablet: None }),
+        )
+        .ok()
+        .and_then(|response| decode_replica_status(&response.payload).ok())
+        .is_some_and(|status| status.applied_watermark > 0)
+}
+
 /// One listener, two services.
 ///
 /// Both are node-to-node or operator surfaces and neither is reachable by an
@@ -529,6 +675,7 @@ pub fn start(
 struct Both {
     replication: ReplicationService,
     cluster: ClusterService,
+    security: PeerSecurity,
 }
 
 impl Dispatcher for Both {
@@ -536,6 +683,25 @@ impl Dispatcher for Both {
         match request.service.as_str() {
             "TallyOwlCluster" => self.cluster.dispatch(request),
             _ => self.replication.dispatch(request),
+        }
+    }
+
+    fn dispatch_from(
+        &self,
+        request: &tallyowl_rpc::Request,
+        peer: &tallyowl_rpc::Peer,
+    ) -> tallyowl_rpc::Outcome {
+        match request.service.as_str() {
+            // Cluster control changes placement and can force recovery. It is
+            // for a node or an operator on this node, never an unproven peer.
+            "TallyOwlCluster" => match self.security.admits(peer) {
+                Ok(()) => self.cluster.dispatch(request),
+                Err(reason) => tallyowl_cluster::service::refusal(&TallyOwlError::new(
+                    tallyowl_obs::error::ErrorCode::PermissionDenied,
+                    reason,
+                )),
+            },
+            _ => self.replication.dispatch_from(request, peer),
         }
     }
 }

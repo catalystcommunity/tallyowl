@@ -20,7 +20,29 @@ spec:
         {{- include "tallyowl-collector.labels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include "tallyowl-collector.settings" . | sha256sum }}
+        {{- with .Values.deployment.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      # Kubernetes puts a variable in the pod for each Service in the
+      # namespace, named after the Service: `TALLYOWL_PORT`,
+      # `TALLYOWL_CORNDOGS_SERVICE_HOST`, and so on. The loader reads every
+      # `TALLYOWL_*` variable as a setting, so each start warned about two
+      # dozen settings that do not exist. TallyOwl finds its peers through
+      # configuration, not through these variables.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.deployment.terminationGracePeriodSeconds }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        {{- range .Values.topologySpread.constraints }}
+        - topologyKey: {{ .topologyKey }}
+          maxSkew: {{ .maxSkew }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "tallyowl-collector.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.securityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -33,6 +55,31 @@ spec:
             - tallyowl-collector
             - --config
             - /etc/tallyowl/tallyowl.yaml
+          {{- if or .Values.deployment.apiKeySecret.name .Values.deployment.tls.roleTokenSecret.name .Values.deployment.extraEnv }}
+          env:
+            {{- if .Values.deployment.apiKeySecret.name }}
+            # Not `TALLYOWL_…`: the loader reads every variable with that prefix as
+            # a setting, and `config check` refuses one it does not know.
+            - name: SECRET_TALLYOWL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.deployment.apiKeySecret.name }}
+                  key: {{ .Values.deployment.apiKeySecret.key }}
+            {{- end }}
+            {{- with .Values.deployment.tls.roleTokenSecret }}
+            {{- if .name }}
+            # The role token this collector enrolls with at each start. D62.
+            - name: SECRET_TALLYOWL_ROLE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.deployment.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
           ports:
             - name: intake
               containerPort: {{ include "tallyowl-collector.port" .Values.collector.listen }}
@@ -42,6 +89,12 @@ spec:
             - name: otlp
               containerPort: {{ include "tallyowl-collector.port" .Values.compatibility.openTelemetry.listen }}
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: operational
+            periodSeconds: {{ .Values.deployment.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.deployment.startupProbe.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /livez
@@ -55,6 +108,10 @@ spec:
               path: /readyz
               port: operational
             periodSeconds: 10
+          {{- with .Values.deployment.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -63,7 +120,39 @@ spec:
             - name: config
               mountPath: /etc/tallyowl
               readOnly: true
+            {{- range $index, $name := .Values.deployment.tls.certificateSecrets }}
+            - name: tls-certificate-{{ $index }}
+              mountPath: /etc/tallyowl-certificates/{{ $index }}
+              readOnly: true
+            {{- end }}
+            {{- range $index, $authority := .Values.deployment.tls.authorities }}
+            - name: tls-authority-{{ $index }}
+              mountPath: /etc/tallyowl-authorities/{{ $index }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.deployment.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "tallyowl-collector.fullname" . }}
+        {{- /*
+        D62. Read-only, mode 0440: the pod's fsGroup is the group of the
+        process, and nobody else reads a key.
+        */}}
+        {{- range $index, $name := .Values.deployment.tls.certificateSecrets }}
+        - name: tls-certificate-{{ $index }}
+          secret:
+            secretName: {{ $name }}
+            defaultMode: 0440
+        {{- end }}
+        {{- range $index, $authority := .Values.deployment.tls.authorities }}
+        - name: tls-authority-{{ $index }}
+          secret:
+            secretName: {{ required "Each entry of deployment.tls.authorities needs a secretName." $authority.secretName }}
+            defaultMode: 0440
+        {{- end }}
+        {{- with .Values.deployment.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

@@ -107,10 +107,58 @@ impl GroupKey {
     }
 }
 
+/// What one group looks like from this node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GroupHealth {
+    /// Why the group stopped on this node, when it did. A stopped group takes
+    /// no write and no message until the node restarts.
+    pub fatal: Option<String>,
+    pub leader: Option<NodeName>,
+    pub term: u64,
+    pub last_applied: u64,
+    pub last_log: u64,
+    pub snapshot_index: u64,
+    /// The last entry purged from the log. A replica behind this cannot catch
+    /// up from the log and is sent a snapshot.
+    pub purged_index: u64,
+    /// How many entries the slowest replica is behind, when this node leads.
+    pub worst_replication_lag: Option<u64>,
+    pub snapshot_failures: u64,
+    pub last_snapshot_failure: Option<String>,
+}
+
+/// Every group on one node, added up. See [`GroupRegistry::health`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeGroupsHealth {
+    pub groups: u64,
+    pub led_here: u64,
+    /// Running, and with no leader this node knows of.
+    pub leaderless: u64,
+    /// Stopped on this node after a storage failure.
+    pub stopped: u64,
+    pub stopped_names: Vec<String>,
+    /// Led here, with a replica further behind than the leader keeps log for.
+    pub lagging: u64,
+    pub worst_replication_lag: u64,
+    pub worst_apply_lag: u64,
+    pub snapshot_failures: u64,
+}
+
 /// One running group on this node.
 struct RunningGroup {
     raft: RaftHandle,
     machine: Arc<dyn GroupMachine>,
+    /// The group's durable state, kept so that unsafe recovery can rewrite it
+    /// while the algorithm is stopped.
+    storage: GroupStorage,
+    generation: Generation,
+    /// What went wrong on this group's storage path without stopping it.
+    counters: Arc<crate::raft::storage::StorageCounters>,
+    /// Set while this node must not vote. See [`GroupRegistry::hold_votes`].
+    holding_votes: std::sync::atomic::AtomicBool,
+    /// Set while a snapshot chunk is being taken. See
+    /// [`GroupRegistry::deliver_snapshot`].
+    installing: std::sync::atomic::AtomicBool,
     /// The members this node was told about, so a proposal can name a leader's
     /// address without asking the controller again.
     members: Mutex<Vec<Member>>,
@@ -141,6 +189,9 @@ pub struct GroupRegistry {
     /// node runs it. See [`crate::raft::config_with`].
     snapshot_every: std::sync::atomic::AtomicU64,
     keep_after_snapshot: std::sync::atomic::AtomicU64,
+    /// How much memory one group's log file may use as a cache.
+    /// `replication.logCacheBytes`. See [`DEFAULT_LOG_CACHE_BYTES`].
+    log_cache_bytes: std::sync::atomic::AtomicU64,
 }
 
 /// How long a write waits for a commit before it is refused.
@@ -153,6 +204,19 @@ pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a membership change waits for the previous one to commit.
 pub const MEMBERSHIP_PATIENCE: Duration = Duration::from_secs(20);
+
+/// How much memory one group's log file may use as a cache.
+///
+/// The engine's own default is 1 GiB **for each file**, and a node holds one
+/// file for each group, so a node with a few hundred tablets could be asked for
+/// a few hundred gigabytes. A consensus log is appended at one end and purged
+/// at the other; it has almost nothing worth caching.
+pub const DEFAULT_LOG_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// How far behind the leader's log a replica may be before it counts as
+/// lagging in [`GroupRegistry::health`]. One snapshot's worth: past this the
+/// leader may have purged what the replica needs.
+pub const LAGGING_AFTER_ENTRIES: u64 = crate::raft::KEEP_AFTER_SNAPSHOT;
 
 impl GroupRegistry {
     /// Build a registry for one node.
@@ -192,11 +256,31 @@ impl GroupRegistry {
             keep_after_snapshot: std::sync::atomic::AtomicU64::new(
                 crate::raft::KEEP_AFTER_SNAPSHOT,
             ),
+            log_cache_bytes: std::sync::atomic::AtomicU64::new(DEFAULT_LOG_CACHE_BYTES),
         }))
     }
 
     pub fn node(&self) -> &str {
         &self.node
+    }
+
+    /// Use this transport to every peer. Call it before the first group starts:
+    /// a connection already open keeps the transport it was opened with.
+    pub fn set_security(&self, security: crate::security::PeerSecurity) {
+        self.connections.set_security(security);
+    }
+
+    /// Which node answers at a member's address, so a client verifies the
+    /// peer's certificate against that node's name.
+    fn remember_address(&self, member: &Member) {
+        self.connections
+            .security()
+            .remember(&member.address, &member.node);
+    }
+
+    /// The transport this node uses to its peers.
+    pub fn security(&self) -> crate::security::PeerSecurity {
+        self.connections.security()
     }
 
     pub fn node_id(&self) -> NodeId {
@@ -276,25 +360,61 @@ impl GroupRegistry {
         }
         for member in &members {
             self.learn(&member.node)?;
+            self.remember_address(member);
         }
         let storage = match &self.root {
             Some(root) => {
                 let path = root.join(group.directory_name()).join("raft.redb");
-                GroupStorage::open(&path, Arc::clone(&machine))
+                GroupStorage::open_with_cache(
+                    &path,
+                    Arc::clone(&machine),
+                    self.log_cache_bytes
+                        .load(std::sync::atomic::Ordering::Relaxed) as usize,
+                )
             }
             None => GroupStorage::in_memory(Arc::clone(&machine)),
         }
         .map_err(|e| TallyOwlError::new(ErrorCode::FailedPrecondition, e))?;
 
+        let counters = storage.counters();
+        let raft = self.launch(&group, storage.clone(), generation)?;
+        // A hold outlives a restart. A node that restarted part-way through
+        // catching up has some log, so it no longer looks new, and it is no
+        // safer to ask for its vote than it was before.
+        let held = self
+            .hold_marker(&group)
+            .is_some_and(|marker| marker.exists());
+
+        self.groups.lock().expect("groups").insert(
+            group,
+            Arc::new(RunningGroup {
+                raft,
+                machine,
+                storage,
+                generation,
+                counters,
+                holding_votes: std::sync::atomic::AtomicBool::new(held),
+                installing: std::sync::atomic::AtomicBool::new(false),
+                members: Mutex::new(members),
+            }),
+        );
+        Ok(())
+    }
+
+    /// Run the algorithm over one group's storage.
+    fn launch(
+        &self,
+        group: &GroupKey,
+        storage: GroupStorage,
+        generation: Generation,
+    ) -> Result<RaftHandle, TallyOwlError> {
         let network = GroupNetwork {
             group: group.clone(),
             sender: self.node.clone(),
             generation,
             connections: Arc::clone(&self.connections),
         };
-
-        let raft = self
-            .runtime
+        self.runtime
             .block_on(Raft::new(
                 self.id,
                 {
@@ -310,17 +430,7 @@ impl GroupRegistry {
                     "{} could not be started on this node: {e}",
                     group.label()
                 ))
-            })?;
-
-        self.groups.lock().expect("groups").insert(
-            group,
-            Arc::new(RunningGroup {
-                raft,
-                machine,
-                members: Mutex::new(members),
-            }),
-        );
-        Ok(())
+            })
     }
 
     /// Stop one group on this node, because the controller moved it away.
@@ -348,8 +458,73 @@ impl GroupRegistry {
             })
     }
 
+    /// One group's durable state, for a test that reads the log directly.
+    #[cfg(test)]
+    pub(crate) fn storage_of(&self, key: &GroupKey) -> Result<GroupStorage, TallyOwlError> {
+        Ok(self.group(key)?.storage.clone())
+    }
+
     pub fn machine(&self, key: &GroupKey) -> Result<Arc<dyn GroupMachine>, TallyOwlError> {
         Ok(Arc::clone(&self.group(key)?.machine))
+    }
+
+    /// Whether this node holds any consensus state for a group: a log entry, or
+    /// a voter set it learned.
+    ///
+    /// A node that holds none is either new to the group or has lost its disk,
+    /// and it cannot tell which. See [`GroupRegistry::hold_votes`].
+    pub fn has_history(&self, key: &GroupKey) -> bool {
+        let Ok(running) = self.group(key) else {
+            return false;
+        };
+        let metrics = running.raft.metrics();
+        let metrics = metrics.borrow();
+        metrics.last_log_index.is_some() || metrics.membership_config.voter_ids().next().is_some()
+    }
+
+    /// Stop this node voting in one group until it holds everything the
+    /// group's leader has committed.
+    ///
+    /// **This is for a node that came back with no consensus state into a group
+    /// that already exists.** It may be a voter that lost its disk. Such a
+    /// node remembers neither the entries it acknowledged nor the vote it
+    /// cast, and its empty log makes every candidate look up to date: it would
+    /// grant its vote to a replica that lacks a committed write, that replica
+    /// would lead with it, and the write would be truncated on the replica
+    /// that held it. `docs/FAILURE_MODES.md` procedure 2 has a replaced node
+    /// join as a learner for this reason.
+    ///
+    /// The hold ends on its own, in [`GroupRegistry::deliver_append`], once a
+    /// leader's entries have brought this node's log up to that leader's
+    /// commit position. From there its vote is as safe as any other.
+    pub fn hold_votes(&self, key: &GroupKey) {
+        if let Ok(running) = self.group(key) {
+            if let Some(marker) = self.hold_marker(key) {
+                // Best effort. Without the file the hold still stands until
+                // this process stops, which is the common case.
+                let _ = std::fs::write(marker, b"");
+            }
+            running
+                .holding_votes
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The file that says a hold is in force, for a group with durable state.
+    fn hold_marker(&self, key: &GroupKey) -> Option<PathBuf> {
+        self.root
+            .as_ref()
+            .map(|root| root.join(key.directory_name()).join("holding-votes"))
+    }
+
+    pub fn is_holding_votes(&self, key: &GroupKey) -> bool {
+        self.group(key)
+            .map(|running| {
+                running
+                    .holding_votes
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            })
+            .unwrap_or(false)
     }
 
     /// Create the voter set for a group that does not have one yet.
@@ -360,6 +535,7 @@ impl GroupRegistry {
         let running = self.group(key)?;
         let mut initial = BTreeMap::new();
         for member in members.iter().filter(|m| m.role == MemberRole::Voter) {
+            self.remember_address(member);
             initial.insert(
                 self.learn(&member.node)?,
                 BasicNode {
@@ -437,20 +613,24 @@ impl GroupRegistry {
         let running = self.group(key)?;
         self.await_membership_settled(key, MEMBERSHIP_PATIENCE)?;
         let id = self.learn(&member.node)?;
-        self.runtime
-            .block_on(running.raft.add_learner(
+        self.remember_address(member);
+        self.within_patience(
+            key,
+            &format!("adding `{}`", member.node),
+            running.raft.add_learner(
                 id,
                 BasicNode {
                     addr: member.address.clone(),
                 },
                 true,
-            ))
-            .map_err(|e| {
-                TallyOwlError::new(
-                    ErrorCode::FailedPrecondition,
-                    format!("`{}` could not join {}: {e}", member.node, key.label()),
-                )
-            })?;
+            ),
+        )?
+        .map_err(|e| {
+            TallyOwlError::new(
+                ErrorCode::FailedPrecondition,
+                format!("`{}` could not join {}: {e}", member.node, key.label()),
+            )
+        })?;
         if member.role == MemberRole::Voter {
             let mut voters = self.voter_ids(&running);
             voters.insert(id);
@@ -482,18 +662,19 @@ impl GroupRegistry {
         }
         let mut removing = std::collections::BTreeSet::new();
         removing.insert(id);
-        self.runtime
-            .block_on(
-                running
-                    .raft
-                    .change_membership(ChangeMembers::RemoveNodes(removing), false),
+        self.within_patience(
+            key,
+            &format!("removing `{node}`"),
+            running
+                .raft
+                .change_membership(ChangeMembers::RemoveNodes(removing), false),
+        )?
+        .map_err(|e| {
+            TallyOwlError::new(
+                ErrorCode::FailedPrecondition,
+                format!("`{node}` could not leave {}: {e}", key.label()),
             )
-            .map_err(|e| {
-                TallyOwlError::new(
-                    ErrorCode::FailedPrecondition,
-                    format!("`{node}` could not leave {}: {e}", key.label()),
-                )
-            })?;
+        })?;
         running
             .members
             .lock()
@@ -510,25 +691,86 @@ impl GroupRegistry {
     /// needs the consensus handle.
     pub fn force_single_voter(&self, key: &GroupKey) -> Result<u64, TallyOwlError> {
         let running = self.group(key)?;
-        // A forced change does not wait for a quorum it does not have, so the
-        // settle is best effort: it makes the ordinary case clean and never
-        // blocks the case this exists for.
-        let _ = self.await_membership_settled(key, Duration::from_millis(500));
-        let mut alone = std::collections::BTreeSet::new();
-        alone.insert(self.id);
-        self.runtime
-            .block_on(
-                running
-                    .raft
-                    .change_membership(ChangeMembers::ReplaceAllVoters(alone), true),
+        // **Not through the group.** A voter set is changed by committing the
+        // change, and the case this exists for is a group that can commit
+        // nothing: two of three voters are gone, the survivor is not the
+        // leader, and consensus rightly refuses it. So the algorithm is
+        // stopped, this node's own durable state is rewritten to name it as
+        // the only voter, and the algorithm is started again over that.
+        let _ = self.runtime.block_on(running.raft.shutdown());
+        self.groups.lock().expect("groups").remove(key);
+
+        let rewritten = running
+            .storage
+            .force_single_voter(self.id, &self.address)
+            .map_err(|e| TallyOwlError::new(ErrorCode::FailedPrecondition, e));
+
+        // Started again whether or not the rewrite worked, so a refusal leaves
+        // the group as it was and not stopped.
+        let raft = self.launch(key, running.storage.clone(), running.generation)?;
+        let alone: Vec<Member> = running
+            .members
+            .lock()
+            .expect("members")
+            .iter()
+            .filter(|member| member.node == self.node)
+            .cloned()
+            .collect();
+        let members = match &rewritten {
+            Ok(_) => alone,
+            Err(_) => running.members.lock().expect("members").clone(),
+        };
+        self.groups.lock().expect("groups").insert(
+            key.clone(),
+            Arc::new(RunningGroup {
+                raft,
+                machine: Arc::clone(&running.machine),
+                storage: running.storage.clone(),
+                generation: running.generation,
+                counters: Arc::clone(&running.counters),
+                holding_votes: std::sync::atomic::AtomicBool::new(false),
+                installing: std::sync::atomic::AtomicBool::new(false),
+                members: Mutex::new(members),
+            }),
+        );
+        rewritten?;
+        // Not `await_leader`: this node still remembers the leader it last
+        // voted for, and that one is gone. What is waited for is this node
+        // electing itself.
+        self.await_leading(key, MEMBERSHIP_PATIENCE).map_err(|e| {
+            TallyOwlError::new(
+                ErrorCode::FailedPrecondition,
+                format!(
+                    "{} was rewritten to one voter and did not then elect itself. {}",
+                    key.label(),
+                    e.message
+                ),
             )
-            .map_err(|e| {
-                TallyOwlError::new(
-                    ErrorCode::FailedPrecondition,
-                    format!("{} could not be forced to one voter: {e}", key.label()),
-                )
-            })?;
+        })?;
         Ok(self.applied_index(key))
+    }
+
+    /// Run one membership change, and stop waiting for it after
+    /// [`MEMBERSHIP_PATIENCE`].
+    ///
+    /// A membership change commits through the group, so a group that has lost
+    /// its quorum never finishes one, and the operator's call never returned.
+    /// The change may still commit later; the message says so.
+    fn within_patience<T>(
+        &self,
+        key: &GroupKey,
+        what: &str,
+        change: impl std::future::Future<Output = T>,
+    ) -> Result<T, TallyOwlError> {
+        self.runtime
+            .block_on(async { tokio::time::timeout(MEMBERSHIP_PATIENCE, change).await })
+            .map_err(|_| {
+                TallyOwlError::unavailable(format!(
+                    "{} did not finish {what} within {} seconds. It may have no quorum. The change was not cancelled and may still commit; check the group's members before you try again.",
+                    key.label(),
+                    MEMBERSHIP_PATIENCE.as_secs()
+                ))
+            })
     }
 
     fn voter_ids(&self, running: &RunningGroup) -> std::collections::BTreeSet<NodeId> {
@@ -547,19 +789,20 @@ impl GroupRegistry {
         key: &GroupKey,
         voters: std::collections::BTreeSet<NodeId>,
     ) -> Result<(), TallyOwlError> {
-        self.runtime
-            .block_on(
-                running
-                    .raft
-                    .change_membership(ChangeMembers::ReplaceAllVoters(voters), false),
+        self.within_patience(
+            key,
+            "changing the voter set",
+            running
+                .raft
+                .change_membership(ChangeMembers::ReplaceAllVoters(voters), false),
+        )?
+        .map(|_| ())
+        .map_err(|e| {
+            TallyOwlError::new(
+                ErrorCode::FailedPrecondition,
+                format!("The voter set of {} could not be changed: {e}", key.label()),
             )
-            .map(|_| ())
-            .map_err(|e| {
-                TallyOwlError::new(
-                    ErrorCode::FailedPrecondition,
-                    format!("The voter set of {} could not be changed: {e}", key.label()),
-                )
-            })
+        })
     }
 
     /// Propose one command and wait for it to commit and apply.
@@ -671,7 +914,11 @@ impl GroupRegistry {
             generation: 0,
             payload,
         };
-        let client = self.connections.to(address);
+        // Its own connection. A proposal waits for a commit, and on the shared
+        // one it held every heartbeat to that peer behind it.
+        let client = self
+            .connections
+            .for_proposals(address, self.write_timeout());
         let response = client
             .call(
                 REPLICATION_SERVICE,
@@ -681,7 +928,7 @@ impl GroupRegistry {
             .map_err(|e| {
                 // A broken connection is the ordinary case when the leader
                 // restarts. Drop it so the retry opens a fresh one.
-                self.connections.forget(address);
+                self.connections.forget(address, &client);
                 write_failure(key, format!("the leader at {address} did not answer: {e}"))
             })?;
         let reply = decode_consensus_reply(&response.payload).map_err(|e| {
@@ -717,6 +964,13 @@ impl GroupRegistry {
             .store(keep_after_snapshot, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// How much memory one group's log file may cache. A group reads it when
+    /// it starts.
+    pub fn set_log_cache_bytes(&self, bytes: u64) {
+        self.log_cache_bytes
+            .store(bytes.max(1024 * 1024), std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn log_bounds(&self) -> (u64, u64) {
         (
             self.snapshot_every
@@ -740,9 +994,48 @@ impl GroupRegistry {
         request: openraft::raft::AppendEntriesRequest<TypeConfig>,
     ) -> Result<openraft::raft::AppendEntriesResponse<NodeId>, TallyOwlError> {
         let running = self.group(key)?;
-        self.runtime
+        // **A replica that cannot write does not take an entry it would then
+        // acknowledge.** An acknowledged entry counts towards the quorum, and a
+        // receipt would go to a client on the strength of a copy this node
+        // cannot make. A heartbeat carries no entry and is still answered, so a
+        // full disk does not also start an election.
+        if !request.entries.is_empty() && !running.machine.is_writable() {
+            return Err(TallyOwlError::new(
+                ErrorCode::ResourceExhausted,
+                format!(
+                    "This node cannot write to its store, so it did not take new entries for {}. Free space on its data volume; it catches up on its own afterwards.",
+                    key.label()
+                ),
+            ));
+        }
+        let leader_commit = request.leader_commit.map(|id| id.index).unwrap_or(0);
+        let response = self
+            .runtime
             .block_on(running.raft.append_entries(request))
-            .map_err(|e| delivery_failure(key, e))
+            .map_err(|e| delivery_failure(key, e))?;
+        // The end of a vote hold: a leader's entries were accepted, and this
+        // node's log now reaches what that leader had committed.
+        if running
+            .holding_votes
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && matches!(response, openraft::raft::AppendEntriesResponse::Success)
+        {
+            let held = running.raft.metrics().borrow().last_log_index.unwrap_or(0);
+            if leader_commit > 0 && held >= leader_commit {
+                // The file too, or the hold would come back at the next start.
+                // If it cannot be removed the hold stays, which is the safe way
+                // for that to fail.
+                let cleared = self
+                    .hold_marker(key)
+                    .is_none_or(|marker| !marker.exists() || std::fs::remove_file(marker).is_ok());
+                if cleared {
+                    running
+                        .holding_votes
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        Ok(response)
     }
 
     pub fn deliver_vote(
@@ -751,6 +1044,15 @@ impl GroupRegistry {
         request: openraft::raft::VoteRequest<NodeId>,
     ) -> Result<openraft::raft::VoteResponse<NodeId>, TallyOwlError> {
         let running = self.group(key)?;
+        if running
+            .holding_votes
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(TallyOwlError::unavailable(format!(
+                "This node came back with no consensus state for {} and is catching up, so it does not vote yet. It votes again once it holds everything the leader has committed.",
+                key.label()
+            )));
+        }
         self.runtime
             .block_on(running.raft.vote(request))
             .map_err(|e| delivery_failure(key, e))
@@ -762,16 +1064,125 @@ impl GroupRegistry {
         request: openraft::raft::InstallSnapshotRequest<TypeConfig>,
     ) -> Result<openraft::raft::InstallSnapshotResponse<NodeId>, TallyOwlError> {
         let running = self.group(key)?;
-        self.runtime
+        // **One at a time.** The last chunk of a tablet snapshot does not
+        // answer until the replica has copied the segments the snapshot stands
+        // for, which can take minutes. The leader gives up on the call long
+        // before that and sends the snapshot again, and each of those would
+        // wait here on a thread of its own until the first one finished.
+        if running
+            .installing
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(TallyOwlError::unavailable(format!(
+                "This node is still installing the last snapshot it was sent for {}. Send it again afterwards.",
+                key.label()
+            )));
+        }
+        let answer = self
+            .runtime
             .block_on(running.raft.install_snapshot(request))
-            .map_err(|e| delivery_failure(key, e))
+            .map_err(|e| delivery_failure(key, e));
+        running
+            .installing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        answer
     }
 
     /// The leader of one group, as this node last saw it.
+    ///
+    /// **A group that stopped on this node has no leader as far as this node
+    /// is concerned.** openraft keeps the last leader it saw in its metrics
+    /// after a fatal error, and a caller that read only that would report a
+    /// writable tablet whose every write then fails.
     pub fn leader(&self, key: &GroupKey) -> Option<NodeName> {
         let running = self.group(key).ok()?;
-        let id = running.raft.metrics().borrow().current_leader?;
+        let id = {
+            let metrics = running.raft.metrics();
+            let metrics = metrics.borrow();
+            if metrics.running_state.is_err() {
+                return None;
+            }
+            metrics.current_leader?
+        };
         self.name_of(id)
+    }
+
+    /// What an operator needs to know about one group on this node.
+    pub fn health_of(&self, key: &GroupKey) -> Option<GroupHealth> {
+        let running = self.group(key).ok()?;
+        let last_snapshot_failure = running
+            .counters
+            .last_snapshot_failure
+            .lock()
+            .expect("snapshot failure")
+            .clone();
+        let metrics = running.raft.metrics();
+        let metrics = metrics.borrow();
+        let last_log = metrics.last_log_index.unwrap_or(0);
+        // A leader knows how far each replica got. A follower does not, and
+        // reports none rather than a guess.
+        let worst_lag = metrics.replication.as_ref().map(|replication| {
+            replication
+                .values()
+                .map(|matched| last_log.saturating_sub(matched.map(|id| id.index).unwrap_or(0)))
+                .max()
+                .unwrap_or(0)
+        });
+        Some(GroupHealth {
+            fatal: metrics
+                .running_state
+                .as_ref()
+                .err()
+                .map(|fatal| fatal.to_string()),
+            leader: metrics.current_leader.and_then(|id| self.name_of(id)),
+            term: metrics.current_term,
+            last_applied: metrics.last_applied.map(|id| id.index).unwrap_or(0),
+            last_log,
+            snapshot_index: metrics.snapshot.map(|id| id.index).unwrap_or(0),
+            purged_index: metrics.purged.map(|id| id.index).unwrap_or(0),
+            worst_replication_lag: worst_lag,
+            snapshot_failures: running
+                .counters
+                .snapshot_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            last_snapshot_failure,
+        })
+    }
+
+    /// Every group on this node, added up.
+    ///
+    /// **Added up rather than one series for each group**, because the number
+    /// of groups on a node is whatever placement made it — D27 measured 600 —
+    /// and a label for each would put that many series for each gauge into an
+    /// operator's own monitoring. The counts say whether something is wrong;
+    /// [`GroupRegistry::health_of`] and the cluster status operation say which.
+    pub fn health(&self) -> NodeGroupsHealth {
+        let mut summary = NodeGroupsHealth::default();
+        for key in self.group_keys() {
+            let Some(group) = self.health_of(&key) else {
+                continue;
+            };
+            summary.groups += 1;
+            if group.fatal.is_some() {
+                summary.stopped += 1;
+                summary.stopped_names.push(key.label());
+            } else if group.leader.is_none() {
+                summary.leaderless += 1;
+            }
+            if group.leader.as_deref() == Some(self.node.as_str()) && group.fatal.is_none() {
+                summary.led_here += 1;
+            }
+            let behind = group.last_log.saturating_sub(group.last_applied);
+            summary.worst_apply_lag = summary.worst_apply_lag.max(behind);
+            if let Some(lag) = group.worst_replication_lag {
+                summary.worst_replication_lag = summary.worst_replication_lag.max(lag);
+                if lag > LAGGING_AFTER_ENTRIES {
+                    summary.lagging += 1;
+                }
+            }
+            summary.snapshot_failures += group.snapshot_failures;
+        }
+        summary
     }
 
     pub fn is_leader(&self, key: &GroupKey) -> bool {
@@ -831,6 +1242,35 @@ impl GroupRegistry {
         })
     }
 
+    /// Whether a node name belongs to one group, as far as this node knows.
+    ///
+    /// Either source counts: the members this node was told when the group
+    /// started or changed, and the voter set and learners the group's own log
+    /// holds. A node that knows of no member at all accepts, because it is a
+    /// new learner and the first message it gets is from a leader it has not
+    /// heard of yet.
+    pub fn knows_member(&self, key: &GroupKey, name: &str) -> bool {
+        let Ok(running) = self.group(key) else {
+            return false;
+        };
+        let told = running.members.lock().expect("members");
+        if told.iter().any(|member| member.node == name) {
+            return true;
+        }
+        let id = node_id(name);
+        let metrics = running.raft.metrics();
+        let metrics = metrics.borrow();
+        let mut known = metrics
+            .membership_config
+            .nodes()
+            .map(|(id, _)| *id)
+            .peekable();
+        if told.is_empty() && known.peek().is_none() {
+            return true;
+        }
+        known.any(|member| member == id)
+    }
+
     pub fn members(&self, key: &GroupKey) -> Vec<Member> {
         self.group(key)
             .map(|running| running.members.lock().expect("members").clone())
@@ -870,6 +1310,29 @@ impl GroupRegistry {
                 return Err(TallyOwlError::unavailable(format!(
                     "{} has no leader yet. A write cannot be accepted until it elects one.",
                     key.label()
+                )));
+            }
+        }
+    }
+
+    /// Wait until **this node** leads the group, or give up.
+    pub fn await_leading(&self, key: &GroupKey, within: Duration) -> Result<(), TallyOwlError> {
+        let running = self.group(key)?;
+        let mut metrics = running.raft.metrics();
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if metrics.borrow().current_leader == Some(self.id) {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let changed = self
+                .runtime
+                .block_on(async { tokio::time::timeout(left, metrics.changed()).await });
+            if left.is_zero() || changed.is_err() {
+                return Err(TallyOwlError::unavailable(format!(
+                    "This node did not become the leader of {} within {} seconds.",
+                    key.label(),
+                    within.as_secs()
                 )));
             }
         }

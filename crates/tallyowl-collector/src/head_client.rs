@@ -10,6 +10,7 @@
 //! `AGENTS.md` forbids mocking the second, not the first.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tallyowl_collector_api::codec::{
     decode_commit_batch_response, decode_resolve_key_response, decode_service_error,
@@ -17,7 +18,8 @@ use tallyowl_collector_api::codec::{
 };
 use tallyowl_collector_api::types::{ResolveKeyRequest, ResolveKeyResponse};
 use tallyowl_obs::error::{ErrorCode, TallyOwlError};
-use tallyowl_rpc::{Client, SERVICE_ERROR_VARIANT};
+use tallyowl_obs::metrics::{labels, MetricKind, Registry};
+use tallyowl_rpc::{Client, Response, SERVICE_ERROR_VARIANT};
 
 use crate::forwarder::{CommitReceipt, DeliveryResult};
 use crate::tenancy::KeyDirectory;
@@ -28,16 +30,105 @@ pub trait HeadClient: Send + Sync {
     fn commit_batch(&self, request: Vec<u8>) -> DeliveryResult;
 }
 
+const HEAD_CALL_SECONDS: &str = "tallyowl_head_call_seconds";
+const HEAD_CALL_FAILURES: &str = "tallyowl_head_call_failures_total";
+
 /// The real head, over CSIL-RPC on TCP.
+///
+/// One `RemoteHead` is one connection, and a call holds it for its whole round
+/// trip. A process that commits batches and resolves credentials builds one for
+/// each job, so a slow commit does not hold every intake worker whose key just
+/// expired. See `main.rs`.
 pub struct RemoteHead {
-    client: Arc<Client>,
+    client: Client,
+    metrics: Option<Arc<Registry>>,
 }
 
 impl RemoteHead {
     pub fn new(address: &str, max_frame_bytes: usize) -> RemoteHead {
         RemoteHead {
-            client: Arc::new(Client::new(address, max_frame_bytes)),
+            client: Client::new(address, max_frame_bytes),
+            metrics: None,
         }
+    }
+
+    /// The head over mutual TLS, showing this collector's enrolled identity and
+    /// verifying the head against the trusted authorities. D62.
+    ///
+    /// Until the collector has enrolled, the identity is empty, and a call
+    /// fails as retryable rather than going out in the clear. The forwarder's
+    /// breaker waits, and intake, which needs no identity, keeps accepting.
+    pub fn mutual(
+        address: &str,
+        max_frame_bytes: usize,
+        server_name: &str,
+        identity: Arc<dyn tallyowl_rpc::material::IdentitySource>,
+        trust: Arc<dyn tallyowl_rpc::trust::TrustSource>,
+    ) -> RemoteHead {
+        RemoteHead {
+            client: Client::mutual(address, max_frame_bytes, server_name, identity, trust),
+            metrics: None,
+        }
+    }
+
+    /// How long one answer from the head may take. A head that accepts the
+    /// connection and never answers costs one wait of this length.
+    pub fn with_call_timeout(self, timeout: Duration) -> RemoteHead {
+        RemoteHead {
+            client: self.client.with_io_timeout(timeout),
+            metrics: self.metrics,
+        }
+    }
+
+    /// Publish how long each call takes and how many fail.
+    pub fn with_metrics(mut self, metrics: Arc<Registry>) -> RemoteHead {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    pub fn declare_metrics(metrics: &Registry) {
+        metrics
+            .declare(
+                HEAD_CALL_SECONDS,
+                MetricKind::Histogram,
+                "How long one call to the head took, by operation.",
+                &[0.001, 0.005, 0.025, 0.1, 0.5, 2.0, 10.0, 30.0],
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "the metric `{HEAD_CALL_SECONDS}` is not a name the registry accepts: {}",
+                    e.0
+                )
+            });
+        metrics
+            .declare(
+                HEAD_CALL_FAILURES,
+                MetricKind::Counter,
+                "Calls to the head that produced no answer, by operation.",
+                &[],
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "the metric `{HEAD_CALL_FAILURES}` is not a name the registry accepts: {}",
+                    e.0
+                )
+            });
+    }
+
+    fn call(&self, op: &str, payload: Vec<u8>) -> Result<Response, TallyOwlError> {
+        let started = Instant::now();
+        let outcome = self.client.call("TallyOwlCollector", op, payload);
+        if let Some(metrics) = &self.metrics {
+            metrics.observe(
+                HEAD_CALL_SECONDS,
+                &labels(&[("op", op)]),
+                started.elapsed().as_secs_f64(),
+            );
+            if outcome.is_err() {
+                metrics.increment(HEAD_CALL_FAILURES, &labels(&[("op", op)]));
+            }
+        }
+        outcome
     }
 
     /// Forget the current connection. The next call opens a fresh one.
@@ -52,9 +143,7 @@ impl RemoteHead {
 
 impl HeadClient for RemoteHead {
     fn commit_batch(&self, request: Vec<u8>) -> DeliveryResult {
-        let response = self
-            .client
-            .call("TallyOwlCollector", "commit-batch", request)?;
+        let response = self.call("commit-batch", request)?;
 
         // An application error rides back with transport status 0 and the
         // variant `ServiceError`. Reading the variant is what tells a permanent
@@ -90,8 +179,7 @@ impl HeadClient for RemoteHead {
 /// own operation and the head serves them on one listener.
 impl KeyDirectory for RemoteHead {
     fn resolve(&self, credential: &str) -> Result<ResolveKeyResponse, TallyOwlError> {
-        let response = self.client.call(
-            "TallyOwlCollector",
+        let response = self.call(
             "resolve-key",
             encode_resolve_key_request(&ResolveKeyRequest {
                 credential: credential.to_string(),
@@ -129,8 +217,7 @@ impl crate::policy::PolicySource for RemoteHead {
         };
         use tallyowl_collector_api::types::FetchPolicyRequest;
 
-        let response = self.client.call(
-            "TallyOwlCollector",
+        let response = self.call(
             "fetch-policy",
             encode_fetch_policy_request(&FetchPolicyRequest {
                 source_id: source_id.to_vec(),

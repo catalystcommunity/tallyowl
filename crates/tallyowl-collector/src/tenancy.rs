@@ -37,10 +37,35 @@
 //!
 //! The refusal period exists because a wrong credential must not become a way
 //! to make a collector call the head as fast as a client can send batches.
+//!
+//! # What a caller without a key can cost
+//!
+//! The credential is a string a client chose, and it arrives before anything
+//! has proved who sent it. So nothing here may grow with the number of distinct
+//! strings a client can invent:
+//!
+//! - a credential longer than [`MAX_CREDENTIAL_BYTES`] is refused before any
+//!   lookup and before it becomes a map key;
+//! - the refusal memory holds at most [`MAX_REFUSED`] entries, and an insert
+//!   that finds it full removes the expired ones first;
+//! - when it is still full, unknown credentials are refused here for one
+//!   refusal period without a call to the head. A credential this collector
+//!   already resolved keeps working through that period.
+//!
+//! # What a head outage costs
+//!
+//! A call to a head that does not answer takes the whole connect timeout. When
+//! every batch made that call, an outage turned each batch into a multi-second
+//! wait, which is the opposite of what the grace period is for. So one failed
+//! call opens a short, jittered pause. Inside it a held answer is served at
+//! once and nothing calls the head. One caller for each credential asks the
+//! head at the end of a cache period; the others wait for that answer.
 
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::hash::{BuildHasher, Hasher};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tallyowl_collector_api::types::ResolveKeyResponse;
 use tallyowl_obs::error::{ErrorCode, TallyOwlError};
@@ -70,6 +95,23 @@ const FALLBACK_TTL_MS: i64 = 30_000;
 /// a request amplifier.
 const REFUSAL_MEMORY_MS: i64 = 5_000;
 
+/// The longest credential this collector looks at. A TallyOwl key is far
+/// shorter. The bound exists because the credential arrives before anything
+/// has proved who sent it, and it becomes a map key.
+pub const MAX_CREDENTIAL_BYTES: usize = 256;
+
+/// How many refusals are remembered at one time.
+const MAX_REFUSED: usize = 10_000;
+
+/// How many held answers trigger a sweep of the ones no outage could still use.
+const KNOWN_SWEEP_AT: usize = 4_096;
+
+/// The pause after a call to the head fails, before the next call. The real
+/// pause is a jittered value between the two, so a fleet of collectors does not
+/// return to a recovering head at one instant.
+const HEAD_PAUSE_MIN_MS: i64 = 1_000;
+const HEAD_PAUSE_MAX_MS: i64 = 5_000;
+
 #[derive(Debug, Clone)]
 struct Held {
     tenancy: Tenancy,
@@ -98,6 +140,28 @@ pub struct TenancyResolver {
     /// which a revocation had not yet taken effect.
     pub served_stale: AtomicU64,
     pub lookups: AtomicU64,
+    /// Credentials refused here without a call to the head: one that is too
+    /// long, or an unknown one while the refusal memory is full.
+    pub refused_locally: AtomicU64,
+    /// No call to the head starts before this time. Zero means no pause.
+    head_unreachable_until: AtomicI64,
+    /// Unknown credentials are refused here before this time, because the
+    /// refusal memory is full.
+    unknown_refused_until: AtomicI64,
+    /// One lock for each credential that is asking the head right now, so a
+    /// cache period that ends under load makes one call and not one for each
+    /// worker. An entry leaves when its last holder does.
+    flights: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Callers waiting for another caller's answer. A test reads it to know a
+    /// second caller has arrived, without waiting for time to pass.
+    pub waiting_for_flight: AtomicU64,
+    jitter: RandomState,
+}
+
+/// The outcome of looking only at what this collector already holds.
+enum FromMemory {
+    Answer(Result<Tenancy, TallyOwlError>),
+    AskTheHead,
 }
 
 impl TenancyResolver {
@@ -109,6 +173,12 @@ impl TenancyResolver {
             grace_ms,
             served_stale: AtomicU64::new(0),
             lookups: AtomicU64::new(0),
+            refused_locally: AtomicU64::new(0),
+            head_unreachable_until: AtomicI64::new(0),
+            unknown_refused_until: AtomicI64::new(0),
+            flights: Mutex::new(HashMap::new()),
+            waiting_for_flight: AtomicU64::new(0),
+            jitter: RandomState::new(),
         }
     }
 
@@ -117,6 +187,8 @@ impl TenancyResolver {
     pub fn forget_all(&self) {
         self.known.write().expect("tenancy lock").clear();
         self.refused.write().expect("tenancy lock").clear();
+        self.head_unreachable_until.store(0, Ordering::Relaxed);
+        self.unknown_refused_until.store(0, Ordering::Relaxed);
     }
 
     pub fn resolve(&self, credential: &str) -> Result<Tenancy, TallyOwlError> {
@@ -131,13 +203,56 @@ impl TenancyResolver {
             ).retryable(false));
         }
 
+        // Before the credential is a map key or a request to the head. It came
+        // from a client that has proved nothing yet.
+        if credential.len() > MAX_CREDENTIAL_BYTES {
+            self.refused_locally.fetch_add(1, Ordering::Relaxed);
+            return Err(TallyOwlError::new(
+                ErrorCode::Unauthenticated,
+                format!(
+                    "This credential is {} bytes and a TallyOwl key is at most {MAX_CREDENTIAL_BYTES}. Check `collector.apiKey` for the application that sends this data.",
+                    credential.len()
+                ),
+            )
+            .retryable(false));
+        }
+
+        if let FromMemory::Answer(answer) = self.answer_from_memory(credential, now) {
+            return answer;
+        }
+
+        // One caller for each credential asks the head. The others wait here,
+        // and then find the answer it left.
+        let flight = self.join_flight(credential);
+        self.waiting_for_flight.fetch_add(1, Ordering::Relaxed);
+        let turn = flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.waiting_for_flight.fetch_sub(1, Ordering::Relaxed);
+        let answer = match self.answer_from_memory(credential, now) {
+            FromMemory::Answer(answer) => answer,
+            FromMemory::AskTheHead => self.ask_the_head(credential, now),
+        };
+        drop(turn);
+        self.leave_flight(credential, flight);
+        answer
+    }
+
+    /// Answer from what this collector holds, or say the head must be asked.
+    fn answer_from_memory(&self, credential: &str, now: i64) -> FromMemory {
         // A held answer that is still fresh, and whose key has not expired
         // while it was held. The expiry is checked here as well as at the head,
         // because a key that expires inside the cache period must stop at its
         // expiry rather than at the end of the period.
-        if let Some(held) = self.known.read().expect("tenancy lock").get(credential) {
+        let held = self
+            .known
+            .read()
+            .expect("tenancy lock")
+            .get(credential)
+            .cloned();
+        if let Some(held) = &held {
             if now < held.fresh_until && held.expires_at.is_none_or(|at| now < at) {
-                return Ok(held.tenancy);
+                return FromMemory::Answer(Ok(held.tenancy));
             }
         }
 
@@ -145,17 +260,67 @@ impl TenancyResolver {
         // not become a way to make this collector call the head in a loop.
         if let Some(refused) = self.refused.read().expect("tenancy lock").get(credential) {
             if now < refused.until {
-                return Err(TallyOwlError::new(
+                return FromMemory::Answer(Err(TallyOwlError::new(
                     ErrorCode::Unauthenticated,
                     refused.message.clone(),
                 )
-                .retryable(false));
+                .retryable(false)));
             }
         }
 
+        // The head did not answer a moment ago. Asking again for every batch
+        // would make every batch wait for the connect timeout, so inside the
+        // pause the held answer decides and nothing calls the head.
+        if now < self.head_unreachable_until.load(Ordering::Relaxed) {
+            return FromMemory::Answer(self.through_an_outage(
+                held,
+                now,
+                "The head did not answer a moment ago.",
+            ));
+        }
+
+        // The refusal memory is full of unknown credentials. One more unknown
+        // credential is refused here, so a flood of invented keys cannot become
+        // a flood of calls to the head. A credential that already resolved is
+        // not unknown, and it goes on to ask.
+        if held.is_none() && now < self.unknown_refused_until.load(Ordering::Relaxed) {
+            self.refused_locally.fetch_add(1, Ordering::Relaxed);
+            return FromMemory::Answer(Err(TallyOwlError::unavailable(
+                "This collector is receiving too many credentials it does not know, so it is not checking new ones for a few seconds. Send this batch again.",
+            )));
+        }
+
+        FromMemory::AskTheHead
+    }
+
+    /// What a held answer is worth while the head cannot be asked. An answer
+    /// that already worked may carry on for the grace period. Nothing new
+    /// starts working.
+    fn through_an_outage(
+        &self,
+        held: Option<Held>,
+        now: i64,
+        cause: &str,
+    ) -> Result<Tenancy, TallyOwlError> {
+        match held {
+            Some(held)
+                if now < held.fresh_until + self.grace_ms
+                    && held.expires_at.is_none_or(|at| now < at) =>
+            {
+                self.served_stale.fetch_add(1, Ordering::Relaxed);
+                Ok(held.tenancy)
+            }
+            _ => Err(TallyOwlError::unavailable(format!(
+                "We cannot check this application's key right now, so this batch was not accepted. Send it again. {cause}"
+            ))),
+        }
+    }
+
+    fn ask_the_head(&self, credential: &str, now: i64) -> Result<Tenancy, TallyOwlError> {
         self.lookups.fetch_add(1, Ordering::Relaxed);
         match self.directory.resolve(credential) {
             Ok(answer) => {
+                self.head_unreachable_until.store(0, Ordering::Relaxed);
                 let tenancy = to_tenancy(&answer)?;
                 // A head that answers with a key that has already expired is a
                 // head defect. The collector still refuses it, because the
@@ -174,14 +339,26 @@ impl TenancyResolver {
                 } else {
                     FALLBACK_TTL_MS
                 };
-                self.known.write().expect("tenancy lock").insert(
-                    credential.to_string(),
-                    Held {
-                        tenancy,
-                        fresh_until: now + ttl,
-                        expires_at: answer.expires_at,
-                    },
-                );
+                {
+                    let mut known = self.known.write().expect("tenancy lock");
+                    if known.len() >= KNOWN_SWEEP_AT {
+                        // An answer past its grace period, or past its key's
+                        // expiry, can never be served again.
+                        let grace = self.grace_ms;
+                        known.retain(|_, held| {
+                            now < held.fresh_until + grace
+                                && held.expires_at.is_none_or(|at| now < at)
+                        });
+                    }
+                    known.insert(
+                        credential.to_string(),
+                        Held {
+                            tenancy,
+                            fresh_until: now + ttl,
+                            expires_at: answer.expires_at,
+                        },
+                    );
+                }
                 self.refused
                     .write()
                     .expect("tenancy lock")
@@ -191,40 +368,82 @@ impl TenancyResolver {
             // The head said no. Drop the held answer at once: a refusal is the
             // one outcome that must not wait for a period to end.
             Err(e) if e.code == ErrorCode::Unauthenticated || !e.retryable => {
+                self.head_unreachable_until.store(0, Ordering::Relaxed);
                 self.known.write().expect("tenancy lock").remove(credential);
-                self.refused.write().expect("tenancy lock").insert(
-                    credential.to_string(),
-                    Refused {
-                        message: e.message.clone(),
-                        until: now + REFUSAL_MEMORY_MS,
-                    },
-                );
+                self.remember_refusal(credential, &e.message, now);
                 Err(e.retryable(false))
             }
-            // The head could not be reached. An answer that already worked may
-            // carry on for the grace period. Nothing new starts working.
+            // The head could not be reached. Open the pause, so the batches
+            // behind this one do not each pay the same timeout.
             Err(e) => {
+                self.head_unreachable_until
+                    .store(now + self.head_pause_ms(now), Ordering::Relaxed);
                 let held = self
                     .known
                     .read()
                     .expect("tenancy lock")
                     .get(credential)
                     .cloned();
-                match held {
-                    Some(held)
-                        if now < held.fresh_until + self.grace_ms
-                            && held.expires_at.is_none_or(|at| now < at) =>
-                    {
-                        self.served_stale.fetch_add(1, Ordering::Relaxed);
-                        Ok(held.tenancy)
-                    }
-                    _ => Err(TallyOwlError::unavailable(format!(
-                        "We cannot check this application's key right now, so this batch was not accepted. Send it again. {}",
-                        e.message
-                    ))),
-                }
+                self.through_an_outage(held, now, &e.message)
             }
         }
+    }
+
+    /// Remember one refusal, inside the bound.
+    fn remember_refusal(&self, credential: &str, message: &str, now: i64) {
+        let mut refused = self.refused.write().expect("tenancy lock");
+        if refused.len() >= MAX_REFUSED && !refused.contains_key(credential) {
+            refused.retain(|_, entry| now < entry.until);
+        }
+        if refused.len() >= MAX_REFUSED && !refused.contains_key(credential) {
+            // Every remembered refusal is still live. This one is not
+            // remembered, and unknown credentials stop reaching the head until
+            // some of them expire.
+            self.unknown_refused_until
+                .store(now + REFUSAL_MEMORY_MS, Ordering::Relaxed);
+            return;
+        }
+        refused.insert(
+            credential.to_string(),
+            Refused {
+                message: message.to_string(),
+                until: now + REFUSAL_MEMORY_MS,
+            },
+        );
+    }
+
+    /// A pause between the two bounds. The value only has to differ between
+    /// collectors and between outages, so a keyed hash of the time is enough.
+    fn head_pause_ms(&self, now: i64) -> i64 {
+        let mut hasher = self.jitter.build_hasher();
+        hasher.write_i64(now);
+        hasher.write_u64(self.lookups.load(Ordering::Relaxed));
+        let spread = (HEAD_PAUSE_MAX_MS - HEAD_PAUSE_MIN_MS) as u64;
+        HEAD_PAUSE_MIN_MS + (hasher.finish() % (spread + 1)) as i64
+    }
+
+    fn join_flight(&self, credential: &str) -> Arc<Mutex<()>> {
+        let mut flights = self.flights.lock().expect("tenancy lock");
+        Arc::clone(flights.entry(credential.to_string()).or_default())
+    }
+
+    fn leave_flight(&self, credential: &str, flight: Arc<Mutex<()>>) {
+        let mut flights = self.flights.lock().expect("tenancy lock");
+        // The map holds one reference and this caller holds one. Anything above
+        // two is another caller, and the entry stays for it.
+        if Arc::strong_count(&flight) <= 2 {
+            flights.remove(credential);
+        }
+    }
+
+    /// How many refusals this collector remembers.
+    pub fn refused_count(&self) -> usize {
+        self.refused.read().expect("tenancy lock").len()
+    }
+
+    /// True while a failed call to the head is keeping the next one back.
+    pub fn head_paused_at(&self, now: i64) -> bool {
+        now < self.head_unreachable_until.load(Ordering::Relaxed)
     }
 
     /// How many credentials this collector holds an answer for.
@@ -502,6 +721,206 @@ mod tests {
         resolver.resolve_at("key-a", 1).unwrap();
         assert_eq!(directory.call_count(), 2);
         assert_eq!(resolver.resolved_count(), 1);
+    }
+
+    #[test]
+    fn a_credential_that_is_too_long_is_refused_without_asking_the_head_or_being_remembered() {
+        let directory = FakeDirectory::new();
+        let resolver = resolver(&directory);
+        let long = "k".repeat(MAX_CREDENTIAL_BYTES + 1);
+
+        let failure = resolver.resolve_at(&long, 1).unwrap_err();
+        assert_eq!(failure.code, ErrorCode::Unauthenticated);
+        assert!(!failure.retryable);
+        assert!(failure.message.contains("collector.apiKey"));
+        assert!(
+            !failure.message.contains(&long),
+            "no credential in a message"
+        );
+        assert_eq!(directory.call_count(), 0);
+        assert_eq!(
+            resolver.refused_count(),
+            0,
+            "a long string is never a map key"
+        );
+        assert_eq!(resolver.refused_locally.load(Ordering::Relaxed), 1);
+
+        // The bound itself is a legal length.
+        directory.add(&"k".repeat(MAX_CREDENTIAL_BYTES), None);
+        assert!(resolver
+            .resolve_at(&"k".repeat(MAX_CREDENTIAL_BYTES), 1)
+            .is_ok());
+    }
+
+    #[test]
+    fn the_refusal_memory_is_bounded_and_a_flood_of_unknown_keys_stops_reaching_the_head() {
+        let directory = FakeDirectory::new();
+        directory.add("known", None);
+        directory.add("new-but-valid", None);
+        directory.set_cache_ttl("known", 1_000);
+        let resolver = resolver(&directory);
+        resolver.resolve_at("known", 0).unwrap();
+
+        // More distinct wrong credentials than the memory holds, all inside
+        // one refusal period.
+        for index in 0..MAX_REFUSED + 1 {
+            assert!(resolver.resolve_at(&format!("wrong-{index}"), 10).is_err());
+        }
+        assert_eq!(
+            resolver.refused_count(),
+            MAX_REFUSED,
+            "the memory stops growing"
+        );
+        let asked = directory.call_count();
+
+        // The memory is full, so the next unknown credential is refused here.
+        // The refusal is retryable, because the credential may be a good one.
+        let failure = resolver.resolve_at("new-but-valid", 20).unwrap_err();
+        assert_eq!(failure.code, ErrorCode::Unavailable);
+        assert!(failure.retryable);
+        assert_eq!(directory.call_count(), asked, "the head was not asked");
+
+        // A credential that already resolved is not unknown. Its period has
+        // ended, and it still reaches the head.
+        assert!(resolver.resolve_at("known", 2_000).is_ok());
+        assert_eq!(directory.call_count(), asked + 1);
+
+        // When the refusals expire, the memory empties on the next insert and
+        // a new credential works again.
+        assert!(resolver
+            .resolve_at("wrong-again", 10 + REFUSAL_MEMORY_MS)
+            .is_err());
+        assert_eq!(resolver.refused_count(), 1, "the expired refusals went");
+        assert!(resolver
+            .resolve_at("new-but-valid", 20 + REFUSAL_MEMORY_MS)
+            .is_ok());
+    }
+
+    #[test]
+    fn one_failed_call_to_the_head_carries_the_batches_behind_it_without_another_call() {
+        // A call to a head that is gone takes the whole connect timeout. The
+        // grace period is worth nothing if every batch pays that first.
+        let directory = FakeDirectory::new();
+        directory.add("known", None);
+        directory.add("never-seen", None);
+        directory.set_cache_ttl("known", 1_000);
+        let resolver = resolver(&directory);
+        resolver.resolve_at("known", 0).unwrap();
+        directory.set_unreachable(true);
+
+        assert!(resolver.resolve_at("known", 5_000).is_ok());
+        let asked = directory.call_count();
+        assert!(resolver.head_paused_at(5_000));
+        assert!(
+            !resolver.head_paused_at(5_000 + HEAD_PAUSE_MAX_MS),
+            "the pause is bounded"
+        );
+        assert!(
+            resolver.head_paused_at(5_000 + HEAD_PAUSE_MIN_MS - 1),
+            "and it is never shorter than its floor"
+        );
+
+        // Inside the pause: served from the held answer, and the head is left
+        // alone. A credential with no held answer gets the same refusal an
+        // outage always gave it, also without a call.
+        for at in [5_001, 5_100, 5_999] {
+            assert!(resolver.resolve_at("known", at).is_ok());
+            let failure = resolver.resolve_at("never-seen", at).unwrap_err();
+            assert_eq!(failure.code, ErrorCode::Unavailable);
+        }
+        assert_eq!(directory.call_count(), asked, "nothing called the head");
+        assert_eq!(resolver.served_stale.load(Ordering::Relaxed), 4);
+
+        // The head comes back. The first call after the pause finds it, and
+        // the pause is gone.
+        directory.set_unreachable(false);
+        let after = 5_000 + HEAD_PAUSE_MAX_MS;
+        assert!(resolver.resolve_at("never-seen", after).is_ok());
+        assert!(!resolver.head_paused_at(after));
+    }
+
+    #[test]
+    fn the_pause_does_not_extend_an_answer_past_the_grace_period() {
+        let directory = FakeDirectory::new();
+        directory.add("known", None);
+        directory.set_cache_ttl("known", 1_000);
+        let resolver = resolver(&directory);
+        resolver.resolve_at("known", 0).unwrap();
+        directory.set_unreachable(true);
+
+        let last = 1_000 + GRACE - 1;
+        assert!(resolver.resolve_at("known", last).is_ok());
+        assert!(resolver.head_paused_at(last + 1));
+        assert!(
+            resolver.resolve_at("known", last + 1).is_err(),
+            "the grace period ended inside the pause"
+        );
+    }
+
+    #[test]
+    fn many_workers_at_the_end_of_a_period_make_one_call() {
+        use std::sync::mpsc;
+
+        /// A head that holds its first caller until the test lets it go.
+        struct SlowHead {
+            inner: Arc<FakeDirectory>,
+            entered: Mutex<Option<mpsc::Sender<()>>>,
+            release: Mutex<Option<mpsc::Receiver<()>>>,
+        }
+        impl KeyDirectory for SlowHead {
+            fn resolve(&self, credential: &str) -> Result<ResolveKeyResponse, TallyOwlError> {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                    if let Some(release) = self.release.lock().unwrap().take() {
+                        release.recv().unwrap();
+                    }
+                }
+                self.inner.resolve(credential)
+            }
+        }
+
+        let inner = FakeDirectory::new();
+        inner.add("key-a", None);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let resolver = Arc::new(TenancyResolver::new(
+            Arc::new(SlowHead {
+                inner: Arc::clone(&inner),
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(Some(release_rx)),
+            }),
+            GRACE,
+        ));
+
+        let first = {
+            let resolver = Arc::clone(&resolver);
+            std::thread::spawn(move || resolver.resolve_at("key-a", 1))
+        };
+        entered_rx.recv().unwrap();
+
+        const WAITERS: u64 = 4;
+        let waiters: Vec<_> = (0..WAITERS)
+            .map(|_| {
+                let resolver = Arc::clone(&resolver);
+                std::thread::spawn(move || resolver.resolve_at("key-a", 1))
+            })
+            .collect();
+        // Every waiter is now behind the first caller. This reads a counter
+        // rather than waiting for time to pass.
+        while resolver.waiting_for_flight.load(Ordering::Relaxed) < WAITERS {
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+
+        let answer = first.join().unwrap().unwrap();
+        for waiter in waiters {
+            assert_eq!(waiter.join().unwrap().unwrap(), answer);
+        }
+        assert_eq!(inner.call_count(), 1, "one call served every worker");
+        assert!(
+            resolver.flights.lock().unwrap().is_empty(),
+            "a finished flight leaves nothing behind"
+        );
     }
 
     #[test]

@@ -129,6 +129,27 @@ pub fn declare(metrics: &Registry) {
          than the count of distinct values.",
     );
 
+    gauge(
+        "tallyowl_open_buffer_rows_count",
+        "Items that are durable in the append log and that no segment holds \
+         yet. It falls at each seal; a value that only rises means seals are \
+         failing.",
+    );
+    gauge(
+        "tallyowl_open_buffer_age_seconds",
+        "How long the oldest of those items has waited for a seal.",
+    );
+    counter(
+        "tallyowl_seal_failures_total",
+        "Seals that did not publish. The items stay durable in the append log \
+         and stay answerable, and the append log cannot shrink until a seal \
+         succeeds.",
+    );
+    gauge(
+        "tallyowl_segment_cache_bytes",
+        "Bytes of opened segments held in memory for queries.",
+    );
+
     // Integrity, from FAILURE_MODES.md section 13.
     counter(
         "tallyowl_integrity_pages_verified_total",
@@ -255,9 +276,54 @@ pub fn sample(store: &SegmentedStore, metrics: &Arc<Registry>) {
     if let Ok(bytes) = store.catalog().locator_bytes() {
         metrics.set_gauge("tallyowl_locator_bytes", &none, bytes as i64);
     }
-    if let Ok(tombstones) = store.catalog().tombstones() {
+    if let Ok(tombstones) = store.catalog().tombstone_set() {
         metrics.set_gauge("tallyowl_tombstones_count", &none, tombstones.len() as i64);
     }
+
+    let (open_rows, open_age_ms) = store.open_buffer();
+    metrics.set_gauge("tallyowl_open_buffer_rows_count", &none, open_rows as i64);
+    metrics.set_gauge(
+        "tallyowl_open_buffer_age_seconds",
+        &none,
+        open_age_ms / 1_000,
+    );
+    metrics.set_gauge(
+        "tallyowl_segment_cache_bytes",
+        &none,
+        store.cached_segment_bytes() as i64,
+    );
+    metrics.set_gauge(
+        "tallyowl_segments_damaged_count",
+        &none,
+        store.unreadable_count() as i64,
+    );
+
+    // Counters rise where the work happens, and the store keeps the count
+    // since the last sample, exactly as it does for a space refusal below.
+    let add = |name: &str, label: &[(&str, &str)], count: u64| {
+        if count > 0 {
+            metrics.add(name, &labels(label), count);
+        }
+    };
+    add(
+        "tallyowl_seal_failures_total",
+        &[],
+        store.take_seal_failures(),
+    );
+    add(
+        "tallyowl_integrity_failures_total",
+        &[("tier", "local")],
+        store.take_integrity_failures(),
+    );
+    let (compactions, restarts, erased) = store.take_compaction_counts();
+    for (outcome, count) in ["completed", "abandoned-for-space", "failed"]
+        .iter()
+        .zip(compactions)
+    {
+        add("tallyowl_compactions_total", &[("outcome", outcome)], count);
+    }
+    add("tallyowl_compaction_restarts_total", &[], restarts);
+    add("tallyowl_rows_erased_total", &[], erased);
     if let Ok(generation) = store.catalog().tombstone_generation() {
         metrics.set_gauge(
             "tallyowl_tombstone_generation_count",

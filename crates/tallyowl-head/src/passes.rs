@@ -52,6 +52,20 @@ impl Runner for AlertRunner {
             return Outcome::Done;
         }
 
+        // **A backlog collapses to one evaluation.** The scheduler queues a
+        // rule on every interval whether or not the last one ran, so a slow
+        // worker builds a queue of evaluations of one rule. An evaluation reads
+        // the data as it is now, not as it was when it was queued, so once the
+        // rule has been evaluated after this work was queued there is nothing
+        // left for this work to find out.
+        if let Ok(Some(instance)) = self.alerts.instance(work.project_id, &work.rule_id) {
+            if instance.last_evaluated_at > work.queued_at {
+                self.metrics
+                    .increment("tallyowl_alert_evaluations_skipped_total", &labels(&[]));
+                return Outcome::Done;
+            }
+        }
+
         // The delay against the schedule. `docs/ALERTS.md` section 8: "a rising
         // delay means that alerts no longer detect at their configured
         // interval", and it is the indicator that matters.
@@ -113,7 +127,10 @@ pub struct NotificationRunner {
     pub alerts: Arc<AlertService>,
     pub store: Arc<SegmentedStore>,
     pub metrics: Arc<Registry>,
+    /// The whole of one delivery: the connection, the request, and the answer.
     pub timeout: Duration,
+    /// Which addresses a webhook may reach. See `notify::Egress`.
+    pub egress: crate::notify::Egress,
     /// Resolves a `secret_ref` to the secret it names. A secret is a reference
     /// and never a value, which is why this is a function rather than a string.
     pub secrets: SecretLookup,
@@ -225,6 +242,7 @@ impl NotificationRunner {
                         .and_then(|reference| (self.secrets)(reference))
                         .unwrap_or_default(),
                     timeout: self.timeout,
+                    egress: self.egress.clone(),
                 }))
             }
             tallyowl_control_api::types::NotificationTarget_kind::CsilCallback => {
@@ -236,6 +254,11 @@ impl NotificationRunner {
                 })?;
                 Ok(Box::new(CsilCallback {
                     address: target.url.clone().unwrap_or_default(),
+                    secret: target
+                        .secret_ref
+                        .as_deref()
+                        .and_then(|reference| (self.secrets)(reference))
+                        .unwrap_or_default(),
                     timeout: self.timeout,
                     sender,
                 }))
@@ -249,6 +272,7 @@ impl NotificationRunner {
     /// address. `docs/ALERTS.md` section 6 asks for both.
     fn record(&self, work: &Work, attempt: &Attempt) {
         let record = tallyowl_store::control::NotificationRecord {
+            project_id: work.project_id,
             rule_id: work.rule_id.clone(),
             target: work.target.clone(),
             state: work.state.clone(),
@@ -268,7 +292,10 @@ impl NotificationRunner {
             at: tallyowl_obs::time::now_ms(),
         };
         let _ = self.store.catalog().put_notification(&record);
-        let _ = self.store.catalog().trim_notifications(500);
+        let _ = self
+            .store
+            .catalog()
+            .trim_notifications_for(work.project_id, 500);
     }
 }
 
@@ -418,24 +445,28 @@ impl ProjectorRunner {
     }
 
     /// Export one range to Parquet.
+    ///
+    /// **The file always lands under `export_root/<project>/`.** A destination
+    /// is a file name and nothing more: see [`export_file_name`]. A request that
+    /// chose the whole path could name the open catalog, or another project's
+    /// export, and the head would have truncated it.
     fn export(&self, work: &Work) -> Result<String, TallyOwlError> {
-        let into = match work.destination.is_empty() {
-            true => self.export_root.join(format!(
+        check_export_range(work.range_start, work.range_end)?;
+        let name = match export_file_name(&work.destination)? {
+            Some(name) => name,
+            // The moment is in the name because an export never replaces a
+            // file, and the same range is a reasonable thing to export twice.
+            None => format!(
                 "{}-{}-{}.parquet",
-                tallyowl_store::row::hex(&work.project_id),
                 work.range_start,
-                work.range_end
-            )),
-            false => std::path::PathBuf::from(&work.destination),
+                work.range_end,
+                tallyowl_obs::time::now_ms()
+            ),
         };
-        if let Some(parent) = into.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                TallyOwlError::invalid_argument(format!(
-                    "The export cannot be written to {}. {e}",
-                    parent.display()
-                ))
-            })?;
-        }
+        let into = self
+            .export_root
+            .join(tallyowl_store::row::hex(&work.project_id))
+            .join(name);
         let generation = self
             .store
             .tombstone_generation()
@@ -452,13 +483,53 @@ impl ProjectorRunner {
                 reserve_bytes: self.reserve_bytes,
             },
         )
-        .map_err(|e| TallyOwlError::internal(e.message))?;
+        // A file that is already there, or a range that is too wide, stays
+        // that way however often the pass runs again.
+        .map_err(|e| TallyOwlError::invalid_argument(e.message))?;
         Ok(format!(
             "{} rows were written to {}.",
             manifest.rows,
             into.display()
         ))
     }
+}
+
+/// The file name an export request asks for, or `None` when it asks for none.
+///
+/// **A destination is one plain file name.** It is joined under the export
+/// directory of its own project, so it cannot be absolute, cannot hold a
+/// separator, and cannot be `.` or `..`. These are the component rules the
+/// dashboard's asset path uses, for the same reason: the text comes from a
+/// caller and the path is one this process can write.
+pub fn export_file_name(destination: &str) -> Result<Option<String>, TallyOwlError> {
+    if destination.is_empty() {
+        return Ok(None);
+    }
+    let plain = destination != "."
+        && destination != ".."
+        && !destination.starts_with('.')
+        && !destination
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c == ':' || c.is_control());
+    if !plain {
+        return Err(TallyOwlError::invalid_argument(format!(
+            "`{destination}` is not a file name an export can use. Give a plain name such as `orders-2026-08.parquet`, with no directory in it. TallyOwl puts the file in the export directory of this project."
+        )));
+    }
+    Ok(Some(destination.to_string()))
+}
+
+/// Refuse an export that names no range.
+///
+/// A request with no range reached the pass as `0..0`, wrote an empty file, and
+/// reported success. Somebody then believed they held an export.
+pub fn check_export_range(range_start: i64, range_end: i64) -> Result<(), TallyOwlError> {
+    if range_end <= range_start {
+        return Err(TallyOwlError::invalid_argument(
+            "An export needs a time range, and the end must be after the start. Give `range` with `range_start` and `range_end` in milliseconds.",
+        ));
+    }
+    Ok(())
 }
 
 /// A stable identifier for one retention predicate.
@@ -486,16 +557,34 @@ pub struct Scheduler {
     pub alerts: Arc<AlertService>,
     pub workflows: Arc<Workflows>,
     pub logger: Arc<Logger>,
-    /// The last time each rule was queued, so a rule is queued on its interval
+    /// What this scheduler remembers about each rule.
+    ///
+    /// **The key is the project and the rule identifier together.** A rule
+    /// identifier is unique inside one project and no further, so two projects
+    /// may each hold a rule called `error-rate`. Keyed by the identifier alone,
+    /// queueing one moved the other's due time forward, and with equal
+    /// intervals the second never evaluated: one tenant silenced another
+    /// tenant's alert, and nothing said so.
+    rules: std::sync::Mutex<std::collections::BTreeMap<RuleKey, RuleSchedule>>,
+    /// Why the last sweep failed, while it is failing. It is said once when it
+    /// starts and once when it ends: a sweep runs every second, and a durable
+    /// queue that is down for an hour is one fact and not 3,600 log lines.
+    sweep_failure: std::sync::Mutex<Option<String>>,
+}
+
+type RuleKey = ([u8; 16], String);
+
+struct RuleSchedule {
+    /// The last time the rule was queued, so a rule is queued on its interval
     /// rather than on every tick.
-    last: std::sync::Mutex<std::collections::BTreeMap<String, i64>>,
+    last: Option<i64>,
     /// A stagger for each rule, so a thousand rules on one interval do not all
     /// evaluate on the same second. `docs/ALERTS.md` section 7.
-    stagger: std::sync::Mutex<std::collections::BTreeMap<String, i64>>,
-    /// When this scheduler first saw each rule. The stagger is measured from
+    stagger: i64,
+    /// When this scheduler first saw the rule. The stagger is measured from
     /// here, and measuring it from `now` instead is what stopped a rule ever
     /// becoming due.
-    seen: std::sync::Mutex<std::collections::BTreeMap<String, i64>>,
+    seen: i64,
 }
 
 impl Scheduler {
@@ -508,24 +597,62 @@ impl Scheduler {
             alerts,
             workflows,
             logger,
-            last: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-            stagger: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-            seen: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            rules: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            sweep_failure: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Why the sweep is failing, or `None` while it runs. The head reports it
+    /// on its `workflow-queue` check.
+    pub fn sweep_failure(&self) -> Option<String> {
+        self.sweep_failure.lock().expect("scheduler").clone()
     }
 
     /// One tick: queue what is due, and return the queues to their ready state.
     pub fn tick(&self, now: i64) -> Result<usize, TallyOwlError> {
         // The sweep first. Work that a dead worker was holding should be
         // available to this round rather than to the next one.
-        if let Err(failure) = self.workflows.sweep() {
-            self.logger.error(
-                "The workflow sweep did not run, so nothing will be retried until it does.",
-                &[("reason", &failure.message)],
-            );
+        match self.workflows.sweep() {
+            Ok(_) => {
+                if self
+                    .sweep_failure
+                    .lock()
+                    .expect("scheduler")
+                    .take()
+                    .is_some()
+                {
+                    self.logger.info("The workflow sweep runs again.", &[]);
+                }
+            }
+            Err(failure) => {
+                let mut held = self.sweep_failure.lock().expect("scheduler");
+                if held.is_none() {
+                    self.logger.error(
+                        "The workflow sweep did not run, so nothing will be retried until it does.",
+                        &[("reason", &failure.message)],
+                    );
+                }
+                *held = Some(failure.message);
+            }
         }
 
         let rules = self.alerts.every_rule()?;
+
+        // A rule that was removed leaves nothing behind. Without this the map
+        // grew with every rule the installation ever held, and a rule removed
+        // and written again kept the first one's schedule.
+        let live: std::collections::BTreeSet<RuleKey> = rules
+            .iter()
+            .filter_map(|rule| {
+                let project_id = <[u8; 16]>::try_from(rule.project_id.as_slice()).ok()?;
+                Some((project_id, rule.rule_id.clone()))
+            })
+            .collect();
+        self.rules
+            .lock()
+            .expect("scheduler")
+            .retain(|key, _| live.contains(key));
+
         let mut queued = 0;
         for rule in rules {
             if !rule.enabled {
@@ -536,36 +663,32 @@ impl Scheduler {
                 Err(_) => continue,
             };
             let interval = rule.interval_ms.max(crate::alerts::MIN_INTERVAL_MS);
-            let offset = *self
-                .stagger
-                .lock()
-                .expect("scheduler")
-                .entry(rule.rule_id.clone())
-                .or_insert_with(|| stagger_for(&rule.rule_id, interval));
-            let mut last = self.last.lock().expect("scheduler");
-            // **The stagger is measured from when this scheduler first saw the
-            // rule, not from now.** Measuring it from now moves the deadline
-            // forward on every tick, so a rule is always about to be due and
-            // never is. The running loop found that and no test did: every test
-            // called `tick` with a time it chose.
-            let first_seen = *self
-                .seen
-                .lock()
-                .expect("scheduler")
-                .entry(rule.rule_id.clone())
-                .or_insert(now);
-            let due_at = match last.get(&rule.rule_id) {
-                Some(previous) => previous + interval,
-                // The first evaluation of a rule waits its stagger, so a
-                // restart does not evaluate every rule in the installation on
-                // the same second.
-                None => first_seen + offset,
-            };
-            if now < due_at {
-                continue;
+            {
+                let mut held = self.rules.lock().expect("scheduler");
+                // **The stagger is measured from when this scheduler first saw
+                // the rule, not from now.** Measuring it from now moves the
+                // deadline forward on every tick, so a rule is always about to
+                // be due and never is. The running loop found that and no test
+                // did: every test called `tick` with a time it chose.
+                let schedule = held
+                    .entry((project_id, rule.rule_id.clone()))
+                    .or_insert_with(|| RuleSchedule {
+                        last: None,
+                        stagger: stagger_for(&rule.rule_id, interval),
+                        seen: now,
+                    });
+                let due_at = match schedule.last {
+                    Some(previous) => previous + interval,
+                    // The first evaluation of a rule waits its stagger, so a
+                    // restart does not evaluate every rule in the installation
+                    // on the same second.
+                    None => schedule.seen + schedule.stagger,
+                };
+                if now < due_at {
+                    continue;
+                }
+                schedule.last = Some(now);
             }
-            last.insert(rule.rule_id.clone(), now);
-            drop(last);
 
             let mut work = Work::new(Kind::AlertEvaluation, project_id);
             work.rule_id = rule.rule_id.clone();

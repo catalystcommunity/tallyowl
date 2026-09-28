@@ -9,7 +9,9 @@ metadata:
   labels:
     {{- include "tallyowl.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicas }}
+  # A maintenance Job needs the lock on the data directory, so the head stops
+  # while one is enabled.
+  replicas: {{ ternary 0 .Values.replicas .Values.deployment.maintenance.enabled }}
   serviceName: {{ include "tallyowl.fullname" . }}-nodes
   podManagementPolicy: Parallel
   selector:
@@ -23,7 +25,18 @@ spec:
         # A configuration change restarts the pods. Without this, an edited
         # value waits silently for the next unrelated restart.
         checksum/config: {{ include "tallyowl.settings" . | sha256sum }}
+        {{- with .Values.deployment.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      # Kubernetes puts a variable in the pod for each Service in the
+      # namespace, named after the Service: `TALLYOWL_PORT`,
+      # `TALLYOWL_CORNDOGS_SERVICE_HOST`, and so on. The loader reads every
+      # `TALLYOWL_*` variable as a setting, so each start warned about two
+      # dozen settings that do not exist. TallyOwl finds its peers through
+      # configuration, not through these variables.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.deployment.terminationGracePeriodSeconds }}
       {{- if .Values.topologySpread.enabled }}
       topologySpreadConstraints:
         {{- range .Values.topologySpread.constraints }}
@@ -68,18 +81,46 @@ spec:
             - /etc/tallyowl/tallyowl.yaml
           workingDir: /var/lib/tallyowl
           env:
-            # The pod's stable name is the node's name, so a restarted pod is
-            # the same node rather than a new one.
-            - name: TALLYOWL_NODE__NAME
+            - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- if .Values.replication.listen }}
+            {{- $advertise := printf "$(POD_NAME).%s:%s" (include "tallyowl.nodesDomain" .) (include "tallyowl.port" .Values.replication.listen) }}
+            # The address other nodes dial for this node. `replication.listen`
+            # is what the process binds, and in a pod that is 0.0.0.0, which no
+            # peer can dial.
+            - name: TALLYOWL_REPLICATION__ADVERTISE
+              value: {{ $advertise | quote }}
+            # A peer names this node from that address, and a consensus ID is a
+            # hash of the name. The node takes the same name, so the two agree.
+            # The pod name is stable, so a restarted pod is the same node.
+            - name: TALLYOWL_NODE__NAME
+              value: {{ include "tallyowl.nodeNameFor" $advertise | quote }}
+            {{- else }}
+            # The pod's stable name is the node's name, so a restarted pod is
+            # the same node rather than a new one.
+            - name: TALLYOWL_NODE__NAME
+              value: "$(POD_NAME)"
+            {{- end }}
             # The failure domain is the host the pod landed on. The controller
             # places at most one voter of a tablet in each domain.
             - name: TALLYOWL_NODE__FAILURE_DOMAIN
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if .Values.deployment.apiKeySecret.name }}
+            # Not `TALLYOWL_…`: the loader reads every variable with that prefix as
+            # a setting, and `config check` refuses one it does not know.
+            - name: SECRET_TALLYOWL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.deployment.apiKeySecret.name }}
+                  key: {{ .Values.deployment.apiKeySecret.key }}
+            {{- end }}
+            {{- with .Values.deployment.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: ingest
               containerPort: {{ include "tallyowl.port" .Values.head.listen }}
@@ -93,6 +134,12 @@ spec:
             - name: replication
               containerPort: {{ include "tallyowl.port" .Values.replication.listen }}
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: operational
+            periodSeconds: {{ .Values.deployment.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.deployment.startupProbe.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /livez
@@ -103,6 +150,10 @@ spec:
               path: /readyz
               port: operational
             periodSeconds: 10
+          {{- with .Values.deployment.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -111,11 +162,15 @@ spec:
             - name: config
               mountPath: /etc/tallyowl
               readOnly: true
-            {{- if .Values.persistence.enabled }}
             - name: data
               # head.dataDir is ./data/head, resolved against the working
-              # directory, so the whole data tree lives on the volume.
+              # directory, so the whole data tree lives on the volume. With
+              # persistence off this is an emptyDir, because the root file
+              # system is read-only.
               mountPath: /var/lib/tallyowl/data
+            {{- include "tallyowl.securityMounts" . | nindent 12 }}
+            {{- with .Values.deployment.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- if .Values.corndogsDeployment.enabled }}
         # The home profile runs one Corndogs beside the head. A larger
@@ -123,7 +178,7 @@ spec:
         # leaves this off.
         - name: corndogs
           image: "{{ .Values.corndogsDeployment.image }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.corndogsDeployment.imagePullPolicy | default .Values.image.pullPolicy }}
           env:
             - name: STORAGE_BACKEND
               value: {{ .Values.corndogs.backend | quote }}
@@ -133,20 +188,75 @@ spec:
               value: {{ .Values.corndogs.fsyncMode | quote }}
             - name: CORNDOGS_LISTEN
               value: "0.0.0.0:{{ include "tallyowl.port" .Values.corndogs.endpoint }}"
+            - name: CORNDOGS_HTTP_LISTEN
+              value: "0.0.0.0:{{ .Values.corndogsDeployment.operationalPort }}"
+            {{- if .Values.corndogsDeployment.tlsSecret }}
+            # D62. Corndogs serves TLS on its RPC port and reads the files
+            # again after a change, so a renewed Secret needs no restart.
+            - name: CORNDOGS_TLS_CERT_FILE
+              value: /etc/corndogs-tls/tls.crt
+            - name: CORNDOGS_TLS_KEY_FILE
+              value: /etc/corndogs-tls/tls.key
+            {{- end }}
           ports:
             - name: corndogs
               containerPort: {{ include "tallyowl.port" .Values.corndogs.endpoint }}
-          {{- if .Values.persistence.enabled }}
+            - name: corndogs-ops
+              containerPort: {{ .Values.corndogsDeployment.operationalPort }}
+          # Liveness: the queue port accepts a connection. Readiness: the
+          # health endpoint answers. A pod is ready only when each container is
+          # ready, so a queue that is not ready also takes the head out of its
+          # Service. That is correct for the home profile: a collector that
+          # cannot make a batch durable must not accept it.
+          livenessProbe:
+            tcpSocket:
+              port: corndogs
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: corndogs-ops
+            periodSeconds: 10
+          # The Pod Security `restricted` profile. The root file system stays
+          # writable: what this image writes outside its data directory is not
+          # something this chart can know.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          {{- with .Values.corndogsDeployment.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: data
               mountPath: /var/lib/corndogs
               subPath: corndogs
-          {{- end }}
+            {{- if .Values.corndogsDeployment.tlsSecret }}
+            - name: corndogs-tls
+              mountPath: /etc/corndogs-tls
+              readOnly: true
+            {{- end }}
         {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "tallyowl.fullname" . }}
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- include "tallyowl.securityVolumes" . | nindent 8 }}
+        {{- if and .Values.corndogsDeployment.enabled .Values.corndogsDeployment.tlsSecret }}
+        - name: corndogs-tls
+          secret:
+            secretName: {{ .Values.corndogsDeployment.tlsSecret }}
+            defaultMode: 0440
+        {{- end }}
+        {{- with .Values.deployment.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
   {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:

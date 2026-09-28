@@ -49,6 +49,31 @@ pub struct Ingest {
     /// The collection policy this head applies. `None` collects everything,
     /// which is what an installation that has configured no policy means.
     pub policy: Option<Arc<crate::policy::PolicyService>>,
+    /// The check that a batch's rows belong to the source that sent it. `None`
+    /// makes no check, which is what a test that has no control catalog wants.
+    /// A running head always has one.
+    pub sources: Option<SourceCheck>,
+}
+
+/// How the head checks tenancy at the durability boundary.
+///
+/// **The head never accepts tenancy from a payload either.** A collector
+/// resolves a credential to a source, and stamps that source's workspace and
+/// project on every item. D17 says the head verifies that each stamped
+/// destination is one the sender may write to. Before this check the head
+/// stored whatever workspace and project an envelope named, so anything that
+/// reached `head.listen` wrote rows into any project of any tenant.
+///
+/// The source record is the permitted set: one source belongs to one project.
+/// This does not identify the collector itself. That needs the connection to
+/// carry an identity, which is the mutual TLS work; this is the half that the
+/// catalog can answer today.
+pub struct SourceCheck {
+    pub store: Arc<tallyowl_store::SegmentedStore>,
+    /// Refuse a batch whose source this head has no record of. A collector
+    /// takes its source from this head's own `resolve-key` answer, so an
+    /// unknown one did not come from a collector of this installation.
+    pub require_known: bool,
 }
 
 /// The batch identifier a derived commit travels under.
@@ -162,28 +187,80 @@ impl Ingest {
 
         // The prior receipt answers first. A batch that already committed must
         // not commit again, whatever it now contains.
-        if let Some(prior) = self.store.receipt(source_id, batch_id) {
-            self.metrics.increment(
-                "tallyowl_commits_total",
-                &labels(&[("outcome", "deduplicated")]),
-            );
-            return Ok(CommitBatchResponse {
-                batch_id: request.batch.batch_id,
-                accepted: prior.accepted,
-                committed_at: prior.committed_at,
-                satisfied_policy: self.receipt_policy.clone(),
-                commit_watermark: prior.commit_watermark,
-                protocol_version: PROTOCOL_VERSION,
-                projector_version: PROJECTOR_VERSION,
-                rejected: None,
-                deduplicated: Some(true),
-            });
+        //
+        // One thing can still be owed. The golden signals of a batch travel in
+        // a second commit, and a first delivery whose second commit failed was
+        // answered with an error so that the collector delivers the batch
+        // again. That delivery arrives here: the batch has its receipt and the
+        // signals have none. It goes on, to commit the signals and nothing
+        // else. Before this, the receipt answered, and the signals of that
+        // batch were never produced.
+        let prior = self.store.receipt(source_id, batch_id);
+        if let Some(held) = &prior {
+            let signals_owed = self.golden_signal_bucket_ms > 0
+                && self
+                    .store
+                    .receipt(source_id, derived_batch_id(batch_id))
+                    .is_none();
+            if !signals_owed {
+                return Ok(self.deduplicated(request.batch.batch_id, held));
+            }
         }
+
+        // Who may this source write for. Read once for the batch, and before
+        // any item, so a batch from a source nobody knows costs one lookup.
+        let permitted = match &self.sources {
+            None => None,
+            Some(check) => match check
+                .store
+                .catalog()
+                .source(source_id)
+                .map_err(|e| to_service_error(StoreError::Unavailable(e.to_string())))?
+            {
+                Some(source) => Some((source.workspace_id, source.project_id)),
+                None if check.require_known => {
+                    self.metrics.increment(
+                        "tallyowl_commits_total",
+                        &labels(&[("outcome", "unknown-source")]),
+                    );
+                    return Err(TallyOwlError::new(
+                        tallyowl_obs::error::ErrorCode::PermissionDenied,
+                        "This batch names a source this installation has no record of, so nothing in it was stored. A collector takes its source from the key an application presents. Check that the key still exists, and that the collector forwards to the head that issued it.",
+                    )
+                    .retryable(false));
+                }
+                None => None,
+            },
+        };
 
         let mut rows = Vec::with_capacity(request.batch.items.len());
         let mut rejected: Vec<RejectedItem> = Vec::new();
         for item in &request.batch.items {
-            match project(item) {
+            // An exact number names a count of digits, and the projection
+            // writes that many. The bound is checked before the projection
+            // reads the item, so one item with an exponent of a trillion is one
+            // rejected item. Without it, the batch stopped the head, and the
+            // forwarder delivered it again after every restart.
+            let projected = payload_decimals_in_range(item)
+                .map_err(|e| crate::project::ProjectionFailure { reason: e.message })
+                .and_then(|()| project(item));
+            match projected {
+                Ok(row)
+                    if permitted.is_some_and(|(workspace, project)| {
+                        row.workspace_id != workspace || row.project_id != project
+                    }) =>
+                {
+                    self.metrics.increment(
+                        "tallyowl_events_rejected_total",
+                        &labels(&[("reason", "tenancy-mismatch")]),
+                    );
+                    rejected.push(RejectedItem {
+                        event_id: item.envelope.event_id.clone(),
+                        code: WireCode::PermissionDenied,
+                        message: "This item names a workspace or a project that its source does not belong to, so it was not stored. A collector stamps both from the credential and never from the payload."
+                            .to_string(),
+                    });
+                }
                 Ok(row) => rows.push(row),
                 Err(failure) => {
                     self.metrics.increment(
@@ -277,13 +354,6 @@ impl Ingest {
             rows = kept;
         }
 
-        // The traces this batch touched enter the provisional class before the
-        // commit returns, so a trace can never be committed and then forgotten
-        // by a projector that was not told about it.
-        if let Some(open) = &self.open_traces {
-            open.observe(&rows);
-        }
-
         // Golden signals, derived from the spans in this batch. They are
         // ordinary metric points, so `rate`, `increase`, `histogram_merge`, and
         // `quantile` read them exactly as they read a counter an application
@@ -293,42 +363,54 @@ impl Ingest {
         // which is derived from this one. A rollup that shared the batch would
         // make a re-delivery of the batch deduplicate the signals away, and a
         // rollup that used a random identifier would double them.
-        let signals = if self.golden_signal_bucket_ms > 0 {
-            crate::rollup::golden_signals(
-                &rows,
-                self.golden_signal_bucket_ms,
-                rows.first().map(|row| row.project_id).unwrap_or([0; 16]),
-            )
+        //
+        // **One rollup for each project in the batch.** A batch holds one
+        // source, and one source is one project, so this is one call. It used
+        // to name the first row's project for every row, which is only right
+        // while that stays true, and nothing here depends on it now.
+        let signals: Vec<tallyowl_store::row::EventRow> = if self.golden_signal_bucket_ms > 0 {
+            let mut by_project: std::collections::BTreeMap<
+                [u8; 16],
+                Vec<tallyowl_store::row::EventRow>,
+            > = std::collections::BTreeMap::new();
+            for row in rows.iter().filter(|row| row.kind == "span") {
+                by_project
+                    .entry(row.project_id)
+                    .or_default()
+                    .push(row.clone());
+            }
+            by_project
+                .iter()
+                .flat_map(|(project_id, spans)| {
+                    crate::rollup::golden_signals(spans, self.golden_signal_bucket_ms, *project_id)
+                })
+                .collect()
         } else {
             Vec::new()
         };
+
+        // The batch committed on an earlier delivery, and only its signals are
+        // owed. Nothing else below may run a second time.
+        if let Some(held) = &prior {
+            self.commit_signals(source_id, batch_id, signals)?;
+            return Ok(self.deduplicated(request.batch.batch_id, held));
+        }
+
+        // The traces this batch touched enter the provisional class before the
+        // commit returns, so a trace can never be committed and then forgotten
+        // by a projector that was not told about it.
+        if let Some(open) = &self.open_traces {
+            open.observe(&rows);
+        }
 
         let outcome = self
             .store
             .commit(source_id, batch_id, rows)
             .map_err(to_service_error)?;
 
-        if !signals.is_empty() {
-            let count = signals.len() as u64;
-            match self
-                .store
-                .commit(source_id, derived_batch_id(batch_id), signals)
-            {
-                Ok(_) => self
-                    .metrics
-                    .add("tallyowl_golden_signals_total", &labels(&[]), count),
-                Err(e) => {
-                    // A rollup that failed is not a batch that failed. The spans
-                    // are committed and the signals can be rebuilt from them,
-                    // which is what makes a derived projection safe to lose.
-                    self.metrics.increment(
-                        "tallyowl_events_rejected_total",
-                        &labels(&[("reason", "golden-signal-rollup")]),
-                    );
-                    let _ = e;
-                }
-            }
-        }
+        // After the batch, and an error when it fails. The batch is durable, so
+        // the collector's next delivery deduplicates it and commits only this.
+        self.commit_signals(source_id, batch_id, signals)?;
 
         self.metrics.increment(
             "tallyowl_commits_total",
@@ -359,8 +441,105 @@ impl Ingest {
     }
 }
 
+impl Ingest {
+    /// The answer to a batch that committed on an earlier delivery.
+    fn deduplicated(
+        &self,
+        batch_id: Vec<u8>,
+        prior: &tallyowl_store::Receipt,
+    ) -> CommitBatchResponse {
+        self.metrics.increment(
+            "tallyowl_commits_total",
+            &labels(&[("outcome", "deduplicated")]),
+        );
+        CommitBatchResponse {
+            batch_id,
+            accepted: prior.accepted,
+            committed_at: prior.committed_at,
+            satisfied_policy: self.receipt_policy.clone(),
+            commit_watermark: prior.commit_watermark,
+            protocol_version: PROTOCOL_VERSION,
+            projector_version: PROJECTOR_VERSION,
+            rejected: None,
+            deduplicated: Some(true),
+        }
+    }
+
+    /// Commit the golden signals of one batch, under the identifier derived
+    /// from the batch.
+    ///
+    /// **A failure here is an error to the collector, and it used to be
+    /// nothing.** The failure was counted and the batch was answered as
+    /// committed, so the collector finished its task and nothing ever produced
+    /// those signals: a gap in a request-rate chart with no cause anybody could
+    /// find. The batch itself is durable by now, so the retry costs one
+    /// deduplicated commit and the signals.
+    fn commit_signals(
+        &self,
+        source_id: [u8; 16],
+        batch_id: [u8; 16],
+        signals: Vec<tallyowl_store::row::EventRow>,
+    ) -> Result<(), TallyOwlError> {
+        if signals.is_empty() {
+            return Ok(());
+        }
+        let count = signals.len() as u64;
+        match self
+            .store
+            .commit(source_id, derived_batch_id(batch_id), signals)
+        {
+            Ok(_) => {
+                self.metrics
+                    .add("tallyowl_golden_signals_total", &labels(&[]), count);
+                Ok(())
+            }
+            Err(e) => {
+                self.metrics.increment(
+                    "tallyowl_events_rejected_total",
+                    &labels(&[("reason", "golden-signal-rollup")]),
+                );
+                Err(to_service_error(e))
+            }
+        }
+    }
+}
+
 fn to_id(bytes: &[u8]) -> Option<[u8; 16]> {
     bytes.try_into().ok()
+}
+
+/// The exact numbers a payload carries outside a typed value: a conversion's
+/// value and a campaign cost. A property and a measurement are checked where
+/// `tallyowl_wire` reads them.
+fn payload_decimals_in_range(
+    item: &tallyowl_collector_api::types::TelemetryItem,
+) -> Result<(), tallyowl_wire::WireError> {
+    // Money has a second bound: the digits before the decimal point. A value
+    // past it is refused here, where it costs its sender one rejected item. A
+    // stored one fails every attribution question of its project until
+    // somebody erases it, because a credited value has to add up.
+    let check = |decimal: &tallyowl_collector_api::types::CsilDecimal,
+                 named: &str|
+     -> Result<(), tallyowl_wire::WireError> {
+        tallyowl_wire::check_decimal(decimal.exponent)?;
+        let digits = decimal.mantissa.unsigned_abs().to_string().len() as i64;
+        let most = i64::from(crate::attribution::MAX_VALUE_DIGITS);
+        if decimal.mantissa != 0 && digits + decimal.exponent > most {
+            return Err(tallyowl_wire::WireError {
+                message: format!(
+                    "The {named} has more than {most} digits before the decimal point. Send the amount in the currency's own units, such as 19.99."
+                ),
+            });
+        }
+        Ok(())
+    };
+    if let Some(value) = item.conversion.as_ref().and_then(|c| c.value.as_ref()) {
+        check(value, "value of this conversion")?;
+    }
+    if let Some(cost) = &item.campaign_cost {
+        check(&cost.cost, "cost of this campaign")?;
+    }
+    Ok(())
 }
 
 /// Translate a store failure into the error taxonomy a caller acts on.

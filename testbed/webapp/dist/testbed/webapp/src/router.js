@@ -41,10 +41,14 @@ export class HostRouter {
 /// which is why the route takes an encoded `CaptureRequest` rather than an RPC
 /// frame. This is best effort by design: D34 says the browser package does not
 /// claim durable delivery after a tab closes.
+///
+/// The result is what `sendBeacon` returned. `false` means the browser refused
+/// the request, usually because its quota is used, and the browser package
+/// counts those items as dropped rather than losing them quietly.
 export function unloadSender(routes = defaultRoutes, beacon) {
     const send = beacon ??
         ((url, payload) => globalThis.navigator.sendBeacon(url, payload));
     return (payload) => {
-        send(routes.unload, new Blob([payload], { type: "application/cbor" }));
+        return send(routes.unload, new Blob([payload], { type: "application/cbor" }));
     };
 }

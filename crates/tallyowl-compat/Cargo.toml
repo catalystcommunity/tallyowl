@@ -17,3 +17,5 @@ tallyowl-collector-api = { workspace = true }
 # one. The random part must not be guessable, for the same reason a span ID
 # must not be.
 getrandom = { workspace = true }
+# TLS for the OpenTelemetry receiver on a network address. D62.
+rustls = { workspace = true }

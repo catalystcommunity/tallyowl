@@ -277,11 +277,38 @@ impl ClusterService {
         outcome
     }
 
+    /// Refuse a placement change that nothing on this node would carry out.
+    ///
+    /// A split commits a child tablet, and a move commits a `Moving` state.
+    /// Both are promises that something will then create a group, copy
+    /// segments, and publish the new placement, and this build has the stage
+    /// machine for that ([`crate::movement`]) and nothing that runs it. On a
+    /// node that runs tablets as consensus groups the promise was therefore
+    /// never kept: the child had no group and no data, every read asked it and
+    /// came back incomplete, and a move stayed `Moving` for ever.
+    ///
+    /// A node that holds no group keeps the old behaviour. That is a topology
+    /// an operator or a simulation is editing, and nothing reads through it.
+    fn needs_an_executor(&self, what: &str, tablet: &str) -> Option<Outcome> {
+        if self.plane.registry().group_count() == 0 {
+            return None;
+        }
+        Some(crate::service::refusal(&TallyOwlError::new(
+            ErrorCode::FailedPrecondition,
+            format!(
+                "`{what}` is not built yet, so `{tablet}` was not changed. The operation would record the change and nothing would carry it out: no replica would be created and no segment would be copied. To put a replica on another node, use `add-replica` and then `remove-replica`."
+            ),
+        )))
+    }
+
     fn split(&self, payload: &[u8]) -> Outcome {
         let request = match decode_split_tablet_request(payload) {
             Ok(request) => request,
             Err(e) => return malformed(e),
         };
+        if let Some(refused) = self.needs_an_executor("split-tablet", &request.tablet) {
+            return refused;
+        }
         let topology = self.plane.topology();
         let Some(tablet) = topology.tablet(&request.tablet) else {
             return crate::service::refusal(&TallyOwlError::new(
@@ -327,6 +354,9 @@ impl ClusterService {
             Ok(request) => request,
             Err(e) => return malformed(e),
         };
+        if let Some(refused) = self.needs_an_executor("move-tablet", &request.tablet) {
+            return refused;
+        }
         let topology = self.plane.topology();
         let Some(tablet) = topology.tablet(&request.tablet) else {
             return crate::service::refusal(&TallyOwlError::new(
@@ -442,8 +472,28 @@ impl ClusterService {
                 return crate::service::refusal(&e);
             }
         }
-        if let Err(e) = self.plane.apply_all(outcome.commands.clone()) {
-            return crate::service::refusal(&e);
+        if let Err(first) = self.plane.apply_all(outcome.commands.clone()) {
+            // **The record is the point.** A shipped cell runs its controllers
+            // on the nodes that hold its tablets, so the nodes that took the
+            // tablet's quorum usually took the controllers' quorum too, and the
+            // audit record and the degraded mark then cannot commit. A tablet
+            // that came back with no record that anything was lost is the one
+            // outcome this operation must not have, so the controllers are
+            // recovered the same way and the record is written.
+            let controllers = self.plane.controllers();
+            let recovered = first.code == tallyowl_obs::error::ErrorCode::Unavailable
+                && self.plane.registry().holds(&controllers)
+                && self
+                    .plane
+                    .registry()
+                    .force_single_voter(&controllers)
+                    .is_ok();
+            if !recovered {
+                return crate::service::refusal(&first);
+            }
+            if let Err(e) = self.plane.apply_all(outcome.commands.clone()) {
+                return crate::service::refusal(&e);
+            }
         }
         reply(
             "UnsafeRecoverResponse",
@@ -601,6 +651,23 @@ impl ClusterService {
             ));
         };
         let tablet = request.onto_tablet.as_deref().unwrap_or(held.as_str());
+        // Both become part of a path under the snapshot directory, and both
+        // arrive from a caller. A name is a name: it holds no separator and is
+        // not a way out of the directory.
+        for (what, name) in [
+            ("snapshot", request.snapshot_id.as_str()),
+            ("tablet", tablet),
+        ] {
+            let plain = !name.is_empty()
+                && name != "."
+                && name != ".."
+                && !name.contains(['/', '\\', '\0']);
+            if !plain {
+                return crate::service::refusal(&TallyOwlError::invalid_argument(format!(
+                    "`{name}` is not a {what} name. A {what} name holds no `/` and is not `.` or `..`."
+                )));
+            }
+        }
         let from = root.join(&request.snapshot_id).join(tablet);
         if !from.is_dir() {
             return crate::service::refusal(&TallyOwlError::new(
@@ -683,6 +750,21 @@ impl ClusterService {
             Ok(id) => id,
             Err(e) => return crate::service::refusal(&e),
         };
+        // The directory is one structure in this node's memory unless a global
+        // directory group holds it. On a cluster node an assignment made here
+        // would be known to this node alone and gone at its next restart, while
+        // the operator was told it was accepted.
+        if self.plane.registry().group_count() > 0
+            && !self
+                .plane
+                .registry()
+                .holds(&crate::groups::GroupKey::GlobalDirectory)
+        {
+            return crate::service::refusal(&TallyOwlError::new(
+                ErrorCode::FailedPrecondition,
+                "`assign-project` needs the global directory group, and this node does not run one, so the assignment was not recorded. It would have been held in this node's memory only and lost at its next restart.".to_string(),
+            ));
+        }
         match self.plane.apply_directory(DirectoryCommand::AssignProject {
             project_id,
             cells: request.cells,

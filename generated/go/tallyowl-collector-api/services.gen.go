@@ -36,3 +36,12 @@ const TallyOwlIngestServiceWireID uint64 = 1
 const TallyOwlIngestOpCaptureWireID uint64 = 0
 const TallyOwlIngestOpCaptureCriticalWireID uint64 = 1
 const TallyOwlIngestOpPolicyVersionWireID uint64 = 2
+
+// TallyOwlAlertReceiver defines the service interface
+type TallyOwlAlertReceiver interface {
+	Notify(ctx context.Context, req AlertNotifyRequest) (AlertNotifyResponse, error)
+}
+
+// Wire-id ordinals for the TallyOwlAlertReceiver service (transport compact profiles).
+const TallyOwlAlertReceiverServiceWireID uint64 = 6
+const TallyOwlAlertReceiverOpNotifyWireID uint64 = 0

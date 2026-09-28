@@ -44,16 +44,21 @@ person's activity across time.
   scrape target   ──8──> compatibility receiver
 ```
 
-| Boundary | What crosses it | What authenticates |
-| --- | --- | --- |
-| 1 | Browser telemetry | The application's own session |
-| 2 | Batches | A project-scoped source credential |
-| 3 | Batches and policy | A collector key, optionally mTLS |
-| 4 | Committed writes | Node certificates, mTLS |
-| 5 | Durable tasks | A deployment secret or workload identity |
-| 6 | Cold segments | Object-store credentials |
-| 7 | Queries and administration | A TallyOwl session from LinkKeys |
-| 8 | Scrapes and pushes | Target or network policy |
+| Boundary | What crosses it | What authenticates | Transport (D62) |
+| --- | --- | --- | --- |
+| 1 | Browser telemetry | The application's own session | The application's own connection |
+| 2 | Batches | A project-scoped source credential | TLS. The collector shows a certificate from operator files |
+| 3 | Batches and policy | The collector's node certificate, mTLS | Mutual TLS |
+| 4 | Committed writes | Node certificates, mTLS | Mutual TLS |
+| 5 | Durable tasks | A deployment secret or workload identity | TLS off loopback (Corndogs release 0.7.6). The store shows a certificate; a caller shows none |
+| 6 | Cold segments | Object-store credentials | The object store's own |
+| 7 | Queries and administration | A TallyOwl session from LinkKeys | Plaintext behind a Gateway that ends TLS |
+| 8 | Scrapes and pushes | Target or network policy | TLS for the OpenTelemetry receiver off loopback. No authentication |
+
+A connection on a loopback address or a unix socket can be plaintext, because it
+crosses no network. `transport.allowPlaintext` removes TLS from boundaries 2,
+3, and 4, and the service logs each exposed listener. An operator sets it only
+when something else protects the network.
 
 Boundary 1 is the one that matters most, because everything beyond a browser is
 attacker-controlled input.
@@ -96,7 +101,7 @@ project. That is the point of scoping the credential rather than the collector.
 
 | Threat | Answer |
 | --- | --- |
-| Write to another project | The credential proves one project. The head verifies the destination is inside the collector's permitted set. |
+| Write to another project | The credential proves one project. The head verifies the destination is inside the permitted set of the calling collector: the scope of the role token that enrolled it, from its verified certificate. |
 | Forge history | Telemetry is append-only. A correction is a new event, never an edit. |
 | Read another project | An ingest credential grants no read. |
 | Hide its own compromise | Audit records live in the `audit` retention class, which is never shorter than the deletion horizon. |
@@ -113,8 +118,10 @@ project. That is the point of scoping the credential rather than the collector.
 
 | Threat | Answer |
 | --- | --- |
-| Read telemetry in flight | TLS on every hop that crosses a pod trust boundary. |
-| Impersonate a collector or a node | mTLS with short-life certificates from the installation CA. See D22. |
+| Read telemetry in flight | TLS on every hop that crosses a network (D62), including boundary 5 from Corndogs release 0.7.6. |
+| Impersonate a collector or a node | Mutual TLS with short-life certificates from the installation CA. See D22 and D62. The head accepts `commit-batch` only from a verified collector, `renew-node-certificate` only from the node that it renews, and a consensus message only from the member that its certificate names. |
+| Test application keys against the head | `resolve-key` answers only a verified collector. A peer with no certificate reaches only `enroll-node` and the control operations, which each need their own credential. |
+| Impersonate the collector to an application | The app driver checks the collector certificate against the authorities of its host, or the ones the developer gives. |
 | Replay a batch | Stable batch IDs and a deduplication window make a replay one logical commit. |
 | Downgrade a protocol | Capability negotiation returns a permitted set, and a node must not use a capability the controller did not permit. |
 
@@ -125,7 +132,7 @@ A collector holds a credential and a queue. It does not hold a query surface.
 | Threat | Answer |
 | --- | --- |
 | Inject telemetry for its projects | Accepted. A collector is trusted for the projects it serves. |
-| Inject telemetry for other projects | The head verifies the destination against the collector's permitted set. |
+| Inject telemetry for other projects | The head verifies each destination against the scope of the role token that enrolled the collector, and refuses the whole batch. |
 | Read stored telemetry | A collector has no read path to storage. |
 | Suppress telemetry | Detectable. Ingest health, queue depth, and policy version are reported, and an absence alert fires when expected data stops. See D41. |
 
@@ -215,6 +222,21 @@ not carry erasable data until it exists.
 
 **No rate limit protects the LinkKeys login path.** TallyOwl owns its session
 after login, and the login path is LinkKeys' surface.
+
+**The queue does not identify its callers.** The queue connection has TLS
+from Corndogs release 0.7.6, so a reader on the pod network does not see a
+batch. Corndogs does not check a client certificate, so a process that
+reaches the queue port can submit or claim tasks. A NetworkPolicy limits the
+port.
+
+**A revoked node works until its certificate expires.** There is no revocation
+list. The lifetime is 24 hours by default. A shorter
+`enrollment.certificateLifetimeHours` shortens this time and also shortens the
+head outage that a node survives.
+
+**The OpenTelemetry receiver has no authentication.** TLS protects the data in
+transit. Any client that reaches the port can send data into the project of the
+collector key. A network policy is the access control.
 
 ## 9. Review
 

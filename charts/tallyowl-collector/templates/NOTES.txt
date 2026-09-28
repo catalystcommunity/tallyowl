@@ -1,0 +1,36 @@
+The TallyOwl collector {{ .Chart.AppVersion }} is installed as {{ .Release.Name }}.
+
+An application sends telemetry to:
+  {{ include "tallyowl-collector.fullname" . }}.{{ .Release.Namespace }}.svc:{{ include "tallyowl-collector.port" .Values.collector.listen }}
+
+The queue is at {{ .Values.corndogs.endpoint }} and the head is at {{ .Values.head.endpoint }}.
+The collector stops at start when it cannot reach the queue, so a pod that
+restarts again and again usually has the wrong `corndogs.endpoint`.
+
+Health and metrics are on port {{ include "tallyowl-collector.port" .Values.collector.operationalListen }}:
+  /livez, /readyz, and /metrics.
+Readiness fails when the queue is unreachable or the retry sweep stops.
+
+{{- if .Values.compatibility.openTelemetry.enabled }}
+
+The OpenTelemetry receiver is on port {{ include "tallyowl-collector.port" .Values.compatibility.openTelemetry.listen }}. It uses TLS with the
+collector certificate, and it has no authentication. Limit who can reach it
+with `deployment.networkPolicy`.
+The data goes to the project of the key in the Secret
+`{{ .Values.deployment.apiKeySecret.name }}`.
+{{- end }}
+
+{{- if .Values.transport.allowPlaintext }}
+TRANSPORT SECURITY IS OFF. `transport.allowPlaintext` is true, so applications
+and the head reach this collector in plaintext. Something else must protect
+this network. See docs/DEPLOYMENT.md section 7c.
+{{- else }}
+Applications reach intake over TLS. The app driver checks the certificate from
+`deployment.tls.certificateSecrets`: give it your authority when that is a
+private one. The collector enrolls with the head at each start, with the role
+token in `{{ .Values.deployment.tls.roleTokenSecret.name }}`, and reaches it
+over mutual TLS.
+{{- end }}
+The queue connection is plaintext, because Corndogs has no TLS in this
+release. Turn on `deployment.networkPolicy.enabled` in the head release.
+See docs/DEPLOYMENT.md section 7c.

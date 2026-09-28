@@ -26,7 +26,7 @@ use tallyowl_control_api::codec::{
 use tallyowl_obs::error::TallyOwlError;
 use tallyowl_obs::log::Logger;
 use tallyowl_rpc::{
-    error_outcome, malformed, reply, unknown_operation, Dispatcher, Outcome, Request,
+    error_outcome, malformed, reply, unknown_operation, Dispatcher, Outcome, Peer, Request,
 };
 
 use crate::control::ControlService;
@@ -61,10 +61,19 @@ pub struct HeadService {
 }
 
 impl Dispatcher for HeadService {
+    /// A call with no transport behind it, which only a test or an in-process
+    /// caller makes, is treated as a local peer.
     fn dispatch(&self, request: &Request) -> Outcome {
+        self.dispatch_from(request, &Peer::Local)
+    }
+
+    fn dispatch_from(&self, request: &Request, peer: &Peer) -> Outcome {
         match (request.service.as_str(), request.op.as_str()) {
-            (COLLECTOR_SERVICE, "commit-batch") => self.commit_batch(request),
-            (COLLECTOR_SERVICE, "resolve-key") => self.resolve_key(request),
+            (COLLECTOR_SERVICE, "commit-batch") => self.commit_batch(request, peer),
+            (COLLECTOR_SERVICE, "resolve-key") => match collectors_only(peer) {
+                Ok(()) => self.resolve_key(request),
+                Err(e) => self.refused_collector_call(e),
+            },
             (CONTROL_SERVICE, "run-query") => self.run_query(request),
             (CONTROL_SERVICE, "list-workspaces") => self.list_workspaces(request),
             (CONTROL_SERVICE, "list-projects") => self.list_projects(request),
@@ -75,7 +84,9 @@ impl Dispatcher for HeadService {
             (CONTROL_SERVICE, "list-role-tokens") => self.list_role_tokens(request),
             (CONTROL_SERVICE, "revoke-role-token") => self.revoke_role_token(request),
             (CONTROL_SERVICE, "enroll-node") => self.enroll_node(request),
-            (CONTROL_SERVICE, "renew-node-certificate") => self.renew_node_certificate(request),
+            (CONTROL_SERVICE, "renew-node-certificate") => {
+                self.renew_node_certificate(request, peer)
+            }
             (CONTROL_SERVICE, "list-nodes") => self.list_nodes(request),
             (CONTROL_SERVICE, "request-deletion") => self.request_deletion(request),
             (CONTROL_SERVICE, "get-policy") => self.get_policy(request),
@@ -97,18 +108,45 @@ impl Dispatcher for HeadService {
             (CONTROL_SERVICE, "list-workflows") => self.list_workflows(request),
             (CONTROL_SERVICE, "run-workflow") => self.run_workflow(request),
             (CONTROL_SERVICE, "list-notifications") => self.list_notifications(request),
-            (COLLECTOR_SERVICE, "fetch-policy") => self.fetch_policy(request),
+            (COLLECTOR_SERVICE, "fetch-policy") => match collectors_only(peer) {
+                Ok(()) => self.fetch_policy(request),
+                Err(e) => self.refused_collector_call(e),
+            },
             (service, op) => unknown_operation(service, op),
         }
     }
 }
 
 impl HeadService {
-    fn commit_batch(&self, request: &Request) -> Outcome {
+    fn refused_collector_call(&self, e: TallyOwlError) -> Outcome {
+        self.logger.warning(
+            "Refused a collector operation from a peer that is not a collector.",
+            &[("reason", &e.message)],
+        );
+        error_outcome(encode_collector_error(&crate::wire::to_collector_error(&e)))
+    }
+
+    fn commit_batch(&self, request: &Request, peer: &Peer) -> Outcome {
+        let refuse = |e: TallyOwlError| {
+            self.logger.warning(
+                "Refused a batch from a collector that may not write it.",
+                &[("reason", &e.message)],
+            );
+            error_outcome(encode_collector_error(&crate::wire::to_collector_error(&e)))
+        };
+        let scope = match self.may_commit(peer) {
+            Ok(scope) => scope,
+            Err(e) => return refuse(e),
+        };
         let decoded = match decode_commit_batch_request(&request.payload) {
             Ok(decoded) => decoded,
             Err(e) => return malformed(e),
         };
+        if let Some(scope) = scope {
+            if let Err(e) = scope.permits(&decoded) {
+                return refuse(e);
+            }
+        }
         match self.ingest.commit(decoded) {
             Ok(receipt) => {
                 self.logger.info(
@@ -132,6 +170,78 @@ impl HeadService {
                 error_outcome(encode_collector_error(&crate::wire::to_collector_error(&e)))
             }
         }
+    }
+
+    /// Whether this peer may write batches, and inside which destinations.
+    /// D62 and D32.
+    ///
+    /// - A loopback or unix peer is the collector on this host, which the
+    ///   operator placed there.
+    /// - A plaintext peer on a network address exists only because an operator
+    ///   set `transport.allowPlaintext`, and the head says so at start.
+    /// - A peer over mutual TLS must be an enrolled collector whose identity is
+    ///   still good. Its certificate says which node it is; the catalog says
+    ///   whether that node may still write, and the token that enrolled it
+    ///   says which workspaces and projects it may write to.
+    /// - A peer with no certificate is refused. Server-only TLS is for
+    ///   applications, and an application never writes to the head.
+    fn may_commit(&self, peer: &Peer) -> Result<Option<CollectorScope>, TallyOwlError> {
+        let refused =
+            |why: String| TallyOwlError::new(tallyowl_obs::error::ErrorCode::PermissionDenied, why);
+        let identity = match peer {
+            Peer::Local | Peer::Unverified => return Ok(None),
+            Peer::Anonymous => {
+                return Err(refused(
+                    "This connection showed no certificate. Only an enrolled collector writes batches to the head.".to_string(),
+                ))
+            }
+            Peer::Verified(identity) => identity,
+        };
+        let is_collector = identity
+            .role
+            .as_deref()
+            .is_some_and(|role| role.starts_with("collector-"));
+        if !is_collector {
+            return Err(refused(format!(
+                "`{}` enrolled as `{}`, and only a collector writes batches to the head.",
+                identity.node_id,
+                identity.role.as_deref().unwrap_or("no role")
+            )));
+        }
+        let catalog = self.enrollment.store.catalog();
+        let unreadable = |e: tallyowl_store::catalog::CatalogError| {
+            TallyOwlError::unavailable(format!("The node record could not be read: {e}"))
+        };
+        let record = catalog.node(&identity.node_id).map_err(unreadable)?;
+        let record = match record {
+            Some(record) if record.is_active(tallyowl_obs::time::now_ms()) => record,
+            Some(_) => {
+                return Err(refused(format!(
+                    "`{}` was revoked or its identity expired. It must enroll again.",
+                    identity.node_id
+                )))
+            }
+            None => {
+                return Err(refused(format!(
+                    "`{}` is not a node this installation enrolled.",
+                    identity.node_id
+                )))
+            }
+        };
+        // The token is kept after it is revoked, and its scope is still the
+        // node's scope. A missing token is a node nobody can account for.
+        let token = catalog.role_token(&record.token_id).map_err(unreadable)?;
+        let Some(token) = token else {
+            return Err(refused(format!(
+                "`{}` was enrolled by a token this installation no longer has.",
+                identity.node_id
+            )));
+        };
+        Ok(Some(CollectorScope {
+            node: identity.node_id.clone(),
+            workspaces: token.policy.workspaces,
+            projects: token.policy.projects,
+        }))
     }
 
     /// Resolve a source credential for a collector.
@@ -282,12 +392,18 @@ impl HeadService {
         }
     }
 
-    fn renew_node_certificate(&self, request: &Request) -> Outcome {
+    fn renew_node_certificate(&self, request: &Request, peer: &Peer) -> Outcome {
         let decoded = match decode_renew_node_certificate_request(&request.payload) {
             Ok(decoded) => decoded,
             Err(e) => return malformed(e),
         };
-        match self.enrollment.renew(decoded) {
+        // Only a certificate proves which node is asking. A request names a
+        // node ID, and a node ID is in logs and in every certificate. D62.
+        let proved = match peer {
+            Peer::Verified(identity) => Some(identity),
+            _ => None,
+        };
+        match self.enrollment.renew(decoded, proved) {
             Ok(response) => reply("EnrollNodeResponse", encode_enroll_node_response(&response)),
             Err(e) => self.control_error("A certificate was not renewed.", &e),
         }
@@ -403,10 +519,20 @@ impl HeadService {
         // A query names a project, and reading that project's telemetry needs a
         // role in the workspace that holds it. Without this check a caller who
         // guessed a project ID would read another tenant's data.
+        let mut timer = crate::query::QueryTimer::start(&self.control.metrics, &decoded.form);
         let outcome = self
             .authorize_query(request, &decoded)
             .and_then(|()| check_consistency(&decoded))
-            .and_then(|()| self.query.run(decoded));
+            // One permit in each project the query reads, held until it ends.
+            // `authorize_query` has already walked the tree, so this walk
+            // cannot fail where that one passed.
+            .and_then(|()| crate::query::projects_named(&decoded))
+            .and_then(|projects| crate::query::project_permits().take(&projects))
+            .and_then(|_permit| self.query.run(decoded));
+        timer.finish(match &outcome {
+            Ok(_) => "ok",
+            Err(e) => e.code.as_str(),
+        });
         match outcome {
             Ok(response) => reply("QueryResponse", encode_query_response(&response)),
             Err(e) => {
@@ -534,13 +660,7 @@ impl HeadService {
         };
         let outcome = (|| {
             let who = self.control.signed_in(request.auth.as_deref())?;
-            if let Some(project_id) = decoded.project_id.as_deref() {
-                self.control.allow_project(
-                    &who,
-                    to_project(project_id)?,
-                    tallyowl_store::control::Role::Viewer,
-                )?;
-            }
+            self.control.allow_policy_read(&who, &decoded)?;
             Ok::<_, TallyOwlError>(self.policy.compiled(&decoded))
         })();
         match outcome {
@@ -557,15 +677,14 @@ impl HeadService {
         };
         let outcome = (|| {
             let who = self.control.signed_in(request.auth.as_deref())?;
-            // Setting policy is an administrator's act, and a project-scoped
-            // one still needs the role in that project.
-            if let Some(project_id) = decoded.scope_id.as_deref().and_then(project_from_text) {
-                self.control.allow_project(
-                    &who,
-                    project_id,
-                    tallyowl_store::control::Role::Admin,
-                )?;
-            }
+            // Setting policy is an administrator's act. The scope decides
+            // whose administrator: see `ControlService::allow_policy_scope`.
+            self.control.allow_policy_scope(
+                &who,
+                &decoded.scope,
+                decoded.scope_id.as_deref(),
+                tallyowl_store::control::Role::Admin,
+            )?;
             self.policy.put(&decoded)
         })();
         match outcome {
@@ -952,12 +1071,27 @@ impl HeadService {
                     "Alert evaluation and notification run on their own schedule. Change the rule's interval to make it run sooner.",
                 ));
             }
+            // A rebuild rewrites the catalog of the whole installation, and a
+            // deletion pass re-applies every project's erasures. The role in one
+            // project does not reach that far.
+            if matches!(
+                kind,
+                crate::workflows::Kind::ProjectorRebuild | crate::workflows::Kind::Deletion
+            ) {
+                self.control.allow_installation(&who)?;
+            }
             let mut work = crate::workflows::Work::new(kind, project_id);
             if let Some(range) = &decoded.range {
                 work.range_start = range.range_start;
                 work.range_end = range.range_end;
             }
             work.destination = decoded.destination.clone().unwrap_or_default();
+            if kind == crate::workflows::Kind::Export {
+                // Refused here as well as in the pass, so that the person who
+                // asked reads why and not only the workflow log.
+                crate::passes::check_export_range(work.range_start, work.range_end)?;
+                crate::passes::export_file_name(&work.destination)?;
+            }
             self.workflows()?
                 .submit(&work)
                 .map(|task_id| (task_id, kind))
@@ -993,10 +1127,12 @@ impl HeadService {
             self.control
                 .allow_project(&who, project_id, tallyowl_store::control::Role::Viewer)?;
             let alerts = self.alerts()?;
+            // Only this project's attempts. An attempt holds a webhook address
+            // and error text, and the role checked above is in one project.
             alerts
                 .store
                 .catalog()
-                .notifications()
+                .notifications_for(project_id)
                 .map_err(|e| TallyOwlError::internal(e.to_string()))
         })();
         match outcome {
@@ -1175,11 +1311,122 @@ fn to_project(bytes: &[u8]) -> Result<[u8; 16], TallyOwlError> {
     })
 }
 
-/// A scope identifier that is a project, when it is one.
+/// The destinations one enrolled collector may write, from the token that
+/// enrolled it. An empty list does not restrict, as in the token's policy.
+struct CollectorScope {
+    node: String,
+    workspaces: Vec<[u8; 16]>,
+    projects: Vec<[u8; 16]>,
+}
+
+impl CollectorScope {
+    /// D32: every stamped destination is inside the collector's permitted set.
+    /// One row outside it refuses the whole batch, because a collector that
+    /// stamps a destination it may not write is misconfigured or compromised,
+    /// and neither is fixed by a retry.
+    fn permits(
+        &self,
+        request: &tallyowl_collector_api::types::CommitBatchRequest,
+    ) -> Result<(), TallyOwlError> {
+        let outside = |what: &str, id: &Option<Vec<u8>>| {
+            TallyOwlError::new(
+                tallyowl_obs::error::ErrorCode::PermissionDenied,
+                format!(
+                    "`{}` may not write to the {what} {}. The token that enrolled it does not include it. Enroll the collector with a token whose scope does.",
+                    self.node,
+                    id.as_deref().map(hex).unwrap_or_else(|| "that it left blank".to_string())
+                ),
+            )
+        };
+        for item in &request.batch.items {
+            let envelope = &item.envelope;
+            if !self.workspaces.is_empty() && !inside(&self.workspaces, &envelope.workspace_id) {
+                return Err(outside("workspace", &envelope.workspace_id));
+            }
+            if !self.projects.is_empty() && !inside(&self.projects, &envelope.project_id) {
+                return Err(outside("project", &envelope.project_id));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn inside(allowed: &[[u8; 16]], id: &Option<Vec<u8>>) -> bool {
+    id.as_deref()
+        .is_some_and(|id| allowed.iter().any(|allowed| allowed.as_slice() == id))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Who may call an operation that only a collector makes: `resolve-key` and
+/// `fetch-policy`.
 ///
-/// A policy at the workspace, environment, or source level names something that
-/// is not a project, so there is no project role to check. The installation
-/// level names nothing at all.
-fn project_from_text(text: &str) -> Option<[u8; 16]> {
-    tallyowl_store::row::from_hex(text)?.try_into().ok()
+/// The head's mutual listener also takes a peer with no certificate, so that a
+/// new collector can enroll and an operator's client can reach the control
+/// operations (D62). Neither of those needs these two. `resolve-key` in
+/// particular answers which project a key belongs to, so an anonymous caller
+/// could use it to test keys.
+fn collectors_only(peer: &Peer) -> Result<(), TallyOwlError> {
+    let refused =
+        |why: String| TallyOwlError::new(tallyowl_obs::error::ErrorCode::PermissionDenied, why);
+    match peer {
+        // A loopback or unix peer, or plaintext an operator allowed.
+        Peer::Local | Peer::Unverified => Ok(()),
+        Peer::Anonymous => Err(refused(
+            "This connection showed no certificate. Only an enrolled collector makes this call."
+                .to_string(),
+        )),
+        Peer::Verified(identity) => {
+            if identity
+                .role
+                .as_deref()
+                .is_some_and(|role| role.starts_with("collector-"))
+            {
+                Ok(())
+            } else {
+                Err(refused(format!(
+                    "`{}` enrolled as `{}`, and only a collector makes this call.",
+                    identity.node_id,
+                    identity.role.as_deref().unwrap_or("no role")
+                )))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod peer_rule_tests {
+    use super::*;
+    use tallyowl_rpc::PeerIdentity;
+
+    fn verified(role: Option<&str>) -> Peer {
+        Peer::Verified(PeerIdentity {
+            node_id: "node-a".to_string(),
+            role: role.map(str::to_string),
+            certificate_serial: "01".to_string(),
+            expires_at_ms: i64::MAX,
+        })
+    }
+
+    #[test]
+    fn a_key_or_a_policy_is_never_given_to_a_peer_that_proved_nothing() {
+        let refusal = collectors_only(&Peer::Anonymous).expect_err("an anonymous peer");
+        assert!(
+            refusal.message.contains("no certificate"),
+            "{}",
+            refusal.message
+        );
+        assert!(collectors_only(&verified(Some("storage-process"))).is_err());
+        assert!(collectors_only(&verified(None)).is_err());
+    }
+
+    #[test]
+    fn a_collector_or_a_local_peer_may_ask() {
+        assert!(collectors_only(&verified(Some("collector-intake"))).is_ok());
+        assert!(collectors_only(&verified(Some("collector-forwarder"))).is_ok());
+        assert!(collectors_only(&Peer::Local).is_ok());
+        assert!(collectors_only(&Peer::Unverified).is_ok());
+    }
 }

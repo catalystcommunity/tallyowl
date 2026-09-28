@@ -146,6 +146,7 @@ fn replicated_head(name: &str) -> ReplicatedHead {
             receipt_policy: ReceiptPolicy::LocalOne,
             open_traces: None,
             policy: None,
+            sources: None,
         },
         store,
         local,

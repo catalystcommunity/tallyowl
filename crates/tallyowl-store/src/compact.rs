@@ -112,6 +112,18 @@ pub struct CompactionSettings {
     /// on the maintenance interval, so a large backlog converges over passes
     /// instead of holding a day of rows in memory at once.
     pub cold_group_batch_bytes: u64,
+    /// How long past its horizon a predicate stays before it is removed.
+    ///
+    /// STORAGE.md section 11: a tombstone stays active until its horizon ends.
+    /// After that it owes nothing to a late arrival, and once a complete pass
+    /// has applied it to every segment it has nothing left to hide. Keeping it
+    /// anyway made every read pay for every erasure there had ever been; tail
+    /// sampling writes one for each dropped trace. The margin is for a copy of
+    /// a segment that arrives from a node which has not compacted yet. A
+    /// negative value keeps every predicate for ever, which is what every
+    /// build did before this existed. The erasure ledger keeps its entry
+    /// either way.
+    pub tombstone_retire_after_ms: i64,
 }
 
 impl Default for CompactionSettings {
@@ -139,6 +151,7 @@ impl Default for CompactionSettings {
             // many times their stored size (a 64 MiB bite measured 12 to
             // 22 GB resident), and the unbounded form took a machine down.
             cold_group_batch_bytes: 32 * 1024 * 1024,
+            tombstone_retire_after_ms: 24 * 60 * 60_000,
         }
     }
 }
@@ -176,6 +189,12 @@ pub struct CompactionOutcome {
     /// Segments consolidation wrote in their place, grouped by the
     /// correlation value.
     pub consolidated_outputs: usize,
+    /// Segments the erasure pass read and left alone, because no row in them
+    /// was erased.
+    pub unchanged: usize,
+    /// Predicates removed because their horizon had passed and a complete
+    /// pass had applied them.
+    pub tombstones_retired: usize,
 }
 
 /// Rewrite the segments an erasure touches.
@@ -185,6 +204,15 @@ pub struct CompactionOutcome {
 /// query has not seen them since. STORAGE.md section 11 gives the 24-hour
 /// target for this work on hot and warm data.
 pub fn compact(
+    store: &SegmentedStore,
+    settings: CompactionSettings,
+) -> Result<CompactionOutcome, StoreError> {
+    let result = compact_once(store, settings);
+    store.note_compaction(&result);
+    result
+}
+
+fn compact_once(
     store: &SegmentedStore,
     settings: CompactionSettings,
 ) -> Result<CompactionOutcome, StoreError> {
@@ -199,16 +227,36 @@ pub fn compact(
     // will leave behind rather than the one it is about to replace.
     consolidate_cold(store, settings, &mut outcome)?;
 
-    for attempt in 0..=settings.max_restarts {
+    'attempts: for attempt in 0..=settings.max_restarts {
         // Rule 1: record the tombstone generation this attempt started from.
         let started_at_generation = store.catalog().tombstone_generation()?;
-        let tombstones = store.catalog().tombstones()?;
+        let tombstones = store.catalog().tombstone_set()?;
 
         if tombstones.is_empty() {
-            outcome.files_reclaimed = reclaim(store, settings)?;
-            outcome.receipts_expired = expire_receipts(store, settings)?;
-            return Ok(outcome);
+            break;
         }
+
+        // What is in memory is read before the manifest generation, so a row
+        // that is in neither is impossible: a seal publishes before it drops
+        // its batch.
+        let pass_started = tallyowl_obs::time::now_ms();
+        let oldest_unsealed = store.oldest_unsealed_commit();
+        let manifest_generation = store.catalog().generation()?;
+        let (applied_tombstones, applied_manifests) = store.catalog().erasure_applied()?;
+
+        // **A segment is read only when something about it is new.** Every
+        // predicate at or below `applied_tombstones` has already been applied
+        // to every segment at or below `applied_manifests`. A predicate stands
+        // for ever, so without this every pass read every segment of its
+        // project again, and rewrote it.
+        let every = Reach::of(tombstones.all().iter());
+        let new_predicates: Vec<&Tombstone> = tombstones
+            .all()
+            .iter()
+            .filter(|predicate| predicate.generation > applied_tombstones)
+            .collect();
+        let (named, broad) = narrow(store, &new_predicates)?;
+        let broad = Reach::of(broad.into_iter());
 
         let affected: Vec<Manifest> = store
             .catalog()
@@ -219,77 +267,304 @@ pub fn compact(
                 // project and time-range deletion can remove fully covered
                 // segments without reading them, and this is the prune that
                 // makes the work bounded.
-                tombstones
-                    .iter()
-                    .any(|predicate| intersects(manifest, predicate))
+                (manifest.generation > applied_manifests && every.reaches(manifest))
+                    || broad.reaches(manifest)
+                    || named.contains(&manifest.segment_id)
             })
             .collect();
 
-        if affected.is_empty() {
-            outcome.files_reclaimed = reclaim(store, settings)?;
-            outcome.receipts_expired = expire_receipts(store, settings)?;
-            return Ok(outcome);
-        }
-
-        let mut retire: Vec<[u8; 16]> = Vec::new();
-        let mut replacements: Vec<(Manifest, Vec<EventRow>)> = Vec::new();
-        let mut erased = 0u64;
-
+        // One bite at a time. A bite's rows are held decompressed, at many
+        // times their stored size, and the unbounded form held every affected
+        // segment of a project at once. A segment is read alone, and it joins
+        // the bite only when an erasure actually took a row out of it.
+        let mut bite = Bite::default();
         for manifest in &affected {
             let rows = store.read_segment_rows(manifest)?;
             let before = rows.len();
 
             // Rule 2: re-read tombstones and apply every one committed while
             // this attempt was reading.
-            let current = store.catalog().tombstones()?;
-            let kept: Vec<EventRow> = rows
-                .into_iter()
-                .filter(|row| !current.iter().any(|predicate| predicate.hides(row)))
-                .collect();
+            let current = store.catalog().tombstone_set()?;
+            let kept: Vec<EventRow> = rows.into_iter().filter(|row| !current.hides(row)).collect();
 
-            erased += (before - kept.len()) as u64;
-            retire.push(manifest.segment_id);
+            if kept.len() == before {
+                // Nothing in it was erased, so it stays exactly as it is.
+                // Retiring it anyway rewrote the whole project on every pass.
+                outcome.unchanged += 1;
+                continue;
+            }
+
+            bite.erased += (before - kept.len()) as u64;
+            bite.bytes += manifest.byte_count;
+            bite.retire.push(manifest.segment_id);
             if kept.is_empty() {
                 // Every row was erased, so the segment goes rather than being
                 // rewritten empty.
-                outcome.removed += 1;
-                continue;
+                bite.removed += 1;
+            } else {
+                bite.rewritten += 1;
+                bite.replacements
+                    .push((manifest.clone(), group_rows(kept, settings.group_by)));
             }
-            outcome.rewritten += 1;
-            replacements.push((manifest.clone(), group_rows(kept, settings.group_by)));
+
+            if bite.bytes >= settings.cold_group_batch_bytes {
+                match publish(
+                    store,
+                    std::mem::take(&mut bite),
+                    started_at_generation,
+                    &mut outcome,
+                )? {
+                    Published::Done => {}
+                    Published::Abandoned => return Ok(outcome),
+                    Published::ErasureLanded => {
+                        if attempt == settings.max_restarts {
+                            return Ok(outcome);
+                        }
+                        continue 'attempts;
+                    }
+                }
+            }
+        }
+        match publish(store, bite, started_at_generation, &mut outcome)? {
+            Published::Done => {}
+            Published::Abandoned => return Ok(outcome),
+            Published::ErasureLanded => {
+                if attempt == settings.max_restarts {
+                    // Rule 4 is what makes stopping safe: the tombstone is a
+                    // standing predicate, so the rows stay hidden on read
+                    // whether or not this rewrote them.
+                    return Ok(outcome);
+                }
+                continue 'attempts;
+            }
         }
 
-        // Rule 3: the tombstone generation must not have moved again. If it
-        // has, an erasure landed while this attempt was writing, and the work
-        // restarts rather than publishing a replacement built from a stale
-        // view.
-        if store.catalog().tombstone_generation()? != started_at_generation {
-            outcome.restarts += 1;
-            if attempt == settings.max_restarts {
-                // Rule 4 is what makes stopping safe: the tombstone is a
-                // standing predicate, so the rows stay hidden on read whether
-                // or not this rewrote them.
-                return Ok(outcome);
-            }
-            continue;
-        }
-
-        if let Err(refused) = store.swap_segments(&retire, replacements) {
-            if matches!(refused, StoreError::Exhausted(_)) {
-                // Nothing was written and nothing was retired, so the source
-                // segments are exactly as they were.
-                outcome.abandoned_for_space = true;
-                return Ok(outcome);
-            }
-            return Err(refused);
-        }
-        outcome.rows_erased = erased;
-        outcome.files_reclaimed = reclaim(store, settings)?;
-        outcome.receipts_expired = expire_receipts(store, settings)?;
-        return Ok(outcome);
+        // The pass reached every segment it had to, so the next one starts
+        // from here.
+        store
+            .catalog()
+            .record_erasure_applied(started_at_generation, manifest_generation)?;
+        outcome.tombstones_retired = retire_finished(
+            store,
+            settings,
+            tombstones.all(),
+            started_at_generation,
+            pass_started,
+            oldest_unsealed,
+        )?;
+        break;
     }
 
+    outcome.files_reclaimed = reclaim(store, settings)?;
+    outcome.receipts_expired = expire_receipts(store, settings)?;
     Ok(outcome)
+}
+
+/// The segments one swap retires and what replaces them.
+#[derive(Default)]
+struct Bite {
+    retire: Vec<[u8; 16]>,
+    replacements: Vec<(Manifest, Vec<EventRow>)>,
+    bytes: u64,
+    erased: u64,
+    rewritten: usize,
+    removed: usize,
+}
+
+enum Published {
+    Done,
+    /// The device had no room. Nothing was written and nothing was retired.
+    Abandoned,
+    /// An erasure landed while this bite was being built.
+    ErasureLanded,
+}
+
+fn publish(
+    store: &SegmentedStore,
+    bite: Bite,
+    started_at_generation: u64,
+    outcome: &mut CompactionOutcome,
+) -> Result<Published, StoreError> {
+    if bite.retire.is_empty() {
+        return Ok(Published::Done);
+    }
+    // Rule 3: the tombstone generation must not have moved again. If it has,
+    // an erasure landed while this attempt was writing, and the work restarts
+    // rather than publishing a replacement built from a stale view. A bite
+    // that was already published stays: it applied every predicate there was
+    // when it was read, and the restart applies the rest.
+    if store.catalog().tombstone_generation()? != started_at_generation {
+        outcome.restarts += 1;
+        return Ok(Published::ErasureLanded);
+    }
+    if let Err(refused) = store.swap_segments(&bite.retire, bite.replacements) {
+        if matches!(refused, StoreError::Exhausted(_)) {
+            // Nothing was written and nothing was retired, so the source
+            // segments are exactly as they were.
+            outcome.abandoned_for_space = true;
+            return Ok(Published::Abandoned);
+        }
+        return Err(refused);
+    }
+    outcome.rows_erased += bite.erased;
+    outcome.rewritten += bite.rewritten;
+    outcome.removed += bite.removed;
+    Ok(Published::Done)
+}
+
+/// Which segments a set of predicates can reach, by project and time range.
+///
+/// Asked once for each segment, so it is a lookup by project and never a walk
+/// over every predicate.
+#[derive(Default)]
+struct Reach {
+    whole_project: std::collections::HashSet<[u8; 16]>,
+    ranges: std::collections::HashMap<[u8; 16], Vec<(i64, i64)>>,
+}
+
+impl Reach {
+    fn of<'a>(predicates: impl Iterator<Item = &'a Tombstone>) -> Reach {
+        let mut reach = Reach::default();
+        for predicate in predicates {
+            match predicate.range {
+                None => {
+                    reach.whole_project.insert(predicate.project_id);
+                }
+                Some(range) => reach
+                    .ranges
+                    .entry(predicate.project_id)
+                    .or_default()
+                    .push(range),
+            }
+        }
+        reach
+    }
+
+    fn reaches(&self, manifest: &Manifest) -> bool {
+        if self.whole_project.contains(&manifest.project_id) {
+            return true;
+        }
+        self.ranges.get(&manifest.project_id).is_some_and(|ranges| {
+            ranges.iter().any(|(start, end)| {
+                manifest.occurred_range.0 < *end && manifest.occurred_range.1 >= *start
+            })
+        })
+    }
+}
+
+/// The segments the locator says hold what new predicates name, and the
+/// predicates the locator cannot answer for.
+///
+/// A predicate that names events, or a value the locator indexes, reaches only
+/// the segments that hold the value. Without this one new predicate for one
+/// trace made the pass read every segment of its project. The locator is
+/// trusted here exactly as an exact lookup trusts it: a set that names at
+/// least one segment is complete, and an empty set decides nothing, so that
+/// predicate is treated as reaching its whole project.
+fn narrow<'a>(
+    store: &SegmentedStore,
+    new_predicates: &[&'a Tombstone],
+) -> Result<(std::collections::HashSet<[u8; 16]>, Vec<&'a Tombstone>), StoreError> {
+    use crate::segment::schema;
+
+    let mut named = std::collections::HashSet::new();
+    let mut broad = Vec::new();
+    if new_predicates.is_empty() {
+        return Ok((named, broad));
+    }
+    let locator = store.locator_view()?;
+    for predicate in new_predicates {
+        let mut found: Vec<[u8; 16]> = Vec::new();
+        let mut answerable = true;
+        if !predicate.event_ids.is_empty() {
+            for event_id in &predicate.event_ids {
+                let candidates = locator.candidates(schema::EVENT_ID, event_id, None);
+                // One event the locator does not name leaves the question open.
+                answerable &= !candidates.is_empty();
+                found.extend(candidates);
+            }
+        } else if let Some((key, value)) = &predicate.property {
+            match key.as_str() {
+                // Columns a predicate can name and the locator does not index.
+                "service_name" | "release" | "kind" | "name" => answerable = false,
+                "trace_id" => {
+                    // A predicate names a trace as text, and the locator
+                    // indexed its sixteen bytes.
+                    if let Some(trace_id) = crate::row::from_hex(value)
+                        .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+                    {
+                        found.extend(locator.candidates(schema::TRACE_ID, &trace_id, None));
+                    }
+                }
+                "session_id" => {
+                    found.extend(locator.candidates(schema::SESSION_ID, value.as_bytes(), None))
+                }
+                "request_id" => {
+                    found.extend(locator.candidates(schema::REQUEST_ID, value.as_bytes(), None))
+                }
+                _ => {}
+            }
+            // A row with no such column is matched through a property of the
+            // same name, so that is asked as well.
+            found.extend(locator.candidates(
+                &format!("{}{key}", schema::PROPERTY_PREFIX),
+                value.as_bytes(),
+                None,
+            ));
+            answerable &= !found.is_empty();
+        } else {
+            answerable = false;
+        }
+
+        if answerable {
+            named.extend(found);
+        } else {
+            broad.push(*predicate);
+        }
+    }
+    Ok((named, broad))
+}
+
+/// How much later than a row's commit a row beside it may have been committed.
+/// Rows reach the open buffer in nearly commit order, and this covers the
+/// "nearly".
+const COMMIT_ORDER_SLACK_MS: i64 = 60_000;
+
+/// Remove the predicates that have nothing left to do.
+///
+/// Two things have to be true, and the caller has just made the second one so:
+///
+/// 1. the horizon has passed, by the configured margin, so the predicate owes
+///    nothing to a late arrival (STORAGE.md section 11);
+/// 2. a complete pass applied it to every published segment, and no row from
+///    before the horizon was still waiting to be sealed when that pass began.
+fn retire_finished(
+    store: &SegmentedStore,
+    settings: CompactionSettings,
+    applied: &[Tombstone],
+    applied_generation: u64,
+    pass_started: i64,
+    oldest_unsealed: Option<i64>,
+) -> Result<usize, StoreError> {
+    if settings.tombstone_retire_after_ms < 0 {
+        return Ok(0);
+    }
+    let settled_before = oldest_unsealed
+        .map(|commit| commit - COMMIT_ORDER_SLACK_MS)
+        .unwrap_or(pass_started)
+        .min(pass_started);
+    let finished: Vec<[u8; 16]> = applied
+        .iter()
+        .filter(|predicate| {
+            predicate.generation <= applied_generation
+                && predicate
+                    .horizon
+                    .saturating_add(settings.tombstone_retire_after_ms)
+                    < settled_before
+        })
+        .map(|predicate| predicate.tombstone_id)
+        .collect();
+    Ok(store.catalog().retire_tombstones(&finished)?)
 }
 
 /// Remove what is past its retention class.
@@ -473,7 +748,7 @@ fn consolidate_cold(
         }
         batch += taken_bytes;
 
-        let tombstones = store.catalog().tombstones()?;
+        let tombstones = store.catalog().tombstone_set()?;
         let mut rows: Vec<EventRow> = Vec::new();
         let mut retire: Vec<[u8; 16]> = Vec::new();
         let mut log_range = (u64::MAX, 0u64);
@@ -481,10 +756,7 @@ fn consolidate_cold(
             let read = store.read_segment_rows(manifest)?;
             let before = read.len();
             let kept_from = rows.len();
-            rows.extend(
-                read.into_iter()
-                    .filter(|row| !tombstones.iter().any(|predicate| predicate.hides(row))),
-            );
+            rows.extend(read.into_iter().filter(|row| !tombstones.hides(row)));
             outcome.rows_erased += (before - (rows.len() - kept_from)) as u64;
             retire.push(manifest.segment_id);
             log_range.0 = log_range.0.min(manifest.log_range.0);
@@ -507,8 +779,9 @@ fn consolidate_cold(
             ((settings.cold_group_target_bytes / bytes_for_each_row) as usize).clamp(1, total);
 
         // Every output borrows the group's identity and carries the whole
-        // union of the retired log ranges, so checkpoint coverage never
-        // shrinks.
+        // union of the retired log ranges, which is what a later transfer
+        // compares to see an overlap. The log checkpoint is its own record and
+        // does not read these.
         let mut source = group[0].clone();
         source.log_range = log_range;
         let replacements: Vec<(Manifest, Vec<EventRow>)> = rows
@@ -529,17 +802,6 @@ fn consolidate_cold(
         outcome.consolidated_outputs += outputs;
     }
     Ok(())
-}
-
-/// Whether a tombstone can reach any row of a segment.
-fn intersects(manifest: &Manifest, tombstone: &Tombstone) -> bool {
-    if manifest.project_id != tombstone.project_id {
-        return false;
-    }
-    match tombstone.range {
-        None => true,
-        Some((start, end)) => manifest.occurred_range.0 < end && manifest.occurred_range.1 >= start,
-    }
 }
 
 /// Group rows by the highest-cost correlation value.
@@ -676,19 +938,19 @@ mod tests {
             reason: "asked".into(),
             except_kinds: Vec::new(),
         };
-        assert!(intersects(&manifest, &tombstone));
+        assert!(Reach::of(std::iter::once(&tombstone)).reaches(&manifest));
 
         // Another project is never touched, which is tenant isolation holding
         // through erasure.
         tombstone.project_id = [1; 16];
-        assert!(!intersects(&manifest, &tombstone));
+        assert!(!Reach::of(std::iter::once(&tombstone)).reaches(&manifest));
 
         // A range that misses the segment prunes it without a read.
         tombstone.project_id = [9; 16];
         tombstone.range = Some((5_000, 6_000));
-        assert!(!intersects(&manifest, &tombstone));
+        assert!(!Reach::of(std::iter::once(&tombstone)).reaches(&manifest));
         tombstone.range = Some((1_500, 6_000));
-        assert!(intersects(&manifest, &tombstone));
+        assert!(Reach::of(std::iter::once(&tombstone)).reaches(&manifest));
     }
 }
 

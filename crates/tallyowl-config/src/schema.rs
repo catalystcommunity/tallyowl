@@ -51,26 +51,41 @@ const PROFILES: &[&str] = &["home", "replicated", "scaled"];
 /// The complete setting list. Keep it sorted by key path, because `config check`
 /// prints it in this order and a person reads it that way.
 pub const SCHEMA: &[Setting] = &[
+    // ---- Alerts ------------------------------------------------------------
+    Setting {
+        path: "alerts.allowedPrivateTargets",
+        kind: Kind::TextList,
+        default: "",
+        help: "The webhook hosts that may be at an address inside the installation's own network: a loopback, private, or link-local address. A webhook address comes from a project administrator and the request leaves from the head, so the head refuses such an address unless its host is listed here. Write each host as it appears in the webhook address. `*` permits every address, which suits an installation with one tenant.",
+        example: "127.0.0.1,alerts.internal",
+    },
+    Setting {
+        path: "alerts.notificationWorkers",
+        kind: Kind::Integer,
+        default: "4",
+        help: "How many notifications the head delivers at the same time. A receiver that answers slowly holds one worker for the whole delivery timeout, so one worker let one receiver delay every other notification.",
+        example: "4",
+    },
     // ---- Catalog -----------------------------------------------------------
     Setting {
         path: "catalog.snapshots.enabled",
         kind: Kind::Boolean,
         default: "false",
-        help: "Take periodic catalog snapshots. Off by default; the default recovery for a lost catalog is a restore from the ordinary backup. See D59.",
+        help: "Take periodic catalog snapshots. Off by default; the default recovery for a lost catalog is a restore from the ordinary backup. See D59. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "false",
     },
     Setting {
         path: "catalog.snapshots.keep",
         kind: Kind::Integer,
         default: "2",
-        help: "How many catalog snapshots to retain. Two survives a snapshot that is itself damaged, which one cannot.",
+        help: "How many catalog snapshots to retain. Two survives a snapshot that is itself damaged, which one cannot. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "2",
     },
     Setting {
         path: "catalog.snapshots.period",
         kind: Kind::Duration,
         default: "1h",
-        help: "Time between catalog snapshots.",
+        help: "Time between catalog snapshots. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "1h",
     },
     // ---- Cell --------------------------------------------------------------
@@ -104,6 +119,20 @@ pub const SCHEMA: &[Setting] = &[
         example: "file:/etc/tallyowl/collector.key",
     },
     Setting {
+        path: "collector.headCallTimeout",
+        kind: Kind::Duration,
+        default: "20s",
+        help: "How long a collector waits for one answer from the head. A head that keeps its socket open and stops answering costs one wait of this length, and the batch is then tried again. Keep it shorter than the 30 second claim the forwarder holds on a batch.",
+        example: "20s",
+    },
+    Setting {
+        path: "collector.idleTimeout",
+        kind: Kind::Duration,
+        default: "5m",
+        help: "How long an intake connection may send nothing, with no request in progress, before the collector closes it. An app driver opens a new connection on its next batch. `0s` turns the limit off.",
+        example: "5m",
+    },
+    Setting {
         path: "collector.keyCacheGrace",
         kind: Kind::Duration,
         default: "60s",
@@ -132,11 +161,25 @@ pub const SCHEMA: &[Setting] = &[
         example: "512KiB",
     },
     Setting {
+        path: "collector.maxConnections",
+        kind: Kind::Integer,
+        default: "1024",
+        help: "The most intake connections a collector holds at one time. Each connection uses one thread. A connection past this number is closed at once, and an app driver tries again. `0` turns the limit off.",
+        example: "1024",
+    },
+    Setting {
         path: "collector.maxEventBytes",
         kind: Kind::Bytes,
         default: "64KiB",
         help: "The largest single telemetry item collector intake accepts.",
         example: "64KiB",
+    },
+    Setting {
+        path: "collector.maxFrameBytes",
+        kind: Kind::Bytes,
+        default: "4MiB",
+        help: "The largest frame collector intake reads from an app driver. D19 sets the exceptional frame at 4 MiB. It must be at least `collector.maxBatchBytes`, and a frame past it is refused before memory is used for it.",
+        example: "4MiB",
     },
     Setting {
         path: "collector.maxProperties",
@@ -167,6 +210,13 @@ pub const SCHEMA: &[Setting] = &[
         example: "intake,forwarder",
     },
     // ---- Compaction --------------------------------------------------------
+    Setting {
+        path: "collector.shutdownGrace",
+        kind: Kind::Duration,
+        default: "10s",
+        help: "How long a collector that was told to stop waits for the requests and the delivery already in progress. Keep it shorter than the termination grace period of the pod.",
+        example: "10s",
+    },
     Setting {
         path: "compaction.coldGroupAfter",
         kind: Kind::Duration,
@@ -218,6 +268,13 @@ pub const SCHEMA: &[Setting] = &[
         example: "60s",
     },
     Setting {
+        path: "compatibility.prometheus.maxBodyBytes",
+        kind: Kind::Bytes,
+        default: "16MiB",
+        help: "The largest response the collector reads from one scrape target. A larger response fails that scrape and nothing from it is kept, so a broken target cannot use the memory that native intake needs.",
+        example: "16MiB",
+    },
+    Setting {
         path: "compatibility.prometheus.targets",
         kind: Kind::TextList,
         default: "",
@@ -228,8 +285,15 @@ pub const SCHEMA: &[Setting] = &[
         path: "compatibility.prometheus.timeout",
         kind: Kind::Duration,
         default: "5s",
-        help: "How long one scrape may take before the collector gives up on that target and counts the failure.",
+        help: "How long one scrape may take, from the connection to the last byte, before the collector gives up on that target and counts the failure.",
         example: "5s",
+    },
+    Setting {
+        path: "compatibility.prometheus.workers",
+        kind: Kind::Integer,
+        default: "8",
+        help: "How many scrape targets the collector reads at one time. A slow target holds one worker for at most `compatibility.prometheus.timeout`, and the other targets continue.",
+        example: "8",
     },
     // ---- Corndogs ----------------------------------------------------------
     Setting {
@@ -240,11 +304,32 @@ pub const SCHEMA: &[Setting] = &[
         example: "file",
     },
     Setting {
+        path: "corndogs.callTimeout",
+        kind: Kind::Duration,
+        default: "30s",
+        help: "How long one call to the durable store may take. A durable store that keeps its socket open and stops answering costs a caller one wait of this length, not an open-ended one.",
+        example: "30s",
+    },
+    Setting {
+        path: "corndogs.connections",
+        kind: Kind::Integer,
+        default: "8",
+        help: "How many connections one process keeps to the durable store. The durable store combines commits across connections, so one connection is the slowest way to use it. A quiet process opens only the first.",
+        example: "8",
+    },
+    Setting {
         path: "corndogs.deliveryQueue",
         kind: Kind::Text,
         default: "tallyowl-delivery",
         help: "The Corndogs queue that carries accepted batches from a collector to the head.",
         example: "tallyowl-delivery",
+    },
+    Setting {
+        path: "corndogs.depthInterval",
+        kind: Kind::Duration,
+        default: "2s",
+        help: "How often the forwarder asks the durable store what each queue holds. The durable store keeps the counts as records, so a count costs little. It runs apart from the retry sweep, so a slow answer never makes the sweep look stopped.",
+        example: "2s",
     },
     Setting {
         path: "corndogs.durableCopies",
@@ -295,7 +380,28 @@ pub const SCHEMA: &[Setting] = &[
         help: "How often the forwarder calls the Corndogs timeout sweep. Retry, backoff, and dead-worker recovery all stop when the sweep stops. See D33.",
         example: "1s",
     },
+    Setting {
+        path: "corndogs.tls.caFile",
+        kind: Kind::Text,
+        default: "",
+        help: "A PEM file of the authorities that sign the Corndogs certificate. A Corndogs endpoint that is not a loopback address is reached over TLS. Empty means the operating system's trusted authorities. D62.",
+        example: "/etc/tallyowl/authorities/root.crt",
+    },
+    Setting {
+        path: "corndogs.tls.serverName",
+        kind: Kind::Text,
+        default: "",
+        help: "The name the Corndogs certificate must carry. Empty means the host part of `corndogs.endpoint`.",
+        example: "corndogs.tallyowl.svc",
+    },
     // ---- Dashboard ---------------------------------------------------------
+    Setting {
+        path: "dashboard.allowPlaintext",
+        kind: Kind::Boolean,
+        default: "false",
+        help: "Serve the dashboard in plaintext on an address that is not loopback. The dashboard carries session tokens, so put it behind a gateway that ends TLS, which is what the chart does, and set this to say so. D62.",
+        example: "true",
+    },
     Setting {
         path: "dashboard.assets",
         kind: Kind::Text,
@@ -339,6 +445,21 @@ pub const SCHEMA: &[Setting] = &[
         help: "Write a starter campaign dashboard for each project the first time the head sees it. It is offered once: an operator who removes it does not get it back. Turn it off to provision dashboards yourself. See PHASE9_REPORT.md.",
         example: "true",
     },
+    // ---- Enrollment --------------------------------------------------------
+    Setting {
+        path: "enrollment.certificateLifetimeHours",
+        kind: Kind::Integer,
+        default: "24",
+        help: "The most hours a node certificate that this head signs is valid. A role token can make it shorter and cannot make it longer. A node renews at two thirds of the lifetime, so a node continues through a head outage of one third of it: 8 hours at the default. There is no revocation list: a node that cannot renew stops within this time. See D62.",
+        example: "24",
+    },
+    Setting {
+        path: "enrollment.roleToken",
+        kind: Kind::Secret,
+        default: "",
+        help: "A reference to the role token this process enrolls with, when it reaches a head over a network. A collector uses it. A head that is not a signer uses it too. Never a token value. Use `file:` or `env:`. A process whose every connection is on loopback or a unix socket needs none.",
+        example: "file:/etc/tallyowl/role.token",
+    },
     // ---- Head --------------------------------------------------------------
     Setting {
         path: "head.dataDir",
@@ -368,7 +489,29 @@ pub const SCHEMA: &[Setting] = &[
         help: "Where the head serves health and metrics. This address serves nothing else.",
         example: "0.0.0.0:5111",
     },
+    Setting {
+        path: "head.shutdownGrace",
+        kind: Kind::Duration,
+        default: "20s",
+        help: "How long the head waits for the requests it already accepted when it is told to stop. Keep it shorter than the time the host allows before it ends the process, which is `terminationGracePeriodSeconds` in Kubernetes.",
+        example: "20s",
+    },
+    // ---- Ingest ------------------------------------------------------------
+    Setting {
+        path: "ingest.requireKnownSource",
+        kind: Kind::Boolean,
+        default: "true",
+        help: "Refuse a batch whose source this head has no record of. A collector takes its source from this head's answer to the key an application presents, so an unknown source did not come from a collector of this installation. The head always refuses an item whose workspace or project is not the one its source belongs to.",
+        example: "true",
+    },
     // ---- Installation ------------------------------------------------------
+    Setting {
+        path: "installation.authorities",
+        kind: Kind::TextList,
+        default: "",
+        help: "The certificate files of the authorities this process trusts for a connection between TallyOwl services, as PEM. List more than one to replace an authority with no outage: add the new one to every process first, then change the signer, then remove the old one. See D62.",
+        example: "/etc/tallyowl/root.crt",
+    },
     Setting {
         path: "installation.id",
         kind: Kind::Text,
@@ -383,26 +526,40 @@ pub const SCHEMA: &[Setting] = &[
         help: "The placement and replication profile. A profile never changes the stored format or the application integration.",
         example: "home",
     },
+    Setting {
+        path: "installation.signingCertificate",
+        kind: Kind::Text,
+        default: "",
+        help: "The PEM file of the intermediate authority this head signs node certificates with, followed by the certificates above it. It must chain to one of `installation.authorities`. Every head that signs uses the same one. Empty means this head signs nothing. `tallyowl-head ca create` makes one. See D62.",
+        example: "/etc/tallyowl/intermediate.crt",
+    },
+    Setting {
+        path: "installation.signingKey",
+        kind: Kind::Secret,
+        default: "",
+        help: "A reference to the private key of `installation.signingCertificate`. Never a key value. Use `file:` or `env:`. Each head that holds it can sign for the whole installation, so give it to heads only.",
+        example: "file:/etc/tallyowl/intermediate.key",
+    },
     // ---- Integrity ---------------------------------------------------------
     Setting {
         path: "integrity.mode",
         kind: Kind::Enum(INTEGRITY_MODES),
         default: "verify-on-read",
-        help: "How hard TallyOwl looks for damage. `verify-on-read` catches damage in data a query touches and costs almost nothing. `none` is a legitimate choice and the dashboard shows it. See D57.",
+        help: "How hard TallyOwl looks for damage. `verify-on-read` catches damage in data a query touches and costs almost nothing. `none` is a legitimate choice and the dashboard shows it. See D57. `none` turns the check off, and the head says so on every start. `scrub` is NOT BUILT in this release and is refused; `verify-on-read` checks every page when a query reads it.",
         example: "verify-on-read",
     },
     Setting {
         path: "integrity.scrub.period",
         kind: Kind::Duration,
         default: "7d",
-        help: "How long one full scrub pass takes.",
+        help: "How long one full scrub pass takes. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "7d",
     },
     Setting {
         path: "integrity.scrub.rateLimit",
         kind: Kind::Bytes,
         default: "16MiB",
-        help: "Read bandwidth each second that a scrub may use.",
+        help: "Read bandwidth each second that a scrub may use. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "16MiB",
     },
     // ---- LinkKeys ----------------------------------------------------------
@@ -431,7 +588,7 @@ pub const SCHEMA: &[Setting] = &[
         path: "linkkeys.sessionLifetime",
         kind: Kind::Duration,
         default: "24h",
-        help: "How long a session lasts after a sign-in.",
+        help: "How long a session lasts after a sign-in. At least 1m.",
         example: "24h",
     },
     Setting {
@@ -450,6 +607,13 @@ pub const SCHEMA: &[Setting] = &[
         example: "info",
     },
     // ---- Metrics -----------------------------------------------------------
+    Setting {
+        path: "metrics.downsampleLatenessGrace",
+        kind: Kind::Duration,
+        default: "5m",
+        help: "How long after a window closes the downsample pass waits before it rolls the window up. A point that arrives later than this stays at its finer resolution and is not in the rollup.",
+        example: "5m",
+    },
     Setting {
         path: "metrics.downsampleResolution",
         kind: Kind::Duration,
@@ -475,7 +639,7 @@ pub const SCHEMA: &[Setting] = &[
         path: "metrics.maxBytesForEachMetric",
         kind: Kind::Bytes,
         default: "64MiB",
-        help: "Retained bytes for one metric name in one project. Counted exactly from the points, not estimated from a row count.",
+        help: "Bytes in one reading of every active series of one metric name in one project: the sum of the latest point of each series. Counted exactly from the points, not estimated from a row count. A steady metric does not fill it; more series or larger labels do.",
         example: "64MiB",
     },
     Setting {
@@ -507,6 +671,13 @@ pub const SCHEMA: &[Setting] = &[
         example: "10000",
     },
     Setting {
+        path: "metrics.maxMetricNamesForEachProject",
+        kind: Kind::Integer,
+        default: "10000",
+        help: "Metric names one project may hold in one collector. A new name past this is refused in the open with `resource-exhausted`. A metric name is fixed text; put a value that changes in a label. A name with no active series gives its place back after `metrics.idleSeriesExpiry`.",
+        example: "10000",
+    },
+    Setting {
         path: "metrics.maxSeriesForEachMetric",
         kind: Kind::Integer,
         default: "100000",
@@ -519,6 +690,13 @@ pub const SCHEMA: &[Setting] = &[
         default: "false",
         help: "Push each service's own instruments into the protected internal project. Off by default, because it costs ingest capacity that an installation may want for its own data. See D12.",
         example: "true",
+    },
+    Setting {
+        path: "metrics.selfObservation.endpoint",
+        kind: Kind::Text,
+        default: "",
+        help: "The collector the head sends its own instruments to, as `host:port`. A DNS name is accepted, because this is an address the head dials and not one it binds. Empty uses `collector.listen`, which is right when the collector runs on the same host. In a pod, set it to the collector Service.",
+        example: "tallyowl-collector:5100",
     },
     Setting {
         path: "metrics.selfObservation.period",
@@ -575,14 +753,14 @@ pub const SCHEMA: &[Setting] = &[
         path: "placement.slowNode.duration",
         kind: Kind::Duration,
         default: "5m",
-        help: "How long a node must stay slow before the state changes.",
+        help: "How long a node must stay slow before the state changes. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "5m",
     },
     Setting {
         path: "placement.slowNode.factor",
         kind: Kind::Integer,
         default: "4",
-        help: "The multiple of the group median that counts as slow.",
+        help: "The multiple of the group median that counts as slow. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "4",
     },
     // ---- Query -------------------------------------------------------------
@@ -608,6 +786,13 @@ pub const SCHEMA: &[Setting] = &[
         example: "5m",
     },
     Setting {
+        path: "query.maxConcurrentForEachProject",
+        kind: Kind::Integer,
+        default: "8",
+        help: "How many queries one project may run at the same time. A query past the limit is refused at once with `resource-exhausted`, so one project's dashboards cannot hold the memory and the storage that every other project needs.",
+        example: "8",
+    },
+    Setting {
         path: "query.maxExpressionDepth",
         kind: Kind::Integer,
         default: "16",
@@ -630,6 +815,13 @@ pub const SCHEMA: &[Setting] = &[
     },
     // ---- Replication -------------------------------------------------------
     Setting {
+        path: "replication.advertise",
+        kind: Kind::Text,
+        default: "",
+        help: "The address other storage nodes dial to reach this one. Empty means `replication.listen`, which is right when that is already an address a peer can dial. Set it when this node listens on every interface, as a pod does: a peer cannot dial `0.0.0.0`. An entry in `replication.peers` with this address is this node and is skipped, so one peer list works on every node.",
+        example: "tallyowl-0.tallyowl:5200",
+    },
+    Setting {
         path: "replication.keepAfterSnapshot",
         kind: Kind::Integer,
         default: "512",
@@ -644,10 +836,17 @@ pub const SCHEMA: &[Setting] = &[
         example: "0.0.0.0:5200",
     },
     Setting {
+        path: "replication.logCacheBytes",
+        kind: Kind::Bytes,
+        default: "16MiB",
+        help: "How much memory one consensus group's log file may use as a cache. A node holds one file for each tablet it has, so this is multiplied by the number of tablets on the node. A consensus log is appended at one end and purged at the other and has little worth caching.",
+        example: "16MiB",
+    },
+    Setting {
         path: "replication.peers",
         kind: Kind::TextList,
         default: "",
-        help: "The addresses of the other storage nodes this one starts with. A cell normally learns its peers from its controller quorum; this is what a first bootstrap uses.",
+        help: "The storage nodes this one starts with, each as `address` or `name@address`. The list may include this node: an entry with this node's own advertise address is skipped, so every node can be given the same list. A node that sets `node.name` must be listed as `name@address`, because a plain address names its node `node-` and the address with `.` and `:` written as `-`. A cell normally learns its peers from its controller quorum; this is what a first bootstrap uses.",
         example: "10.0.0.11:5200,10.0.0.12:5200",
     },
     Setting {
@@ -673,21 +872,21 @@ pub const SCHEMA: &[Setting] = &[
         path: "retention.audit",
         kind: Kind::Duration,
         default: "2555d",
-        help: "How long control-plane, deletion, and export records are kept. It is never shorter than the deletion horizon. See POLICY.md section 4.",
+        help: "How long control-plane, deletion, and export records are kept. It is never shorter than the deletion horizon. See POLICY.md section 4. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "2555d",
     },
     Setting {
         path: "retention.detailed",
         kind: Kind::Duration,
         default: "30d",
-        help: "How long events, spans, error occurrences, and metric points are kept. This is the main analytic range.",
+        help: "How long events, spans, error occurrences, and metric points are kept. This is the main analytic range. Zero keeps this data without limit, and `retention.rollup` must then be zero as well, because stored files are removed whole at the longer of the two. This is the opposite of `retention.raw`, where zero keeps none.",
         example: "30d",
     },
     Setting {
         path: "retention.raw",
         kind: Kind::Duration,
         default: "0s",
-        help: "How long accepted interchange CBOR is kept. Zero keeps none, which is the default: an ordinary query never needs it.",
+        help: "How long accepted interchange CBOR is kept. Zero keeps none, which is the default: an ordinary query never needs it. This is the opposite of `retention.detailed`, where zero keeps everything.",
         example: "24h",
     },
     Setting {
@@ -716,7 +915,7 @@ pub const SCHEMA: &[Setting] = &[
         path: "sampling.tail.keepPercent",
         kind: Kind::Integer,
         default: "100",
-        help: "The share of ordinary traces to keep, from 0 to 100. A trace holding an error or a conversion, a trace with a failed span, and a slow trace are kept whatever this says.",
+        help: "The share of ordinary traces to keep, from 0 to 100. A trace holding an error or a conversion, a trace with a failed span, and a slow trace are kept whatever this says. A whole number from 0 to 100.",
         example: "10",
     },
     Setting {
@@ -738,7 +937,7 @@ pub const SCHEMA: &[Setting] = &[
         path: "storage.coldTier.enabled",
         kind: Kind::Boolean,
         default: "false",
-        help: "Move older retained segments to object storage. The home profile does not use it.",
+        help: "Move older retained segments to object storage. The home profile does not use it. NOT BUILT in this release: TallyOwl refuses any value but the default, so that a setting never looks as if it does something.",
         example: "false",
     },
     Setting {
@@ -768,6 +967,28 @@ pub const SCHEMA: &[Setting] = &[
         default: "1",
         help: "Voting replicas for each tablet. The home profile has one.",
         example: "1",
+    },
+    // ---- Transport security (D62) -------------------------------------------
+    Setting {
+        path: "tls.certificateDirectories",
+        kind: Kind::TextList,
+        default: "",
+        help: "Directories that each hold one certificate for the listeners that applications reach: collector intake and the OpenTelemetry receiver. Each directory holds `tls.crt` (the chain, leaf first) and `tls.key`. The service presents the certificate that is valid now and started last, so a second directory lets a certificate be replaced before it expires. A listener on a loopback or `unix:` address needs none.",
+        example: "/etc/tallyowl/tls/current,/etc/tallyowl/tls/next",
+    },
+    Setting {
+        path: "tls.reloadInterval",
+        kind: Kind::Duration,
+        default: "30s",
+        help: "How often a service reads its certificate files and trusted authorities again. A changed file takes effect without a restart. A file that does not parse is refused and the service keeps the one it has.",
+        example: "30s",
+    },
+    Setting {
+        path: "transport.allowPlaintext",
+        kind: Kind::Boolean,
+        default: "false",
+        help: "Serve and dial CSIL in plaintext on addresses that are not loopback or `unix:`. Without this, such a listener needs TLS. The service logs a warning that names each exposed listener. Use it only on a network that something else protects. D62.",
+        example: "true",
     },
 ];
 

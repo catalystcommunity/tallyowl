@@ -33,7 +33,9 @@ data.
 **Boundary: node to node.** Phase 11 added one operation to this boundary: a
 `proposal` kind on `deliver-consensus`, which lets a voter hand a client write
 to the leader. The authorization is membership, which the same mutual TLS
-connection already proves for every other consensus message. A node that can
+connection proves for every other consensus message. (Until D62 no service
+used TLS, so this sentence was a design statement and not a fact. Section 7
+gives what D62 changed.) A node that can
 send `append-entries` can already put entries into the log, so the proposal
 kind grants no capability that the boundary did not already grant. A proposal
 travels at most one hop, so two nodes that disagree about the leader produce a
@@ -105,3 +107,58 @@ moved no trust boundary: the proposal kind lives inside the node-to-node
 boundary that already carried consensus. No credential gained a scope. No
 component newly reaches storage or the query path. No compatibility edge
 listens by default.
+
+## 7. Transport security (D62)
+
+D62 moved each trust boundary that crosses a network. THREAT_MODEL.md section 3
+gives the new table. These are the changes that a security review must know.
+
+**What is now true.**
+
+- Every CSIL listener on a network address uses TLS. Collector intake and the
+  OpenTelemetry receiver show a certificate from operator files. `head.listen`
+  and `replication.listen` use mutual TLS with node certificates.
+- `renew-node-certificate` accepts only a verified peer whose node ID is the
+  node that it renews, and whose certificate serial is the current one.
+  Before, any client that knew a node ID got a certificate for it. The setting
+  `enrollment.allowUnverifiedRenewal` is removed.
+- `commit-batch` accepts a verified collector, and only for the projects in
+  the scope of the role token that enrolled it (D32). A peer with no
+  certificate is refused.
+- A consensus message is refused when its sender is not the node that the
+  peer certificate names.
+- `head.listen` accepts a client with no certificate, so that a collector can
+  enroll and an operator's client can reach the control operations. From that
+  client the head refuses `commit-batch`, `resolve-key`, `fetch-policy`, and
+  `renew-node-certificate`. `resolve-key` is closed to it because it answers
+  which project a key belongs to, which lets a caller test keys.
+- The catalog holds no authority key. The operator supplies an intermediate to
+  each head, and a head refuses one that does not chain to a trusted root.
+- The Helm charts refuse a render with no transport security, and
+  `helm-check` runs the service's own `config check` on each rendered profile.
+
+**What is still open.**
+
+1. The Corndogs connection has TLS from Corndogs release 0.7.6, and the
+   durable store does not identify its callers: it has no client certificate
+   check. Any process that reaches the queue port can submit or claim tasks.
+   A NetworkPolicy is the control for that.
+2. The OpenTelemetry receiver has no authentication. TLS protects the data in
+   transit only.
+3. A revoked node works until its certificate expires, 24 hours by default.
+   There is no revocation list.
+4. Each head holds the intermediate key, so one compromised head can sign a
+   node certificate. D62 accepts this cost.
+5. A server does not log a refused TLS handshake, because a stranger could
+   write a line for each connection. It counts each one in
+   `tallyowl_tls_handshakes_refused_total`, with the listener as a label.
+
+**Closed on 2026-09-26.** The native alert callback had no authentication. The
+head now signs each callback the way it signs a webhook: a keyed BLAKE3 hash,
+with the secret of the target, over the time and the body. The Go and the
+Rust app drivers verify it (`VerifyAlertCallback`, `verify_alert_callback`),
+and refuse a time that is more than five minutes from the receiver's clock. A
+rule with a callback target and no secret is refused when it is written. TLS
+proves the receiver to the head, and the signature proves the head to the
+receiver.
+

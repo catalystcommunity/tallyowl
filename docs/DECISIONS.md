@@ -79,6 +79,7 @@ make the unresolved part a separate decision.
 | D59 | Catalog snapshots, off by default | Accepted |
 | D60 | A slow node alerts and says why | Accepted |
 | D61 | Segment encryption keys | Accepted |
+| D62 | Transport security on every hop | Accepted |
 
 ## Next decision order
 
@@ -2207,3 +2208,171 @@ implementation log rather than here, because changing them changes no promise
 this decision makes and no document that describes one.
 
 See [SEGMENT_FORMAT.md](SEGMENT_FORMAT.md) section 11 and D28.
+
+## D62. Transport security on every hop — Accepted
+
+The project owner made this decision on 2026-09-26, after the review in
+IMPLEMENTATION_LOG.md L191. It extends D22. D22 gave nodes mutual TLS and
+enrollment. This decision gives the rule for each hop, and it gives the
+material that each hop uses.
+
+When this decision was made, no service used TLS. `tallyowl-rpc` had mutual
+TLS for enrolled nodes, and no service called it. The enrollment service had
+no client. No installation existed, thus no migration is necessary.
+
+### The general rule
+
+A listener on a loopback address or a unix socket can accept plaintext. A
+listener on a different address uses TLS. A service refuses to start with a
+plaintext listener on a different address. The only exceptions are in the
+table below.
+
+Each CSIL listener accepts a unix socket address in the form `unix:<path>`.
+This includes collector intake and head ingest. The file permissions of the
+socket are its access control. Windows 10 version 1803 and later supports
+unix sockets. The Rust standard library does not supply them on Windows, thus
+`tallyowl-rpc` and the Rust app driver need a platform-specific
+implementation there.
+
+### Each hop
+
+| Hop | Transport | Identity |
+| --- | --- | --- |
+| Application to collector intake | TLS. Only the server shows a certificate | The collector shows a certificate from operator files. The application shows its project key, as before |
+| Browser to application | Not TallyOwl's hop. The host application owns it | The host application |
+| OpenTelemetry receiver | The general rule, with the files of the application hop | No authentication, as THREAT_MODEL boundary 8 accepts. TLS protects the data in transit. A network policy still controls access |
+| Collector to head | Mutual TLS | Enrolled node certificates |
+| Head to head (replication and cluster control) | Mutual TLS | Enrolled node certificates |
+| Collector to Corndogs | TLS off loopback. A configured `corndogs.tls.caFile` means TLS on loopback too | The store shows a certificate, and the caller shows none. See "Corndogs" below |
+| Operational endpoint (`/livez`, `/readyz`, `/metrics`) | Plaintext, **exception** | None. Probes and scrapers inside the cluster read it. It carries no secret, and a metric carries no personal data |
+| Dashboard | Plaintext behind the Gateway, which ends TLS, **exception** | Session tokens. A dashboard on a non-loopback address with no Gateway needs an explicit setting |
+
+### The application hop
+
+- The collector loads a list of certificate and key pairs from files. The
+  operator supplies them: cert-manager, a corporate CA, or a public CA.
+- The collector presents the pair that is valid now and that has the latest
+  start time. It refuses to start when no pair is valid. Two pairs let an
+  operator rotate a certificate before it expires, with no outage.
+- The collector reads the files again every 30 seconds. It uses the new set
+  when the content hash changes. It keeps the old set when a new file does not
+  parse. This works with the symlink swap that Kubernetes uses for a Secret.
+- A gauge gives the time until the last loaded certificate expires. A rule in
+  `deploy/monitoring/` warns before that time.
+- An app driver with no TLS setting uses TLS and the system roots for a
+  non-loopback address. It uses plaintext for a loopback or `unix:` address.
+  Plaintext to any other address needs an explicit `AllowPlaintext`. A failed
+  handshake with a private CA gives a message that tells the developer to add
+  the CA.
+
+### Node identity
+
+- Each head and each collector enrolls itself with a role token, as D22 says.
+- A collector holds no durable state. It makes a new key in memory at each
+  start, and it enrolls at each start. Intake accepts from applications during
+  a head outage, because its application certificate comes from files. Only
+  the forwarder waits for enrollment, and Corndogs holds the batches during
+  that time.
+- The role token's hourly rate must allow for autoscaling and for restart
+  loops. The node reapers remove the records of expired nodes.
+- The certificate lifetime is a setting in hours. The default is 24 hours. A
+  role token's `certificate_lifetime_ms` can make it shorter and cannot make
+  it longer. Renewal starts at two thirds of the lifetime.
+- The short lifetime is the revocation mechanism. There is no revocation list.
+  An operator revokes a node or its role token, and the node cannot renew.
+- A node continues through a head outage for one third of its certificate
+  lifetime. That is 8 hours at the default. After that time the node enrolls
+  again when the head returns.
+
+### The certificate authority
+
+- The operator supplies an intermediate CA, as a certificate and a key, to each
+  head. The root can stay offline. A head signs certificate requests with the
+  intermediate CA, and it issues its own node certificate with it.
+- Each service accepts a list of trusted authorities, thus the CA can rotate
+  with no outage.
+- A helper makes an intermediate CA for the home profile and for a test.
+- Each head holds the CA key. Thus a head compromise is a CA compromise. This
+  cost is accepted, because one rule then works for one head and for five.
+
+### A seam for LinkKeys
+
+Two questions go behind one small interface: "which authorities do I trust"
+and "what identity does this peer have". The first implementation reads
+files. A later implementation can make LinkKeys the trust source, with no
+change to the dispatcher, renewal, `commit-batch`, or the consensus sender
+check.
+
+### Checks that this decision makes possible
+
+L191 deferred these checks, because each one needs a verified peer identity:
+
+- `renew-node-certificate` checks that the peer is the node that it renews.
+  After this, `enrollment.allowUnverifiedRenewal` is removed. It is removed.
+- `commit-batch` checks that the calling collector may write each project that
+  its batch names (D32).
+- The consensus service checks that the sender of a message is a member of
+  the group.
+
+### Corndogs
+
+When this decision was made, the Corndogs client and server had no TLS, and
+this hop was an exception behind `corndogs.allowPlaintext`. Corndogs added TLS
+at commit `23caaf1` and released it as 0.7.6 (image `0.7.6`, chart 0.5.7), in
+answer to the request in
+`tallyowl-update-requests.md` in the corndogs repository. The exception and
+the setting are removed.
+
+A network Corndogs endpoint uses TLS, and checks the store against
+`corndogs.tls.caFile`, or against the system authorities when that setting is
+empty. Corndogs serves TLS on its one port, so a configured `caFile` means TLS
+on loopback too. `transport.allowPlaintext` permits plaintext only when no CA
+file is set. Corndogs does not check who calls it. A NetworkPolicy limits the
+port.
+
+### What this does not decide
+
+- How LinkKeys vouches for a key. That needs its own decision.
+- The TLS library and the cipher suites. These are implementation choices for
+  the implementation log.
+- TLS and authentication to a Prometheus scrape target. L191 defers them.
+
+### As built
+
+The implementation is complete. IMPLEMENTATION_LOG.md L192 gives the reasons.
+The build settled these points, which the text above did not:
+
+- **One port for the head.** `head.listen` is mutual TLS, and it also accepts
+  a client that shows no certificate, as an anonymous peer. A collector with
+  no certificate enrolls on that port. An operator's client proves itself
+  with a session token on that port. A client that shows a certificate is
+  verified, and a forged certificate is refused. The operations that need a
+  proved node refuse an anonymous peer: `commit-batch`,
+  `renew-node-certificate`, `resolve-key`, and `fetch-policy`.
+- **The name of a head.** A head's certificate carries
+  `head.tallyowl.internal` as well as its node name. A collector checks that
+  name, whatever address it dials. A node certificate carries the node name
+  as its common name and as a DNS name, because a TLS client checks the DNS
+  name.
+- **Renewal timing.** Renewal starts at two thirds of the lifetime. This
+  replaces the "Renewal starts after 8 hours" sentence in D22.
+- **Plaintext under `transport.allowPlaintext`.** A plaintext peer on a
+  network address is accepted on replication and `commit-batch` only under
+  this setting. When certificates are configured, a listener uses TLS even if
+  the setting is on.
+- **The exceptions are two, not three.** The Corndogs hop has TLS. See
+  "Corndogs" above.
+- **Unix sockets on Windows are not built.** The build machine has no Windows
+  toolchain. On Windows, a `unix:` address is refused with a message. A
+  Windows implementation needs a Windows build in CI first.
+- **The native alert callback** uses TLS to a receiver on a network, and the
+  head signs each callback with the target's secret, as it signs a webhook.
+  The receiver verifies the signature and refuses a time more than five
+  minutes from its own clock (`VerifyAlertCallback`, `verify_alert_callback`).
+  The receiver is declared in CSIL as `TallyOwlAlertReceiver`, and the request
+  carries the exact bytes that were signed.
+- **The installation authority left the catalog.** The head holds the
+  operator's intermediate authority in memory, loaded from files at start.
+  `tallyowl-head ca create` makes a root and an intermediate for the home
+  profile and for tests.
+

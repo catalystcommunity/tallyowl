@@ -77,6 +77,41 @@ Use this sequence to enroll a node:
 9. Make a new mutual TLS connection.
 10. Send the node hello message.
 
+### 4.1 What this release builds
+
+D62 gives the transport rule. This release builds steps 1 to 9. Step 10 and
+section 5 are not built.
+
+- **The authority.** The operator supplies an intermediate authority to each
+  head (`installation.signingCertificate` and `installation.signingKey`).
+  `tallyowl-head ca create` makes a root and an intermediate. The catalog holds
+  no authority key. A head refuses a signing certificate that is not an
+  authority, that expired, or that does not chain to one of
+  `installation.authorities`.
+- **A head.** A head issues its own node certificate with the intermediate. It
+  needs no role token. Its role is `storage-process`, and its certificate also
+  carries the name `head.tallyowl.internal`.
+- **A collector.** A collector makes a new private key in memory at each
+  start, because a collector holds no durable state. It enrolls with the role
+  token in `enrollment.roleToken`.
+- **One port.** A collector enrolls on `head.listen`, the same port it uses
+  after enrollment. That listener is mutual TLS, and it also accepts a client
+  that shows no certificate. The head accepts `enroll-node` and the control
+  operations, which carry their own credential, from such a client. It refuses
+  `commit-batch`, `resolve-key`, `fetch-policy`, and `renew-node-certificate`
+  from such a client.
+- **The head's name.** A collector verifies the head against
+  `installation.authorities` and the name `head.tallyowl.internal`, whatever
+  address it dials. Thus a Service name, an IP address, or a load balancer all
+  work.
+- **The certificate.** The common name and a DNS name of each node certificate
+  are the node name. A client checks the DNS name. The consensus sender check
+  compares the common name. The recorded serial is the X.509 serial, in
+  lowercase hexadecimal. A node name must be a valid DNS name, and
+  `config check` refuses a `node.name` that is not.
+- **The chain.** An issued chain is the leaf and the intermediate. The root is
+  not in it.
+
 The controller intersects the requested scope with the token policy. It does not
 give a permission that is absent from the token.
 
@@ -105,11 +140,20 @@ granting unsupported or unapproved behavior.
 
 ## 6. Certificate lifecycle
 
-The first certificate lifetime is 24 hours. Renewal starts after 8 hours. Both
-values are configurable.
+The certificate lifetime is `enrollment.certificateLifetimeHours`, 24 by
+default. A role token can make it shorter with `certificate_lifetime_ms`, and
+cannot make it longer. A node renews at two thirds of the lifetime, so it
+continues through a head outage of one third of the lifetime: 8 hours at the
+default. D62 replaced the earlier rule of renewal after 8 hours of 24.
 
-The node uses its current mutual TLS identity for renewal. It does not need the
-role token for normal renewal.
+The node uses its current mutual TLS identity for renewal. The head accepts a
+renewal only from a verified peer whose node ID is the node that it renews,
+and whose certificate serial is the current one of that node. The node does not
+need the role token for a normal renewal. When a renewal is refused, or the
+certificate has expired, the node enrolls again with the role token. Revoke the
+role token to stop a collector that restarts.
+
+There is no revocation list. The short lifetime is the revocation mechanism.
 
 The controller can refuse renewal because of:
 
@@ -128,8 +172,8 @@ limits the value of a copied certificate.
 A deployment can mount one reusable role token in many stateless pods. Each pod
 gets a unique node ID and certificate.
 
-An expired pod identity needs no manual removal. The controller removes it after
-its lease and certificate safety periods.
+An expired pod identity needs no manual removal. The head removes the node
+record in its maintenance pass, after the certificate expired.
 
 The token policy can limit active nodes. This limit prevents an incorrect
 autoscaler from creating unlimited identities.
@@ -150,8 +194,10 @@ assignments from the cell controller.
 A Helm installation can refer to an existing role-token Secret. A controller
 administrator can also create a token for one Helm release.
 
-Each pod uses the token only during enrollment. The pod keeps its private key
-and certificate in a memory or protected runtime volume.
+Each pod uses the token only during enrollment. A collector keeps its private
+key and certificate in memory, and enrolls again when it restarts. The
+collector chart takes the token from a Secret, in
+`deployment.tls.roleTokenSecret`, as an environment reference.
 
 A deployment can retain the role token for future replicas. Certificate
 rotation does not require a pod rollout.

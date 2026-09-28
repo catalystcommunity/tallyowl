@@ -40,6 +40,8 @@
 //! reason still reaches the metric, because an operator needs it and an
 //! attacker does not read it.
 
+use std::collections::BTreeSet;
+
 use crate::catalog::{Catalog, CatalogError};
 use crate::cbor::{self, MapBuilder, Value};
 use crate::row::{hex, id_from_hex};
@@ -98,6 +100,8 @@ const ATTRIBUTION_PREFIX: &str = "control/attribution/";
 /// dashboard must not get it back on the next start-up. The mark says "this was
 /// offered once", which stays true after a delete.
 const SEEDED_PREFIX: &str = "control/seeded/";
+/// How far the metric downsample pass has rolled each project up.
+const ROLLED_UP_PREFIX: &str = "control/rolled-up/";
 
 /// How many times any level of policy has been written.
 ///
@@ -460,33 +464,35 @@ impl Catalog {
         self.remove_durable(keys)
     }
 
-    /// Read one control record.
-    pub(crate) fn read_record(&self, key: &str) -> Result<Option<Vec<u8>>, CatalogError> {
-        self.read(key)
-    }
-
-    /// Write one control record durably.
-    pub(crate) fn write_record(&self, key: &str, bytes: Vec<u8>) -> Result<(), CatalogError> {
-        self.write_durable(&[(key.to_string(), bytes)])
-    }
-
     pub fn put_api_key(&self, key: &ApiKey) -> Result<(), CatalogError> {
         self.write_durable(&[(
             format!("{API_KEY_PREFIX}{}", key.key_id),
-            cbor::encode(
-                &MapBuilder::new()
-                    .put("source", Value::Bytes(key.source_id.to_vec()))
-                    .put("project", Value::Bytes(key.project_id.to_vec()))
-                    .put("ws", Value::Bytes(key.workspace_id.to_vec()))
-                    .put("digest", Value::Bytes(key.digest.to_vec()))
-                    .put("label", Value::text(&key.label))
-                    .put("created", Value::integer(key.created_at))
-                    .put_some("expires", key.expires_at.map(Value::integer))
-                    .put_some("revoked", key.revoked_at.map(Value::integer))
-                    .put_some("used", key.last_used_at.map(Value::integer))
-                    .build(),
-            ),
+            encode_api_key(key),
         )])
+    }
+
+    /// Change one key inside one transaction, and say whether it was there.
+    ///
+    /// **A revocation and a last-use stamp write the same record.** Each used
+    /// to read it, change its own field, and write the whole record back. A
+    /// stamp that read the key before a revocation and wrote it back afterwards
+    /// brought a revoked key back to life, and the operator had been told it was
+    /// dead.
+    fn update_api_key(
+        &self,
+        key_id: &str,
+        change: impl FnOnce(&mut ApiKey),
+    ) -> Result<bool, CatalogError> {
+        let record = format!("{API_KEY_PREFIX}{key_id}");
+        self.transact(|writer| {
+            let Some(bytes) = writer.get(&record)? else {
+                return Ok(false);
+            };
+            let mut key = read_api_key(key_id, &decode(&bytes)?);
+            change(&mut key);
+            writer.put(&record, &encode_api_key(&key))?;
+            Ok(true)
+        })
     }
 
     pub fn api_key(&self, key_id: &str) -> Result<Option<ApiKey>, CatalogError> {
@@ -511,15 +517,10 @@ impl Catalog {
     /// revocation the catalog forgot would be worse than one that never
     /// happened: the operator believes the key is dead.
     pub fn revoke_api_key(&self, key_id: &str, now: i64) -> Result<bool, CatalogError> {
-        let Some(mut key) = self.api_key(key_id)? else {
-            return Ok(false);
-        };
-        if key.revoked_at.is_some() {
-            return Ok(true);
-        }
-        key.revoked_at = Some(now);
-        self.put_api_key(&key)?;
-        Ok(true)
+        self.update_api_key(key_id, |key| {
+            // The first revocation is the one the record keeps.
+            key.revoked_at.get_or_insert(now);
+        })
     }
 
     /// Resolve one credential to its tenancy.
@@ -547,9 +548,7 @@ impl Catalog {
         // answer, so this is already rare; writing it more often than once a
         // minute would put a durable write on a path that does not need one.
         if held.last_used_at.is_none_or(|at| now - at > 60_000) {
-            let mut updated = held.clone();
-            updated.last_used_at = Some(now);
-            let _ = self.put_api_key(&updated);
+            let _ = self.update_api_key(&held.key_id, |key| key.last_used_at = Some(now));
         }
 
         Ok(Resolved {
@@ -626,6 +625,22 @@ impl Catalog {
         };
         self.issue_api_key(&source, "issued by provision", now, None)
     }
+}
+
+fn encode_api_key(key: &ApiKey) -> Vec<u8> {
+    cbor::encode(
+        &MapBuilder::new()
+            .put("source", Value::Bytes(key.source_id.to_vec()))
+            .put("project", Value::Bytes(key.project_id.to_vec()))
+            .put("ws", Value::Bytes(key.workspace_id.to_vec()))
+            .put("digest", Value::Bytes(key.digest.to_vec()))
+            .put("label", Value::text(&key.label))
+            .put("created", Value::integer(key.created_at))
+            .put_some("expires", key.expires_at.map(Value::integer))
+            .put_some("revoked", key.revoked_at.map(Value::integer))
+            .put_some("used", key.last_used_at.map(Value::integer))
+            .build(),
+    )
 }
 
 fn read_api_key(key_id: &str, value: &Value) -> ApiKey {
@@ -842,11 +857,22 @@ pub struct AlertInstanceRecord {
     /// How many evaluations in a row exceeded the budget. TallyOwl disables a
     /// rule that keeps doing it. `docs/ALERTS.md` section 7.
     pub budget_failures: u64,
+    /// The state the last evaluation asked for, which is not always `state`: a
+    /// threshold inside its sustain window asks for `firing` while the rule
+    /// stays `ok`. `holding_ms` counts how long this has been the same.
+    ///
+    /// Empty on a record written before this field existed.
+    pub pending_state: String,
 }
 
 /// One attempt to deliver one notification.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NotificationRecord {
+    /// The project the rule belongs to.
+    ///
+    /// All zeros on a record written before this field existed. Such a record
+    /// belongs to no project anybody can name, so no project's list shows it.
+    pub project_id: [u8; 16],
     pub rule_id: String,
     pub target: String,
     pub state: String,
@@ -900,6 +926,7 @@ fn decode_instance(value: &Value) -> AlertInstanceRecord {
             .field("budget_failures")
             .and_then(Value::as_unsigned)
             .unwrap_or(0),
+        pending_state: text(value, "pending"),
     }
 }
 
@@ -1237,6 +1264,7 @@ impl Catalog {
                     .put("holding", Value::integer(instance.holding_ms))
                     .put("watermark", Value::Unsigned(instance.commit_watermark))
                     .put("budget_failures", Value::Unsigned(instance.budget_failures))
+                    .put("pending", Value::text(&instance.pending_state))
                     .build(),
             ),
         )])
@@ -1274,12 +1302,18 @@ impl Catalog {
     /// oldest is the first to go when the ring is trimmed.
     pub fn put_notification(&self, note: &NotificationRecord) -> Result<(), CatalogError> {
         self.write_durable(&[(
+            // The project is in the key as well, because two projects can hold
+            // a rule of one name and notify one target in one millisecond.
             format!(
-                "{NOTIFICATION_PREFIX}{:020}/{}/{}",
-                note.at, note.rule_id, note.target
+                "{NOTIFICATION_PREFIX}{:020}/{}/{}/{}",
+                note.at,
+                hex(&note.project_id),
+                note.rule_id,
+                note.target
             ),
             cbor::encode(
                 &MapBuilder::new()
+                    .put("project", Value::Bytes(note.project_id.to_vec()))
                     .put("rule", Value::text(&note.rule_id))
                     .put("target", Value::text(&note.target))
                     .put("state", Value::text(&note.state))
@@ -1300,6 +1334,7 @@ impl Catalog {
         for (_, bytes) in self.scan(NOTIFICATION_PREFIX)? {
             let value = decode(&bytes)?;
             out.push(NotificationRecord {
+                project_id: id_field(&value, "project"),
                 rule_id: text(&value, "rule"),
                 target: text(&value, "target"),
                 state: text(&value, "state"),
@@ -1334,6 +1369,52 @@ impl Catalog {
             return Ok(0);
         }
         let going: Vec<String> = keys[..keys.len() - keep].to_vec();
+        let count = going.len();
+        self.remove_durable(&going)?;
+        Ok(count)
+    }
+
+    /// The notification attempts of one project, oldest first.
+    ///
+    /// **A record with no project is in no project's list.** The attempts hold
+    /// webhook addresses and error text, and a webhook address often holds a
+    /// token, so a record this cannot place is hidden and not shown to all.
+    pub fn notifications_for(
+        &self,
+        project_id: [u8; 16],
+    ) -> Result<Vec<NotificationRecord>, CatalogError> {
+        Ok(self
+            .notifications()?
+            .into_iter()
+            .filter(|note| note.project_id == project_id)
+            .collect())
+    }
+
+    /// Keep the newest `keep` attempts of one project and remove the rest.
+    ///
+    /// The ring is for each project. One installation-wide ring let a project
+    /// with a failing webhook push every other project's attempts out of it.
+    ///
+    /// A record with no project is removed here as well. It was written before
+    /// the project was recorded, and nothing can show it to anybody.
+    pub fn trim_notifications_for(
+        &self,
+        project_id: [u8; 16],
+        keep: usize,
+    ) -> Result<usize, CatalogError> {
+        let mut own = Vec::new();
+        let mut going = Vec::new();
+        for (key, bytes) in self.scan(NOTIFICATION_PREFIX)? {
+            let held = id_field(&decode(&bytes)?, "project");
+            if held == project_id {
+                own.push(key);
+            } else if held == [0; 16] {
+                going.push(key);
+            }
+        }
+        if own.len() > keep {
+            going.extend_from_slice(&own[..own.len() - keep]);
+        }
         let count = going.len();
         self.remove_durable(&going)?;
         Ok(count)
@@ -1426,6 +1507,37 @@ impl Catalog {
         self.write_durable(&[(
             format!("{SEEDED_PREFIX}{}", hex(&project_id)),
             cbor::encode(&MapBuilder::new().put("at", Value::integer(at)).build()),
+        )])
+    }
+
+    /// The end of the last window the metric downsample pass rolled up for this
+    /// project, or `None` when it has rolled none.
+    ///
+    /// It is durable because a pass that only knew the current time skipped a
+    /// window whenever it ran late or the head restarted across a boundary, and
+    /// a rollup is the only copy once the detailed points expire.
+    pub fn rolled_up_through(&self, project_id: [u8; 16]) -> Result<Option<i64>, CatalogError> {
+        let Some(bytes) = self.read(&format!("{ROLLED_UP_PREFIX}{}", hex(&project_id)))? else {
+            return Ok(None);
+        };
+        Ok(cbor::decode(&bytes)
+            .ok()
+            .and_then(|value| value.field("through").and_then(Value::as_integer)))
+    }
+
+    /// Record the end of the last window the downsample pass rolled up.
+    pub fn mark_rolled_up_through(
+        &self,
+        project_id: [u8; 16],
+        through: i64,
+    ) -> Result<(), CatalogError> {
+        self.write_durable(&[(
+            format!("{ROLLED_UP_PREFIX}{}", hex(&project_id)),
+            cbor::encode(
+                &MapBuilder::new()
+                    .put("through", Value::integer(through))
+                    .build(),
+            ),
         )])
     }
 
@@ -1793,6 +1905,12 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 const MEMBER_PREFIX: &str = "identity/member/";
+/// The same memberships, keyed by the person. `resolve_session` runs on every
+/// control request, and reading one person's memberships from the workspace
+/// keys meant reading every member of every workspace each time.
+const MEMBER_BY_SUBJECT_PREFIX: &str = "identity/member-by-subject/";
+/// Written once the index holds every membership that predates it.
+const MEMBER_INDEX_BUILT_KEY: &str = "identity/member-by-subject.built";
 const SESSION_PREFIX: &str = "identity/session/";
 
 /// The text that starts every session token. It is not the credential prefix,
@@ -1905,47 +2023,81 @@ impl SignedIn {
 
 impl Catalog {
     pub fn put_member(&self, member: &Member) -> Result<(), CatalogError> {
-        self.write_durable(&[(
-            format!(
-                "{MEMBER_PREFIX}{}/{}",
-                hex(&member.workspace_id),
-                member.subject
+        // Both keys in one write, so the index cannot name a role the record
+        // does not hold.
+        self.write_durable(&[
+            (
+                format!(
+                    "{MEMBER_PREFIX}{}/{}",
+                    hex(&member.workspace_id),
+                    member.subject
+                ),
+                cbor::encode(
+                    &MapBuilder::new()
+                        .put("role", Value::text(member.role.as_str()))
+                        .put("name", Value::text(&member.display_name))
+                        .put("at", Value::integer(member.added_at))
+                        .build(),
+                ),
             ),
-            cbor::encode(
-                &MapBuilder::new()
-                    .put("role", Value::text(member.role.as_str()))
-                    .put("name", Value::text(&member.display_name))
-                    .put("at", Value::integer(member.added_at))
-                    .build(),
+            (
+                member_by_subject_key(&member.subject, member.workspace_id),
+                member_index_value(member.role.as_str()),
             ),
-        )])
+        ])
     }
 
     pub fn remove_member(&self, workspace_id: [u8; 16], subject: &str) -> Result<(), CatalogError> {
-        self.remove_durable(&[format!("{MEMBER_PREFIX}{}/{subject}", hex(&workspace_id))])
+        self.remove_durable(&[
+            format!("{MEMBER_PREFIX}{}/{subject}", hex(&workspace_id)),
+            member_by_subject_key(subject, workspace_id),
+        ])
     }
 
     /// Every workspace this subject belongs to, and the role in each.
     pub fn memberships(&self, subject: &str) -> Result<Vec<([u8; 16], Role)>, CatalogError> {
+        self.build_member_index()?;
+        let prefix = format!("{MEMBER_BY_SUBJECT_PREFIX}{subject}/");
         let mut out = Vec::new();
-        for (key, bytes) in self.scan(MEMBER_PREFIX)? {
-            let rest = key.trim_start_matches(MEMBER_PREFIX);
-            let Some((workspace_text, held_subject)) = rest.split_once('/') else {
+        for (key, bytes) in self.scan(&prefix)? {
+            // A subject may hold a `/`, so the prefix of one subject can lead
+            // the key of another. What follows this subject is a workspace ID
+            // and nothing else.
+            let Some(workspace_id) = id_from_hex(key.trim_start_matches(&prefix)) else {
                 continue;
             };
-            if held_subject != subject {
-                continue;
-            }
-            let Some(workspace_id) = id_from_hex(workspace_text) else {
-                continue;
-            };
-            let value = decode(&bytes)?;
-            let Some(role) = Role::parse(&text(&value, "role")) else {
+            let Some(role) = Role::parse(&text(&decode(&bytes)?, "role")) else {
                 continue;
             };
             out.push((workspace_id, role));
         }
         Ok(out)
+    }
+
+    /// Write the index for memberships that were stored before it existed.
+    ///
+    /// It runs once for one catalog. After that the marker is there, and this
+    /// is one point read.
+    fn build_member_index(&self) -> Result<(), CatalogError> {
+        if self.read(MEMBER_INDEX_BUILT_KEY)?.is_some() {
+            return Ok(());
+        }
+        self.transact(|writer| {
+            for (key, bytes) in writer.scan(MEMBER_PREFIX)? {
+                let rest = key.trim_start_matches(MEMBER_PREFIX);
+                let Some((workspace_text, subject)) = rest.split_once('/') else {
+                    continue;
+                };
+                let Some(workspace_id) = id_from_hex(workspace_text) else {
+                    continue;
+                };
+                writer.put(
+                    &member_by_subject_key(subject, workspace_id),
+                    &member_index_value(&text(&decode(&bytes)?, "role")),
+                )?;
+            }
+            writer.put(MEMBER_INDEX_BUILT_KEY, &cbor::encode(&Value::Bool(true)))
+        })
     }
 
     /// Every member of one workspace.
@@ -2133,6 +2285,55 @@ impl Catalog {
     }
 }
 
+fn member_by_subject_key(subject: &str, workspace_id: [u8; 16]) -> String {
+    format!("{MEMBER_BY_SUBJECT_PREFIX}{subject}/{}", hex(&workspace_id))
+}
+
+fn member_index_value(role: &str) -> Vec<u8> {
+    cbor::encode(&MapBuilder::new().put("role", Value::text(role)).build())
+}
+
+impl Catalog {
+    /// Make every operator an owner of one workspace, and say how many were.
+    ///
+    /// An operator session is an owner of every workspace that existed when it
+    /// was issued. A workspace provisioned afterwards was invisible to every
+    /// operator who was already signed in, and nothing said why. `provision`
+    /// calls this for the workspace it used.
+    ///
+    /// An operator is the subject of a session the command line issued that is
+    /// neither revoked nor expired. A role the person already holds in the
+    /// workspace is left as it is.
+    pub fn grant_operators(&self, workspace_id: [u8; 16], now: i64) -> Result<usize, CatalogError> {
+        let held: BTreeSet<String> = self
+            .members(workspace_id)?
+            .into_iter()
+            .map(|member| member.subject)
+            .collect();
+        let operators: BTreeSet<String> = self
+            .sessions()?
+            .into_iter()
+            .filter(|session| {
+                session.issuer == OPERATOR_ISSUER
+                    && session.revoked_at.is_none()
+                    && now < session.expires_at
+            })
+            .map(|session| session.subject)
+            .filter(|subject| !held.contains(subject))
+            .collect();
+        for subject in &operators {
+            self.put_member(&Member {
+                subject: subject.clone(),
+                workspace_id,
+                role: Role::Owner,
+                display_name: subject.clone(),
+                added_at: now,
+            })?;
+        }
+        Ok(operators.len())
+    }
+}
+
 /// Split `tos_<session-id>_<secret>`.
 fn split_session(token: &str) -> Option<(String, Vec<u8>)> {
     let rest = token.trim().strip_prefix(SESSION_PREFIX_TEXT)?;
@@ -2258,5 +2459,226 @@ impl Catalog {
         let count = gone.len();
         self.remove_durable(&gone)?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tenancy_tests {
+    use super::*;
+
+    fn catalog(name: &str) -> Catalog {
+        let base = std::env::var("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("target"));
+        let path = base
+            .join("control-tests")
+            .join(format!("{name}-{}", tallyowl_obs::time::now_nanos()));
+        let _ = std::fs::remove_dir_all(&path);
+        Catalog::open(path).expect("the catalog opens")
+    }
+
+    fn attempt(project_id: [u8; 16], at: i64) -> NotificationRecord {
+        NotificationRecord {
+            project_id,
+            rule_id: "error-rate".into(),
+            target: "https://hooks.example/t/secret".into(),
+            state: "firing".into(),
+            attempts: 1,
+            at,
+            ..NotificationRecord::default()
+        }
+    }
+
+    #[test]
+    fn one_project_never_reads_the_attempts_of_another() {
+        let catalog = catalog("notifications_for");
+        // The same rule name, the same target, and the same millisecond: the
+        // key holds the project, so neither replaces the other.
+        catalog.put_notification(&attempt([1; 16], 10)).unwrap();
+        catalog.put_notification(&attempt([2; 16], 10)).unwrap();
+        // A record from before the project was recorded.
+        catalog.put_notification(&attempt([0; 16], 5)).unwrap();
+
+        let own = catalog.notifications_for([1; 16]).unwrap();
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].project_id, [1; 16]);
+        assert!(
+            catalog.notifications_for([3; 16]).unwrap().is_empty(),
+            "a record with no project was shown to a project that does not own it"
+        );
+    }
+
+    #[test]
+    fn a_noisy_project_trims_only_its_own_ring() {
+        let catalog = catalog("trim_notifications_for");
+        catalog.put_notification(&attempt([2; 16], 1)).unwrap();
+        catalog.put_notification(&attempt([0; 16], 2)).unwrap();
+        for at in 10..20 {
+            catalog.put_notification(&attempt([1; 16], at)).unwrap();
+        }
+
+        // Nine of its own, and the one record nobody can be shown.
+        assert_eq!(catalog.trim_notifications_for([1; 16], 1).unwrap(), 10);
+        let kept = catalog.notifications_for([1; 16]).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].at, 19, "the newest attempt is the one that stays");
+        assert_eq!(catalog.notifications_for([2; 16]).unwrap().len(), 1);
+        assert_eq!(catalog.notifications().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_membership_written_before_the_index_is_still_found() {
+        let catalog = catalog("member_index_backfill");
+        // The shape a membership had before the index: the workspace key and
+        // nothing beside it.
+        catalog
+            .write_durable(&[(
+                format!("{MEMBER_PREFIX}{}/old@id.example", hex(&[7; 16])),
+                cbor::encode(
+                    &MapBuilder::new()
+                        .put("role", Value::text("admin"))
+                        .put("name", Value::text("Old"))
+                        .put("at", Value::integer(1))
+                        .build(),
+                ),
+            )])
+            .unwrap();
+
+        assert_eq!(
+            catalog.memberships("old@id.example").unwrap(),
+            vec![([7; 16], Role::Admin)],
+            "a person who was a member before the upgrade lost the workspace"
+        );
+        // And the ordinary path after it.
+        let member = Member {
+            subject: "new@id.example".into(),
+            workspace_id: [8; 16],
+            role: Role::Viewer,
+            display_name: "New".into(),
+            added_at: 2,
+        };
+        catalog.put_member(&member).unwrap();
+        catalog
+            .put_member(&Member {
+                role: Role::Owner,
+                ..member.clone()
+            })
+            .unwrap();
+        assert_eq!(
+            catalog.memberships("new@id.example").unwrap(),
+            vec![([8; 16], Role::Owner)],
+            "a changed role left the old one in the index"
+        );
+        catalog.remove_member([8; 16], "new@id.example").unwrap();
+        assert!(catalog.memberships("new@id.example").unwrap().is_empty());
+        assert_eq!(catalog.members([7; 16]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn one_subject_never_reads_the_memberships_of_a_subject_it_is_a_prefix_of() {
+        let catalog = catalog("member_index_prefix");
+        for subject in ["a", "a/b"] {
+            catalog
+                .put_member(&Member {
+                    subject: subject.into(),
+                    workspace_id: [1; 16],
+                    role: Role::Owner,
+                    display_name: subject.into(),
+                    added_at: 1,
+                })
+                .unwrap();
+        }
+        catalog.remove_member([1; 16], "a").unwrap();
+        assert!(
+            catalog.memberships("a").unwrap().is_empty(),
+            "`a` read the membership of `a/b`"
+        );
+        assert_eq!(catalog.memberships("a/b").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_tokens_live_nodes_are_counted_from_its_own_index() {
+        use crate::identity::{NodeRecord, NodeRole};
+        let catalog = catalog("node_index");
+        let node = |node_id: &str, token_id: &str, expires_at: i64| NodeRecord {
+            node_id: node_id.into(),
+            token_id: token_id.into(),
+            role: NodeRole::CollectorIntake,
+            cell: None,
+            region: None,
+            certificate_serial: "01".into(),
+            enrolled_at: 1,
+            expires_at,
+            revoked_at: None,
+            software_version: String::new(),
+        };
+        // One record from before the index, written the way `put_node` used to.
+        catalog.put_node(&node("old", "t1", 1_000)).unwrap();
+        catalog
+            .remove_durable(&["control/node-by-token/t1/old".to_string()])
+            .unwrap();
+
+        assert_eq!(catalog.active_nodes_for("t1", 10).unwrap(), 1);
+        catalog.put_node(&node("a", "t1", 1_000)).unwrap();
+        catalog.put_node(&node("b", "t2", 1_000)).unwrap();
+        catalog.put_node(&node("gone", "t1", 5)).unwrap();
+        assert_eq!(catalog.active_nodes_for("t1", 10).unwrap(), 2);
+        assert_eq!(catalog.active_nodes_for("t2", 10).unwrap(), 1);
+
+        // An expired record leaves, and takes its index entry with it.
+        assert_eq!(catalog.expire_nodes(100, 50).unwrap(), 1);
+        assert!(catalog
+            .scan("control/node-by-token/t1/gone")
+            .unwrap()
+            .is_empty());
+        catalog.revoke_node("a", 20).unwrap();
+        assert_eq!(catalog.active_nodes_for("t1", 30).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_workspace_made_later_is_given_to_the_operators_who_are_signed_in() {
+        let catalog = catalog("grant_operators");
+        let now = 1_000;
+        catalog.issue_operator_session("ada", now, 60_000).unwrap();
+        let ended = catalog.issue_operator_session("gone", now, 60_000).unwrap();
+        catalog
+            .revoke_session(&ended.record.session_id, now)
+            .unwrap();
+        catalog
+            .issue_session("person", "id.example", now, 60_000)
+            .unwrap();
+
+        let issued = catalog.provision("later", "web", now).unwrap();
+        let workspace_id = issued.key.workspace_id;
+        assert!(catalog.memberships("ada").unwrap().is_empty());
+
+        assert_eq!(catalog.grant_operators(workspace_id, now).unwrap(), 1);
+        assert_eq!(
+            catalog.memberships("ada").unwrap(),
+            vec![(workspace_id, Role::Owner)]
+        );
+        assert!(
+            catalog.memberships("gone").unwrap().is_empty(),
+            "a revoked operator session was given a workspace"
+        );
+        assert!(
+            catalog.memberships("person").unwrap().is_empty(),
+            "a LinkKeys sign-in grants no role (L054)"
+        );
+        // A role somebody already holds is left as it is.
+        catalog
+            .put_member(&Member {
+                subject: "ada".into(),
+                workspace_id,
+                role: Role::Viewer,
+                display_name: "ada".into(),
+                added_at: now,
+            })
+            .unwrap();
+        assert_eq!(catalog.grant_operators(workspace_id, now).unwrap(), 0);
+        assert_eq!(
+            catalog.memberships("ada").unwrap(),
+            vec![(workspace_id, Role::Viewer)]
+        );
     }
 }

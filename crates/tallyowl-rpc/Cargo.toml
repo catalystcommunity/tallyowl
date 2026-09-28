@@ -19,9 +19,15 @@ tallyowl-obs = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = "2"
 x509-parser = { workspace = true }
+# The roots of the operating system, for a client that trusts a public or a
+# corporate authority. Native rather than a bundled list, so an authority that
+# an administrator installed on the host is trusted with no TallyOwl setting.
+rustls-native-certs = { workspace = true }
 
 [dev-dependencies]
 # The mutual-TLS tests build a real authority and real node certificates, the
 # same way the store does. This crate cannot depend on the store, so it builds
 # them itself.
 rcgen = { workspace = true }
+# A certificate's validity window, which `rcgen` states as an `OffsetDateTime`.
+time = { workspace = true }

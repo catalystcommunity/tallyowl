@@ -9,6 +9,7 @@ export interface Storefront {
 }
 export declare function open(router: Router, release?: string): Storefront;
 export declare function walk(storefront: Storefront, steps: readonly FunnelStep[]): Promise<void>;
+export declare function record(storefront: Storefront, steps: readonly FunnelStep[]): void;
 export declare function purchase(storefront: Storefront, orderId: string, value: string, currency: string): Promise<void>;
 export declare function fail(storefront: Storefront, errorType: string, message: string): Promise<void>;
 export declare function close(storefront: Storefront): Promise<void>;

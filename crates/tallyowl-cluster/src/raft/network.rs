@@ -103,7 +103,7 @@ impl Peer {
     pub fn wait(self: &Arc<Peer>) -> Option<Waiting> {
         let taken = self
             .waiting
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
                 (now < MAX_WAITING_FOR_ONE_PEER).then_some(now + 1)
             });
         taken.ok().map(|_| Waiting(Arc::clone(self)))

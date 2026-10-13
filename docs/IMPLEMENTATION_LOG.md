@@ -6742,3 +6742,173 @@ Not exercised in the cluster: a signed alert callback (the cross-language
 vector and the head's tests cover it), and a head outage longer than one third
 of a certificate lifetime.
 
+## L193. The release stopped on a test that raced, and the race was a real defect
+
+**Phase:** after 0.2.1
+**Decision:** the release workflow for commit `e52692d` stopped at
+`tallyowl-test-rust` on 2026-09-28. One test failed:
+`a_refused_handshake_is_counted_and_a_node_with_no_identity_is_not` expected one
+refused handshake and the server counted two. It had passed on a workstation.
+
+Running each new socket test 200 times, 16 at a time, reproduced it and found
+two more tests that failed the same way, about one run in five and one run in
+seventy. None had failed in CI yet.
+
+**The cause is a real defect, not only a test.** With TLS 1.3 the client
+finishes its side of the handshake before the server checks the client's
+certificate, and it sends its first request at once. The server refused the
+certificate, queued an alert, and dropped the socket with that request unread,
+so the kernel sent a reset. The client's write failed with "broken pipe", it
+never read the alert, and it reported "We could not reach ... Broken pipe",
+which is retryable. A collector with a certificate the head does not trust
+would therefore retry for ever with a message about the network, not stop with
+one about the certificate. The first test also counted the client's second
+attempt, which the same race caused.
+
+**The fix is on the server.** After a refused handshake, `TlsDuplex::linger_close`
+flushes the alert, closes only the write side, and reads and discards input
+until the client closes or one second passes. This is the lingering close
+that HTTP servers use. It runs on the connection's own thread, which the
+connection limit bounds. The client now reads the alert and reports "refused
+this connection during the TLS handshake", which is not retryable.
+
+The first test now asserts at least one counted refusal and that no refused
+peer reached the service, because a client can legitimately try twice.
+
+After the fix, 200 parallel runs of each of the three tests, and 60 of the
+whole `transport_security` binary, had no failure. Before it, the same runs
+failed 43 times in 200 and 3 times in 200.
+
+**Other tests that could stop a release.** The same method on every Rust test
+binary found three more. None had failed in CI yet.
+
+- `a_voter_that_lost_its_disk_does_not_vote_until_it_has_caught_up` failed in
+  two of three runs of the consensus tests. The vote hold ends when the log of
+  the node reaches the commit index of the leader. That is the correct Raft
+  rule. The test checked the applied index, which follows the log a moment
+  later. The test now checks the log.
+- `a_learner_follows_the_log_without_enlarging_the_write_quorum` failed in one
+  of eight runs: the learner reported the applied index and held no rows. Two
+  causes. First, a defect in `SegmentedStore::row_count`: it read the catalog
+  and then memory, so a seal that published between the two reads was counted
+  in neither place, and a seal between the publish and the removal of its
+  batch was counted twice. Queries already read memory first and the catalog
+  second, and skip a batch that the catalog names. The count now does the
+  same. A new check in `rows_being_sealed_stay_visible_to_every_kind_of_read`
+  reads the count after the publish, where the old count gave twice the rows.
+  Second, the test took its target from the node that was leader before the
+  write. Under load the leadership can move. The target is now the furthest
+  voter.
+- Two `starter` tests in the head used a fixed temporary directory. Two test
+  processes on one host shared it and each deleted the store of the other. The
+  name now includes the process ID. No other test directory had this problem.
+
+After the fixes, 24 runs of the consensus tests, 12 of them two at a time, had
+no failure. The workspace tests, `cargo fmt --check`, and `cargo clippy
+--workspace --all-targets -D warnings` pass.
+
+Most consensus tests also fail when twelve copies of the binary run at the
+same time on one workstation. Elections then time out. That is overload, not a
+defect, and CI runs one copy.
+
+**Cost to change:** cheap.
+**Revisit:** no.
+
+
+## L194. Corndogs 0.8.0: every request has a submission key or a task guard
+
+**Phase:** after 0.2.1
+**Decision:** D63. Corndogs released 0.8.0 (commit `f1b6ec6`, image `0.8.0`,
+chart 0.6.0 at `c2c322a`) on 2026-09-30. TallyOwl moved to it on 2026-10-06.
+
+**What changed in `tallyowl-queue`.**
+
+- The queue uses `SubmitKeyedTask` (guarded), `ClaimGuardedTask`,
+  `UpdateGuardedTask`, and `CompleteGuardedTask`. `ClaimedTask` holds the
+  revision of the claim, and each change names it and the claimed state.
+- A lost reply is sent again with the same bytes, at most three times, and
+  only while the elapsed time plus one call deadline is less than half of the
+  receipt retention. The Corndogs Rust client never sends a call again by
+  itself; it reports "outcome uncertain" and leaves the decision to the
+  caller.
+- The queue calls `GetServerInfo` when it connects. A server without
+  `submission-keys-v1` and `task-guards-v1`, or one that does not know the
+  operation, is refused as `schema-unsupported`.
+- A refused change from a worker whose claim ended (code 5, 7, or 8) is
+  `failed-precondition` and not retryable. A resent claim that gets code 8
+  returns no task.
+- The in-memory `FakeQueue` follows the same guard rule, so a test that acts
+  on an ended claim gets the refusal that Corndogs gives.
+- New metric `tallyowl_queue_call_resends_total{op}`. New failure reasons
+  `claim-ended` and `refused` on `tallyowl_queue_call_failures_total`.
+
+**Why the key is random and not the batch ID.** Corndogs compares the request
+bytes for a key. The payload holds the acceptance time, so a producer's retry
+of one batch has different bytes, and a batch-ID key would return "submission
+key conflict" for a correct retry. Final storage stays the deduplication of a
+batch ID.
+
+**Charts and tools.** The sidecar runs `corndogs:0.8.0` with both policies
+`required` by default (`corndogsDeployment.resilience`), and the chart refuses
+a policy name Corndogs does not know. `helm-check` checks the rendered
+policies. `kind-check` installs the shared Corndogs from chart 0.6.0 with both
+policies `required`, and checks that the collector and a cell head report
+them. The chart pin is the digest that GitHub records for the release asset.
+`dev`, `soak`, and `drill` start Corndogs with both policies `required`.
+
+**Evidence.**
+
+- Unit tests with a scripted connection: a lost reply is sent again with the
+  same bytes and leaves one task; two submissions carry two keys; three lost
+  replies give `unavailable`; a short retention gives no resend; a
+  ServiceError is not sent again; a resent claim that got code 8 finds
+  nothing; a server older than 0.8.0, or one without task guards, is refused.
+- `crates/tallyowl-queue/tests/live.rs` runs against a real server when
+  `CORNDOGS_TEST_ADDR` is set, and does nothing otherwise. It passed against
+  Corndogs built from `c2c322a` with both policies `required`: the whole life
+  of a task, and a stale claim refused after the sweep. With
+  `CORNDOGS_TEST_OLD=1` it passed against Corndogs 0.7.6: the queue refused
+  the server with the upgrade message. With `CORNDOGS_TEST_LEGACY_QUEUE` it
+  passed the upgrade path: a task written by `corndogs submit-task` (no key,
+  no guard) while the server was in `compatibility`, then claimed and
+  completed by the queue after a restart in `required`.
+- `kind-check` passed on 2026-10-06 with the sidecar `corndogs:0.8.0` and the
+  shared Corndogs from chart 0.6.0, both with the two policies `required`: 25
+  events committed through Corndogs over TLS, the collector and a cell head
+  reported both policies `required`, and the cell failed over.
+
+**Cost to change:** cheap.
+**Revisit:** no.
+
+## L195. The catalystcommunity dependencies, checked before the release
+
+**Phase:** after 0.2.1
+**Decision:** on 2026-10-13 each catalystcommunity dependency was compared
+with its latest release on GitHub.
+
+| Dependency | Pin before | Latest | Result |
+| --- | --- | --- | --- |
+| csilgen (CLI, generators, Rust, Go, and TypeScript transports) | 0.2.9 (`baec1da`) | 0.2.9 | No change. GitHub has no commit after `baec1da`. `gen-check` passes. |
+| Corndogs | 0.8.0 (`f1b6ec6`), chart 0.6.0 | the same | No change. See L194. |
+| LinkKeys `linkkeys-local-rp` | `3b8c389` (0.14.2 and one commit) | v0.16.3 (`03fcbd8`) | Moved to v0.16.3. |
+| Reactorcide `runnerbase` | `latest` | `latest` | No pin. |
+
+**What LinkKeys 0.16 changes for the head.**
+
+- `begin_local_login` reads the `_linkkeys_apis` TXT record of the identity
+  domain to find its browser address. When the lookup fails or the record has
+  no `https=` value, it uses `https://<domain>` as before. The lookup uses the
+  system resolver, and the SDK holds a small tokio runtime for it. No head
+  test reaches `begin_local_login`, so no test makes a DNS query.
+- The SDK accepts `alice@example.com` and sends the username to the identity
+  domain. It gives back the domain in lowercase. The head compared the input
+  with `linkkeys.trustedDomains` exactly, so it refused `alice@example.com`,
+  and after verification it refused a trusted domain that the operator wrote
+  with a capital letter. The head now checks the domain after `@`, and case
+  does not matter. Test:
+  `a_trusted_domain_is_trusted_with_a_username_and_in_any_case`.
+- The SDK brings hickory-resolver 0.26, tokio, and `url`. `./tools.sh audit`
+  passes.
+
+**Cost to change:** cheap.
+**Revisit:** at the next release.

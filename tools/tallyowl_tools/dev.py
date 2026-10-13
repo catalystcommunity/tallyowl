@@ -129,6 +129,14 @@ def _corndogs_command() -> tuple[list[str], Path]:
     )
 
 
+#: Corndogs 0.8.0 refuses a request without a submission key or a task guard.
+#: TallyOwl sends both, so a local run refuses the rest as the chart does.
+CORNDOGS_REQUIRED = {
+    "CORNDOGS_SUBMISSION_KEY_POLICY": "required",
+    "CORNDOGS_TASK_GUARD_POLICY": "required",
+}
+
+
 def _corndogs_environment() -> dict[str, str]:
     """Corndogs settings the home profile needs.
 
@@ -142,6 +150,7 @@ def _corndogs_environment() -> dict[str, str]:
         "CORNDOGS_FILESTORE_SYNC": "group",
         "CORNDOGS_LISTEN": "127.0.0.1:5080",
         "CORNDOGS_HTTP_LISTEN": "127.0.0.1:5081",
+        **CORNDOGS_REQUIRED,
         "LOGLEVEL": "error",
     }
 

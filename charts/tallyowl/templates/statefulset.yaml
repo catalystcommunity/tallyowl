@@ -190,6 +190,15 @@ spec:
               value: "0.0.0.0:{{ include "tallyowl.port" .Values.corndogs.endpoint }}"
             - name: CORNDOGS_HTTP_LISTEN
               value: "0.0.0.0:{{ .Values.corndogsDeployment.operationalPort }}"
+            # What this Corndogs accepts. Every TallyOwl request carries a
+            # submission key or a task guard, so `required` refuses only a
+            # request from an older component.
+            - name: CORNDOGS_SUBMISSION_KEY_POLICY
+              value: {{ .Values.corndogsDeployment.resilience.submissionKeyPolicy | quote }}
+            - name: CORNDOGS_TASK_GUARD_POLICY
+              value: {{ .Values.corndogsDeployment.resilience.taskGuardPolicy | quote }}
+            - name: CORNDOGS_RECEIPT_RETENTION
+              value: {{ .Values.corndogsDeployment.resilience.receiptRetention | quote }}
             {{- if .Values.corndogsDeployment.tlsSecret }}
             # D62. Corndogs serves TLS on its RPC port and reads the files
             # again after a change, so a renewed Secret needs no restart.

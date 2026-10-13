@@ -112,7 +112,7 @@ disruption:
 # ---------------------------------------------------------------------------
 # The image tag is the Corndogs build that the TallyOwl queue client is built
 # against. The workspace `Cargo.toml` pins the client at the commit of the
-# release `corndogs/v0.7.6` (`21d0182`), and this is that release's image. This line is the
+# release `corndogs/v0.8.0` (`f1b6ec6`), and this is that release's image. This line is the
 # only place the chart names the tag. The queue carries every receipt, so its
 # version must not change because a pod moved to another node. The chart
 # refuses the tag `latest`.
@@ -122,7 +122,7 @@ disruption:
 # a batch durable that a pod restart deletes.
 corndogsDeployment:
   enabled: false
-  image: containers.catalystsquad.com/public/catalystcommunity/corndogs:0.7.6
+  image: containers.catalystsquad.com/public/catalystcommunity/corndogs:0.8.0
   # The pull policy of the Corndogs image. Empty means `image.pullPolicy`, the
   # policy of the TallyOwl image. Set it when the two images come from
   # different places, for example a TallyOwl image built locally with
@@ -135,6 +135,20 @@ corndogsDeployment:
   # `<release>-corndogs` and `<release>-corndogs.<namespace>.svc`. The head
   # reaches its sidecar over TLS as well, by the second name.
   tlsSecret: ""
+  # What this Corndogs accepts (Corndogs 0.8.0, its `docs/resilience.md`).
+  # `required` refuses a submission without a submission key and a change
+  # without a task guard. Every TallyOwl component of this release sends both,
+  # so a request that this refuses is a defect or a component from an older
+  # release. Set `compatibility` only while a collector from an older release
+  # still writes to this Corndogs, and watch
+  # `corndogs_legacy_requests_total` reach 0 before you set `required` again.
+  resilience:
+    submissionKeyPolicy: required
+    taskGuardPolicy: required
+    # How long Corndogs keeps a submission key or an operation ID, as a Go
+    # duration of `1m` or more. TallyOwl sends a request again after a lost
+    # reply only within half of this time.
+    receiptRetention: 1h
   # Health and metrics of the queue. It answers `/healthz`.
   operationalPort: 8080
   resources:

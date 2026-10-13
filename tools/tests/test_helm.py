@@ -489,3 +489,30 @@ class SidecarPullPolicy(unittest.TestCase):
         with self.assertRaisesRegex(ToolFailed, "`corndogs` container pulls with `Never`"):
             helm.check_sidecar_pull_policy(sidecar_pod("Never", "Never"), "Never", "IfNotPresent")
 
+
+
+def resilient_pod(submission_keys: str, task_guards: str) -> str:
+    return f"""kind: StatefulSet
+spec:
+  template:
+    spec:
+      containers:
+        - name: head
+        - name: corndogs
+          env:
+            - name: CORNDOGS_SUBMISSION_KEY_POLICY
+              value: {submission_keys}
+            - name: CORNDOGS_TASK_GUARD_POLICY
+              value: {task_guards}
+"""
+
+
+class SidecarResilience(unittest.TestCase):
+    def test_a_sidecar_with_both_policies_passes(self) -> None:
+        helm.check_sidecar_resilience(resilient_pod("required", "required"), "required", "required")
+
+    def test_a_sidecar_that_kept_the_default_is_refused_by_name(self) -> None:
+        with self.assertRaisesRegex(ToolFailed, "CORNDOGS_TASK_GUARD_POLICY=compatibility"):
+            helm.check_sidecar_resilience(
+                resilient_pod("required", "compatibility"), "required", "required"
+            )

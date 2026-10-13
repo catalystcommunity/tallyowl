@@ -274,8 +274,11 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         metrics: Some(Arc::clone(&metrics)),
         tls: queue_tls,
     };
-    let queue: Arc<dyn DurableQueue> = match CorndogsQueue::connect_with(endpoint, queue_options) {
-        Ok(queue) => Arc::new(queue),
+    let (queue, store) = match CorndogsQueue::connect_with(endpoint, queue_options) {
+        Ok(queue) => {
+            let store = queue.store().clone();
+            (Arc::new(queue) as Arc<dyn DurableQueue>, store)
+        }
         Err(e) => {
             // Failing to start is the right answer. The alternative is a
             // collector that listens, accepts, and throws data away.
@@ -292,6 +295,9 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         &[
             ("address", endpoint),
             ("transport", if queue_secured { "tls" } else { "plaintext" }),
+            ("corndogs_version", &store.version),
+            ("submission_key_policy", &store.submission_key_policy),
+            ("task_guard_policy", &store.task_guard_policy),
         ],
     );
 

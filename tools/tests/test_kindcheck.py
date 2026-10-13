@@ -87,3 +87,18 @@ class Consensus(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Enforced(unittest.TestCase):
+    LINE = ('{"message":"Reached the durable store.","transport":"tls",'
+            '"submission_key_policy":"required","task_guard_policy":"required"}')
+
+    def test_a_store_that_requires_both_is_reported(self) -> None:
+        self.assertTrue(kindcheck.enforced(self.LINE, "Reached the durable store"))
+
+    def test_a_store_in_compatibility_mode_is_not(self) -> None:
+        line = self.LINE.replace('"task_guard_policy":"required"', '"task_guard_policy":"compatibility"')
+        self.assertFalse(kindcheck.enforced(line, "Reached the durable store"))
+
+    def test_another_line_does_not_count(self) -> None:
+        self.assertFalse(kindcheck.enforced(self.LINE, "Reached the durable queue"))

@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 tallyowl-obs = { workspace = true }
 corndogs = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 # The TLS test stands up a durable store that speaks Corndogs' wire protocol

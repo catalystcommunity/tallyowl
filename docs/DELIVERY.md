@@ -104,11 +104,14 @@ batch keeps the same stable ID across connection loss and retry. The collector
 acknowledgement gives that ID, the accepted count, and the queue acceptance
 time.
 
-A lost acknowledgement can cause a duplicate Corndogs task. Corndogs does not
-have a TallyOwl batch-id idempotency key.
-
+A lost acknowledgement to the app can cause a second Corndogs task for one
+batch: the app sends the batch again, and the collector submits it again.
 Final storage deduplicates the stable batch ID. Thus, the result has one logical
 commit.
+
+A lost reply from Corndogs to the collector does not cause a second task. Each
+submission has a submission key, and the collector sends the same request
+again. Corndogs returns the first task. See D63 and section 4.
 
 The first app-driver defaults are:
 
@@ -161,10 +164,12 @@ before a retry, the worker parks the task and names the ready state as the
 automatic target state:
 
 ```text
-UpdateTask(uuid,
-           new_state = "backoff",
-           auto_target_state = "queued",
-           timeout = <backoff seconds>)
+UpdateGuardedTask(uuid,
+                  expected_revision = <the revision of the claim>,
+                  expected_state = "sending",
+                  new_state = "backoff",
+                  auto_target_state = "queued",
+                  timeout = <backoff seconds>)
 ```
 
 Corndogs moves the task back to `queued` when the timeout expires. No worker
@@ -185,6 +190,27 @@ number of live tasks. The file backend keeps a deadline index. The sweep starts
 at the first expired entry and stops at the first live entry. The measured cost
 is 2.3 milliseconds at 1,000 live tasks and at 5,000 live tasks. See D4 and
 D33.
+
+### Submission keys and task guards
+
+From Corndogs release 0.8.0, every TallyOwl request is safe to send again
+(D63):
+
+- **A submission** has a random submission key. When the reply is lost, the
+  collector sends the same request again, and Corndogs returns the first task.
+- **A claim** has an operation ID, and it returns the revision of the task.
+- **A change** (complete, park, quarantine) has an operation ID, and it names
+  the revision and the state of the claim. When the claim timed out and the
+  sweep returned the task, the revision is different, and Corndogs refuses the
+  change. The worker logs a warning. The other worker that holds the task
+  delivers it, and final storage counts it once.
+
+The queue sends a request again at most three times, and only within half of
+the Corndogs receipt retention. The metric
+`tallyowl_queue_call_resends_total` counts each resend, by operation. A
+failure is in `tallyowl_queue_call_failures_total`: the reason `claim-ended`
+is a refused change from a worker whose claim ended, and `refused` is another
+Corndogs refusal, which is a defect.
 
 The queue depth count is a different call. From Corndogs release 0.7.6, the
 file backend keeps a count for each queue and state, and each task write

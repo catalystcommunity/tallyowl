@@ -276,7 +276,10 @@ mod tests {
     use super::*;
 
     fn a_directory(name: &str) -> std::path::PathBuf {
-        let place = std::env::temp_dir().join(format!("tallyowl-starter-{name}"));
+        // The process ID too: two test runs on one host used the same
+        // directory, and each wiped the other's store.
+        let place =
+            std::env::temp_dir().join(format!("tallyowl-starter-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&place);
         std::fs::create_dir_all(&place).expect("a directory");
         place

@@ -153,6 +153,16 @@ impl Socket {
         }
     }
 
+    /// Close the write side only. The peer reads what was sent and then an
+    /// orderly end, and this side can still read what the peer sends.
+    pub fn shutdown_write(&self) -> io::Result<()> {
+        match self {
+            Socket::Tcp(stream) => stream.shutdown(std::net::Shutdown::Write),
+            #[cfg(unix)]
+            Socket::Unix(stream) => stream.shutdown(std::net::Shutdown::Write),
+        }
+    }
+
     /// Send small frames at once. A unix socket has no delay to turn off.
     pub(crate) fn set_nodelay(&self) {
         if let Socket::Tcp(stream) = self {

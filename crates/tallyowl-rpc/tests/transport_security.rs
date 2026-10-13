@@ -1033,9 +1033,10 @@ fn a_refused_handshake_is_counted_and_a_node_with_no_identity_is_not() {
     let (heard, hear) = std::sync::mpsc::channel::<()>();
     let heard = Mutex::new(heard);
     install_crypto_provider();
+    let recorder = Arc::new(Recorder::default());
     let server = serve_mutual(
         "127.0.0.1:0",
-        Arc::new(Recorder::default()) as Arc<dyn Dispatcher>,
+        Arc::clone(&recorder) as Arc<dyn Dispatcher>,
         ServerOptions::new(MAX_FRAME).on_handshake_refused(Arc::new(move || {
             let _ = heard.lock().unwrap().send(());
         })),
@@ -1054,7 +1055,16 @@ fn a_refused_handshake_is_counted_and_a_node_with_no_identity_is_not() {
     assert!(echo(&forged).is_err());
     hear.recv_timeout(std::time::Duration::from_secs(5))
         .expect("the refused handshake reached the hook");
-    assert_eq!(server.stats().handshakes_refused(), 1);
+    // At least one, and not exactly one. With TLS 1.3 a refused client
+    // certificate reaches the client on its first read after the handshake,
+    // so depending on timing the client sees a broken connection and tries
+    // once more, and the server refuses and counts that attempt too. Exactly
+    // one passed on a workstation and failed in CI.
+    assert!(server.stats().handshakes_refused() >= 1);
+    assert!(
+        recorder.peers.lock().unwrap().is_empty(),
+        "a refused peer reached the service"
+    );
 
     // A node that has no certificate of its own yet drops the connection, and
     // the peer did nothing wrong, so it is not counted as a refusal.

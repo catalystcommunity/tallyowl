@@ -553,14 +553,20 @@ impl SegmentedStore {
     }
 
     pub fn seal(&self) -> Result<Option<[u8; 16]>, StoreError> {
-        self.seal_observed(&|| {})
+        self.seal_observed(&|| {}, &|| {})
     }
 
-    /// Seal, and call `while_building` after the drain and before the publish.
+    /// Seal, and call `while_building` after the drain and before the publish,
+    /// and `while_published` after the publish and before the batch leaves
+    /// memory.
     ///
-    /// A test reads the store from inside that window, which is the only way
+    /// A test reads the store from inside those windows, which is the only way
     /// to show what a query sees there without racing a clock.
-    fn seal_observed(&self, while_building: &dyn Fn()) -> Result<Option<[u8; 16]>, StoreError> {
+    fn seal_observed(
+        &self,
+        while_building: &dyn Fn(),
+        while_published: &dyn Fn(),
+    ) -> Result<Option<[u8; 16]>, StoreError> {
         // One seal at a time. See `sealing_turn` for what two of them do to the
         // checkpoint, and through it to the append log.
         let _turn = self.sealing_turn.lock().expect("sealing turn");
@@ -614,6 +620,7 @@ impl SegmentedStore {
         // the log reclaimed the only copy of rows TallyOwl had acknowledged.
         match self.publish_sealed(&rows, &plan, from, to) {
             Ok(written) => {
+                while_published();
                 // The catalog names the segments now. A reader that still
                 // finds this batch also finds its segments, and reads those.
                 let mut state = self.state.lock().expect("store lock");
@@ -1669,19 +1676,30 @@ impl Store for SegmentedStore {
     }
 
     fn row_count(&self) -> usize {
-        let sealed: u64 = self
-            .catalog
-            .manifests()
-            .map(|manifests| manifests.iter().map(|m| m.row_count).sum())
-            .unwrap_or(0);
-        let state = self.state.lock().expect("store lock");
-        sealed as usize
-            + state.open.len()
-            + state
+        // Memory first and the catalog second, as `memory_view` does. The
+        // catalog used to come first, and a seal that published between the
+        // two reads was in neither: its segments were not in the catalog yet,
+        // and its batch had left memory. A batch whose segments the catalog
+        // names is counted once, from the catalog.
+        let (open, sealing) = {
+            let state = self.state.lock().expect("store lock");
+            let sealing: Vec<(Vec<[u8; 16]>, usize)> = state
                 .sealing
                 .iter()
-                .map(|batch| batch.rows.len())
-                .sum::<usize>()
+                .map(|batch| (batch.segment_ids.clone(), batch.rows.len()))
+                .collect();
+            (state.open.len(), sealing)
+        };
+        let manifests = self.catalog.manifests().unwrap_or_default();
+        let sealed: u64 = manifests.iter().map(|m| m.row_count).sum();
+        let published: std::collections::HashSet<[u8; 16]> =
+            manifests.iter().map(|m| m.segment_id).collect();
+        let building: usize = sealing
+            .iter()
+            .filter(|(segment_ids, _)| !segment_ids.iter().any(|id| published.contains(id)))
+            .map(|(_, rows)| rows)
+            .sum();
+        sealed as usize + open + building
     }
 
     fn is_writable(&self) -> bool {
@@ -2239,25 +2257,33 @@ mod seal_safety {
 
         let seen = std::cell::Cell::new(false);
         store
-            .seal_observed(&|| {
-                // The rows have left the open buffer and no segment holds them.
-                assert_eq!(visible(&store), 10, "a scan lost the rows being sealed");
-                assert!(
-                    store.lookup_event(wanted).unwrap().is_some(),
-                    "an exact lookup lost a row being sealed"
-                );
-                assert_eq!(
-                    store
-                        .lookup_correlated(crate::segment::schema::SESSION_ID, b"s-1")
-                        .unwrap()
-                        .rows
-                        .len(),
-                    10,
-                    "a correlated lookup lost the rows being sealed"
-                );
-                assert_eq!(store.row_count(), 10);
-                seen.set(true);
-            })
+            .seal_observed(
+                &|| {
+                    // The rows have left the open buffer and no segment holds them.
+                    assert_eq!(visible(&store), 10, "a scan lost the rows being sealed");
+                    assert!(
+                        store.lookup_event(wanted).unwrap().is_some(),
+                        "an exact lookup lost a row being sealed"
+                    );
+                    assert_eq!(
+                        store
+                            .lookup_correlated(crate::segment::schema::SESSION_ID, b"s-1")
+                            .unwrap()
+                            .rows
+                            .len(),
+                        10,
+                        "a correlated lookup lost the rows being sealed"
+                    );
+                    assert_eq!(store.row_count(), 10);
+                    seen.set(true);
+                },
+                &|| {
+                    // The catalog names the segments and memory still holds the
+                    // batch. Each row is counted once.
+                    assert_eq!(visible(&store), 10, "a scan counted a row twice");
+                    assert_eq!(store.row_count(), 10, "the count took a row twice");
+                },
+            )
             .unwrap();
         assert!(seen.get());
 

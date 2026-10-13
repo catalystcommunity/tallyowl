@@ -167,6 +167,11 @@ pub fn server_auth_config(certificates: Arc<CertificateSet>) -> Arc<ServerConfig
     )
 }
 
+/// How long a refused connection is kept open so that its peer reads the alert.
+/// It runs on the connection's own thread, and the connection limit bounds how
+/// many can wait at once.
+const REFUSAL_LINGER: Duration = Duration::from_secs(1);
+
 /// Why a secured listener dropped a connection.
 pub(crate) enum Refusal {
     /// This node has no identity yet, or its own configuration did not build.
@@ -213,8 +218,11 @@ impl Security {
         let duplex = TlsDuplex::new(rustls::Connection::Server(connection), socket)
             .map_err(|_| Refusal::Handshake)?;
         // Finish the handshake before a frame is read. A peer that fails it is
-        // refused here and never reaches a decoder.
-        duplex.handshake().map_err(|_| Refusal::Handshake)?;
+        // refused here and never reaches a decoder, and hears why.
+        if duplex.handshake().is_err() {
+            duplex.linger_close(REFUSAL_LINGER);
+            return Err(Refusal::Handshake);
+        }
         let peer = match self {
             Security::Mutual {
                 allow_anonymous, ..

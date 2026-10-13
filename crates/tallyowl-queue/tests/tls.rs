@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use corndogs::{
-    encode_get_queue_and_state_counts_response, GetQueueAndStateCountsResponse, QueueAndStateCounts,
+    encode_get_queue_and_state_counts_response, encode_get_server_info_response,
+    GetQueueAndStateCountsResponse, GetServerInfoResponse, QueueAndStateCounts,
 };
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use tallyowl_queue::{CorndogsQueue, DurableQueue, QueueOptions, QueueTls};
@@ -73,6 +74,22 @@ fn store(directory: &Scratch) -> tallyowl_rpc::Server {
         .unwrap(),
     );
     let answer = Arc::new(|request: &Request| {
+        // The queue asks the store what it is before anything else.
+        if request.op == "GetServerInfo" {
+            return tallyowl_rpc::reply(
+                "GetServerInfoResponse",
+                encode_get_server_info_response(&GetServerInfoResponse {
+                    server_version: "0.8.0".to_string(),
+                    features: tallyowl_queue::REQUIRED_FEATURES
+                        .iter()
+                        .map(|feature| feature.to_string())
+                        .collect(),
+                    submission_key_policy: "required".to_string(),
+                    task_guard_policy: "required".to_string(),
+                    receipt_retention_seconds: 3_600,
+                }),
+            );
+        }
         assert_eq!(request.op, "GetQueueAndStateCounts");
         let mut held = HashMap::new();
         held.insert(

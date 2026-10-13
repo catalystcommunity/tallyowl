@@ -716,8 +716,10 @@ pod, every listener is on the pod network, so every CSIL connection uses TLS.
 
 ### Corndogs
 
-Corndogs serves TLS from release 0.7.6 (image `0.7.6`, chart 0.5.7). There are
-two ways to run it:
+TallyOwl needs Corndogs release 0.8.0 or later (image `0.8.0`, chart 0.6.0).
+The head and the collector ask Corndogs for its features when they connect,
+and refuse an older release with an error that says to upgrade (D63). There
+are two ways to run it:
 
 - **The sidecar in the head pod.** Use it for the home profile, with one head.
   The steps are below.
@@ -765,12 +767,17 @@ the packaged chart.
 
    ```sh
    helm install corndogs \
-     https://github.com/catalystcommunity/corndogs/releases/download/helm_chart%2Fv0.5.7/corndogs-0.5.7.tgz \
+     https://github.com/catalystcommunity/corndogs/releases/download/helm_chart%2Fv0.6.0/corndogs-0.6.0.tgz \
      --namespace <namespace> \
      --set storage.backend=file --set postgresql.enabled=false \
      --set zalando_postgres.enabled=false \
-     --set tls.enabled=true --set tls.secretName=corndogs-tls --set tls.caKey=ca.crt
+     --set tls.enabled=true --set tls.secretName=corndogs-tls --set tls.caKey=ca.crt \
+     --set resilience.submissionKeyPolicy=required \
+     --set resilience.taskGuardPolicy=required
    ```
+
+   Set the two policies to `required` only when this Corndogs serves
+   TallyOwl alone. See "Submission keys and task guards" below.
 
    The chart's `ca.crt` entry is for its own timeout CronJob, which checks the
    server with it.
@@ -782,6 +789,43 @@ the packaged chart.
 
 Corndogs reads its certificate files again after a change, so a renewed Secret
 needs no restart.
+
+#### Submission keys and task guards
+
+Every TallyOwl request to Corndogs has a submission key or a task guard (D63).
+A submission key makes a lost reply safe to send again: Corndogs returns the
+first task and does not make a second one. A task guard makes Corndogs refuse
+a change from a worker whose claim ended.
+
+Two Corndogs settings control what Corndogs accepts:
+
+| Head chart value | Corndogs setting | Default in the head chart |
+| --- | --- | --- |
+| `corndogsDeployment.resilience.submissionKeyPolicy` | `CORNDOGS_SUBMISSION_KEY_POLICY` | `required` |
+| `corndogsDeployment.resilience.taskGuardPolicy` | `CORNDOGS_TASK_GUARD_POLICY` | `required` |
+| `corndogsDeployment.resilience.receiptRetention` | `CORNDOGS_RECEIPT_RETENTION` | `1h` |
+
+`required` refuses a request without a key or a guard. `compatibility`
+accepts it. The Corndogs chart and the Corndogs binary use `compatibility` by
+default. The head and the collector log the two policies on the line
+"Reached the durable store" or "Reached the durable queue".
+
+TallyOwl sends a request again after a lost reply only within half of the
+receipt retention. Keep the retention at 10 minutes or more. With the minimum
+of 1 minute and the default `corndogs.callTimeout` of 30 seconds, TallyOwl
+does not send a request again.
+
+**Upgrade from Corndogs 0.7.x.**
+
+1. Back up the Corndogs data volume. A 0.7.x server cannot read a guarded
+   task, so the backup is the only way back.
+2. Stop Corndogs, change the image or the chart, and start it. Corndogs adds
+   its new storage when it starts. For the sidecar, upgrade the head chart.
+3. Upgrade the head and the collector to this release. Tasks from the older
+   release do not have a guard. TallyOwl claims them and finishes them.
+4. If a collector from an older release still writes to this Corndogs, set
+   both policies to `compatibility` until it is upgraded. Then set them to
+   `required` again.
 
 A service that is not in a chart sets `corndogs.tls.caFile` (a PEM file of
 the authorities) and, if the certificate does not carry the endpoint's host,

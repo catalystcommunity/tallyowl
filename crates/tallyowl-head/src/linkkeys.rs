@@ -285,11 +285,12 @@ impl SignIn {
     }
 
     fn check_domain(&self, domain: &str) -> Result<(), TallyOwlError> {
+        let asked = domain_of(domain);
         if self
             .settings
             .trusted_domains
             .iter()
-            .any(|trusted| trusted == domain)
+            .any(|trusted| trusted.trim().eq_ignore_ascii_case(&asked))
         {
             return Ok(());
         }
@@ -330,6 +331,18 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
     getrandom::fill(&mut out).expect("the system random source");
     out
+}
+
+/// The domain in what a person typed: `example.com`, or `alice@example.com`
+/// with a username. From LinkKeys 0.16 the SDK accepts both, sends the username
+/// to the identity domain, and gives back the domain in lowercase. A domain is
+/// trusted or not whatever its case and whoever is named in front of it.
+fn domain_of(input: &str) -> String {
+    let input = input.trim();
+    input
+        .rsplit_once('@')
+        .map_or(input, |(_, domain)| domain)
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -393,6 +406,34 @@ mod tests {
         assert!(failure.message.contains("attacker.example"));
         // The trusted list is not a caller's business.
         assert!(!failure.message.contains("example.com,"));
+    }
+
+    #[test]
+    fn a_trusted_domain_is_trusted_with_a_username_and_in_any_case() {
+        // LinkKeys 0.16 accepts `alice@example.com` and returns the domain in
+        // lowercase, so the check after verification sees `example.com` even
+        // when the operator wrote `Example.com`.
+        let service = sign_in("domain-forms", true, &["Example.com"]);
+        for accepted in [
+            "example.com",
+            "EXAMPLE.com",
+            "alice@example.com",
+            " alice@Example.COM ",
+        ] {
+            assert!(service.check_domain(accepted).is_ok(), "{accepted}");
+        }
+        for refused in [
+            "attacker.example",
+            "example.com@attacker.example",
+            "example.com.attacker.example",
+        ] {
+            let failure = service.check_domain(refused).unwrap_err();
+            assert_eq!(
+                failure.code,
+                tallyowl_obs::ErrorCode::PermissionDenied,
+                "{refused}"
+            );
+        }
     }
 
     #[test]

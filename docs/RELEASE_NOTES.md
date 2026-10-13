@@ -20,6 +20,14 @@ release that contains these changes gets its version number from its commits.
 Each item below changes what an installation does with a configuration that
 worked before.
 
+- **TallyOwl needs Corndogs 0.8.0 or later (D63).** The head and the
+  collector refuse an older Corndogs when they connect, and the error says to
+  upgrade it. The head chart runs Corndogs `0.8.0` in the sidecar, and starts
+  it with submission keys and task guards required
+  (`corndogsDeployment.resilience`). Back up the Corndogs volume before the
+  upgrade: Corndogs 0.7.x cannot read the tasks that this release writes. A
+  shared Corndogs uses the Corndogs chart 0.6.0. See DEPLOYMENT.md section 7c.
+
 - **A setting that does nothing now refuses a value that is not its default.**
   The settings are `integrity.mode: scrub`, `integrity.scrub.*`,
   `catalog.snapshots.*`, `storage.coldTier.enabled`,
@@ -180,6 +188,26 @@ worked before.
   was not evaluated.
 - The downsample pass follows a durable watermark and does not skip a window.
   It no longer counts a rollup row a second time.
+- A client whose certificate a server refuses now stops and reports that the
+  server refused the connection during the TLS handshake. Before, with TLS 1.3,
+  the client could get "broken pipe" and try again for ever with a message
+  about the network. The server now reads the rest of the refused connection
+  for at most one second before it closes it, so the client receives the
+  refusal.
+- A lost reply from Corndogs no longer makes a second task, and a worker whose
+  claim timed out can no longer complete, park, or quarantine a task that
+  another worker holds. Every request has a submission key or a task guard,
+  and a lost reply is sent again with the same key. The new metric
+  `tallyowl_queue_call_resends_total` counts the resends. The head and the
+  collector log the Corndogs version and its two policies when they connect.
+- LinkKeys sign-in uses the LinkKeys local relying-party SDK of release
+  0.16.3. A person can type `alice@example.com` as well as `example.com`, and
+  `linkkeys.trustedDomains` matches the domain in any case. The head finds the
+  browser address of the identity domain from its `_linkkeys_apis` DNS record,
+  and uses `https://<domain>` when there is none.
+- The row count that the head writes to its log at start is correct while a
+  segment seals. Before, it could leave out or count twice the rows of that
+  segment.
 
 ### Easier to use
 

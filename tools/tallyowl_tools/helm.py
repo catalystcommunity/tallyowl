@@ -142,6 +142,14 @@ HEAD_REFUSALS: list[tuple[str, list[str], str]] = [
         "corndogsDeployment.image",
     ),
     (
+        "a Corndogs policy that Corndogs does not know",
+        [*HEAD_SECURE,
+            "--set", "corndogsDeployment.enabled=true",
+            "--set", "corndogsDeployment.resilience.taskGuardPolicy=strict",
+        ],
+        "corndogsDeployment.resilience.taskGuardPolicy",
+    ),
+    (
         "self-observation with no collector address to send to",
         [*HEAD_SECURE, "--set", "metrics.selfObservation.enabled=true"],
         "deployment.selfObservationCollector",
@@ -408,6 +416,30 @@ def check_sidecar_pull_policy(rendered: str, head: str, corndogs: str) -> None:
             raise ToolFailed(
                 f"The `{name}` container pulls with `{containers.get(name)}`, and the values ask for `{wanted}`."
             )
+
+
+def check_sidecar_resilience(rendered: str, submission_keys: str, task_guards: str) -> None:
+    """The Corndogs sidecar starts with the admission policies the values ask for.
+
+    TallyOwl sends a submission key and a task guard with every request, so the
+    home profile refuses a request without them. A sidecar that started in
+    `compatibility` because the chart forgot the variable would accept a
+    duplicate submission from an older collector and say nothing.
+    """
+    for container in _workload(rendered, "tallyowl")["spec"]["template"]["spec"]["containers"]:
+        if container["name"] != "corndogs":
+            continue
+        env = {item["name"]: item.get("value") for item in container.get("env", [])}
+        for name, wanted in (
+            ("CORNDOGS_SUBMISSION_KEY_POLICY", submission_keys),
+            ("CORNDOGS_TASK_GUARD_POLICY", task_guards),
+        ):
+            if env.get(name) != wanted:
+                raise ToolFailed(
+                    f"The Corndogs sidecar starts with {name}={env.get(name)}, and the values ask for `{wanted}`."
+                )
+        return
+    raise ToolFailed("The head pod has no `corndogs` container.")
 
 
 def _yaml_block(rendered: str, key: str) -> str:
@@ -803,6 +835,7 @@ def check() -> int:
     check_rendered_settings(collector.stdout, "tallyowl-collector")
     check_corndogs_tls(head.stdout, collector.stdout)
     check_sidecar_pull_policy(head.stdout, "IfNotPresent", "IfNotPresent")
+    check_sidecar_resilience(head.stdout, "required", "required")
     say("Rendering the Corndogs sidecar with its own pull policy, and with the head's.")
     for image_policy, sidecar_policy, expected in (
         ("Never", "", "Never"),

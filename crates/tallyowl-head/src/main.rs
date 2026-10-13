@@ -1174,7 +1174,10 @@ fn start_alerting(
                 let connected = lifecycle::connect_with_backoff(
                     || {
                         tallyowl_queue::CorndogsQueue::connect_with(&endpoint, queue_options.clone())
-                            .map(|queue| Arc::new(queue) as Arc<dyn tallyowl_queue::DurableQueue>)
+                            .map(|queue| {
+                                let store = queue.store().clone();
+                                (Arc::new(queue) as Arc<dyn tallyowl_queue::DurableQueue>, store)
+                            })
                     },
                     |delay| stop.wait(delay),
                     |attempt, failure, delay| {
@@ -1194,12 +1197,16 @@ fn start_alerting(
                     Duration::from_secs(30),
                     tallyowl_obs::time::now_nanos() as u64,
                 );
-                if let Some(queue) = connected {
+                if let Some((queue, store)) = connected {
                     late.connect(queue);
                     health.pass(WORKFLOW_QUEUE_CHECK);
                     logger.info(
                         "Reached the durable queue. Alert evaluation, notifications, and the projector passes are running.",
-                        &[],
+                        &[
+                            ("corndogs_version", &store.version),
+                            ("submission_key_policy", &store.submission_key_policy),
+                            ("task_guard_policy", &store.task_guard_policy),
+                        ],
                     );
                 }
             })

@@ -60,7 +60,7 @@ EVENTS = 25
 
 #: The Corndogs chart for a shared Corndogs. It is not in a chart registry; its
 #: GitHub release attaches the package, and the digest is pinned in `deps.py`.
-CORNDOGS_CHART_VERSION = "0.5.7"
+CORNDOGS_CHART_VERSION = "0.6.0"
 CORNDOGS_CHART_URL = (
     "https://github.com/catalystcommunity/corndogs/releases/download/"
     f"helm_chart%2Fv{CORNDOGS_CHART_VERSION}/corndogs-{CORNDOGS_CHART_VERSION}.tgz"
@@ -110,6 +110,16 @@ def credential(logs: str, prefix: str, what: str) -> str:
     if not found:
         raise ToolFailed(f"The maintenance Job printed no {what}. Its log:\n{logs[-2000:]}")
     return found.group(0)
+
+
+def enforced(logs: str, line: str) -> bool:
+    """Whether a log reports, on `line`, a Corndogs that requires both features."""
+    return any(
+        line in entry
+        and '"submission_key_policy":"required"' in entry
+        and '"task_guard_policy":"required"' in entry
+        for entry in logs.splitlines()
+    )
 
 
 def corndogs_image(values: str) -> str:
@@ -475,6 +485,8 @@ class Check:
         collector_log = cluster.logs(HOME, "deployment/tallyowl-collector")
         if not re.search(r"Reached the durable store.*\"transport\":\"tls\"", collector_log):
             raise ToolFailed("The collector did not report reaching Corndogs over TLS.")
+        if not enforced(collector_log, "Reached the durable store"):
+            raise ToolFailed("The collector did not report a Corndogs that requires submission keys and task guards.")
         wait_until("The collector reporting ready",
                    lambda: cluster.ready(HOME, "deployment/tallyowl-collector", 5101).get("ready") is True,
                    timeout=120)
@@ -483,7 +495,8 @@ class Check:
         if result["accepted"] != EVENTS or result["lost"] or result["left_at_shutdown"]:
             raise ToolFailed(f"The application sent {EVENTS} events over TLS, and the driver saw {result}.")
         wait_until("The head committing the batch", lambda: self.commits() > before, timeout=60)
-        self.passed.append(f"{EVENTS} events over TLS, into Corndogs over TLS, committed by the head")
+        self.passed.append(f"{EVENTS} events over TLS, into Corndogs over TLS with keys and guards "
+                           "required, committed by the head")
 
     def prove_refusal(self) -> None:
         name = 'tallyowl_tls_handshakes_refused_total{listener="intake"}'
@@ -539,7 +552,12 @@ class Check:
         cluster.helm_run("install", "corndogs", str(chart), "--namespace", CELL,
                          "--set", "storage.backend=file", "--set", "postgresql.enabled=false",
                          "--set", "zalando_postgres.enabled=false", "--set", "tls.enabled=true",
-                         "--set", "tls.secretName=corndogs-tls", "--set", "tls.caKey=ca.crt")
+                         "--set", "tls.secretName=corndogs-tls", "--set", "tls.caKey=ca.crt",
+                         # Every TallyOwl request carries a submission key or a
+                         # task guard, so a shared Corndogs that serves only
+                         # TallyOwl can refuse the rest (DEPLOYMENT.md 7c).
+                         "--set", "resilience.submissionKeyPolicy=required",
+                         "--set", "resilience.taskGuardPolicy=required")
         cluster.kube(CELL, "rollout", "status", "deployment/corndogs", "--timeout=300s")
 
         say("Installing a cell of three heads.")
@@ -552,6 +570,9 @@ class Check:
                          "--set", "deployment.tls.authorities[0].secretName=tallyowl-authority",
                          "--set", "dashboard.allowPlaintext=true")
         cluster.kube(CELL, "rollout", "status", f"statefulset/{CELL}", "--timeout=600s")
+        wait_until("A cell head reaching the shared Corndogs with keys and guards required",
+                   lambda: enforced(cluster.logs(CELL, f"{CELL}-0", "head"), "Reached the durable queue"),
+                   timeout=120)
 
     def views(self) -> list[GroupView]:
         out = []

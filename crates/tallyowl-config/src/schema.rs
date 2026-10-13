@@ -595,7 +595,7 @@ pub const SCHEMA: &[Setting] = &[
         path: "linkkeys.trustedDomains",
         kind: Kind::TextList,
         default: "",
-        help: "The LinkKeys domains whose assertions this installation accepts. Empty means none. D7: a claim from a domain the installation does not trust never maps to a role.",
+        help: "The LinkKeys domains whose assertions this installation accepts. Empty means none. Case does not matter. A person may type `alice@example.com`; the domain after `@` is the one checked. D7: a claim from a domain the installation does not trust never maps to a role.",
         example: "example.com",
     },
     // ---- Logging -----------------------------------------------------------

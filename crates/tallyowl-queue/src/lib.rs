@@ -30,10 +30,11 @@ use std::time::{Duration, Instant};
 use corndogs::tls::TlsOptions;
 use corndogs::transport::{ConnectOptions, Transport};
 use corndogs::{
-    CleanUpTimedOutRequest, CompleteTaskRequest, CorndogsClient, GetNextTaskRequest,
-    GetQueueAndStateCountsRequest, SubmitTaskRequest, UpdateTaskRequest,
+    ClaimGuardedTaskRequest, CleanUpTimedOutRequest, ClientError, CompleteGuardedTaskRequest,
+    CorndogsClient, GetQueueAndStateCountsRequest, GetServerInfoRequest, SubmitKeyedTaskRequest,
+    UpdateGuardedTaskRequest,
 };
-use tallyowl_obs::error::TallyOwlError;
+use tallyowl_obs::error::{ErrorCode, TallyOwlError};
 use tallyowl_obs::metrics::{labels, MetricKind, Registry};
 
 mod pool;
@@ -60,6 +61,12 @@ pub struct ClaimedTask {
     /// `23caaf1` an update replaced it with whatever it named, and an update
     /// that named zero moved a retried conversion behind every ordinary event.
     pub priority: i64,
+    /// The revision of the task when this worker claimed it.
+    ///
+    /// Every change names it. When the claim times out, the sweep returns the
+    /// task and the revision moves on, so a slow worker that finishes late
+    /// changes nothing and another worker's claim stands. Corndogs 0.8.0.
+    pub revision: i64,
 }
 
 /// The durable queue a collector uses.
@@ -228,19 +235,83 @@ pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 const CALL_SECONDS: &str = "tallyowl_queue_call_seconds";
 const CALL_FAILURES: &str = "tallyowl_queue_call_failures_total";
+const CALL_RESENDS: &str = "tallyowl_queue_call_resends_total";
 
 /// The Corndogs client says "timed out" when its deadline ends a call.
 fn timed_out(reason: &str) -> bool {
     reason.contains("timed out")
 }
 
+/// The Corndogs features this crate uses. A server that does not list both is
+/// refused when the queue connects. Corndogs release 0.8.0 added them.
+pub const REQUIRED_FEATURES: [&str; 2] = ["submission-keys-v1", "task-guards-v1"];
+
+/// How many times one keyed or guarded request goes out. The Corndogs Go client
+/// uses the same number.
+const MAX_SENDS: u32 = 3;
+
+/// Corndogs answers an operation it does not know with transport status 2. A
+/// server older than 0.8.0 answers every keyed and guarded operation so.
+fn unknown_operation(reason: &str) -> bool {
+    reason.contains("transport status 2:")
+}
+
+/// Corndogs ServiceError codes that mean the claim this worker held has ended:
+/// 5 is a revision or state conflict, 7 a task that is gone, and 8 a replayed
+/// claim that no longer holds its task. See Corndogs `docs/resilience.md`.
+fn claim_ended(code: i64) -> bool {
+    matches!(code, 5 | 7 | 8)
+}
+
+/// A random identifier for one logical request: a submission key or an
+/// operation ID. It is made once and sent again unchanged on each resend.
+fn request_id(kind: &str) -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("the system random source");
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("tallyowl-{kind}-{hex}")
+}
+
+/// What carries the bytes of one connection.
+///
+/// A real connection in service, and a scripted one in a test that has to lose
+/// a reply after the store applied the request.
+pub(crate) struct Carrier(Box<dyn corndogs::Transport + Send + Sync>);
+
+impl corndogs::Transport for Carrier {
+    fn call(&self, service: &str, op: &str, req: &[u8]) -> Result<Vec<u8>, ClientError> {
+        self.0.call(service, op, req)
+    }
+}
+
+type Client = CorndogsClient<Carrier>;
+
+/// What the store said about itself when the queue connected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreInfo {
+    pub version: String,
+    pub submission_key_policy: String,
+    pub task_guard_policy: String,
+    /// How long the store keeps a submission key or an operation ID.
+    pub receipt_retention: Duration,
+}
+
 /// The real Corndogs queue.
+///
+/// **Every request is safe to send again.** A submission carries a submission
+/// key, and every claim and change carries an operation ID. When a reply is
+/// lost, the queue sends the same bytes again and Corndogs returns the first
+/// result. Before Corndogs 0.8.0 a lost reply to a submission left two tasks,
+/// and a worker whose claim had ended could still complete the task that
+/// another worker held. Every change now names the revision the claim
+/// returned, so the store refuses a change from a worker whose claim ended.
 pub struct CorndogsQueue {
-    pool: Pool<CorndogsClient<Transport>>,
+    pool: Pool<Client>,
     endpoint: String,
     call_timeout: Duration,
     metrics: Option<Arc<Registry>>,
     secured: bool,
+    store: StoreInfo,
 }
 
 impl CorndogsQueue {
@@ -274,21 +345,63 @@ impl CorndogsQueue {
             ))
         })?;
         let address = endpoint.to_string();
+        CorndogsQueue::from_carriers(
+            endpoint,
+            options,
+            secured,
+            Carrier(Box::new(first)),
+            Box::new(move || {
+                Transport::connect_options(address.clone(), connect.clone())
+                    .map(|transport| CorndogsClient::new(Carrier(Box::new(transport))))
+                    .map_err(|e| e.to_string())
+            }),
+        )
+    }
+
+    /// Ask the store what it is, refuse one that lacks a feature this crate
+    /// uses, and build the queue around the first connection.
+    pub(crate) fn from_carriers(
+        endpoint: &str,
+        options: QueueOptions,
+        secured: bool,
+        first: Carrier,
+        more: pool::Factory<Client>,
+    ) -> Result<CorndogsQueue, TallyOwlError> {
+        let first = CorndogsClient::new(first);
+        let info = first
+            .get_server_info(GetServerInfoRequest {})
+            .map_err(|e| match e {
+                ClientError::Transport(reason) if unknown_operation(&reason) => {
+                    too_old(endpoint, "a release older than 0.8.0")
+                }
+                other => TallyOwlError::unavailable(format!(
+                    "We could not ask the durable store at {endpoint} what it is. {other}"
+                )),
+            })?;
+        if let Some(missing) = REQUIRED_FEATURES
+            .iter()
+            .find(|feature| !info.features.iter().any(|held| held == *feature))
+        {
+            return Err(too_old(
+                endpoint,
+                &format!(
+                    "release {} without the feature `{missing}`",
+                    info.server_version
+                ),
+            ));
+        }
         Ok(CorndogsQueue {
-            pool: Pool::new(
-                options.connections,
-                options.call_timeout,
-                Some(CorndogsClient::new(first)),
-                Box::new(move || {
-                    Transport::connect_options(address.clone(), connect.clone())
-                        .map(CorndogsClient::new)
-                        .map_err(|e| e.to_string())
-                }),
-            ),
+            pool: Pool::new(options.connections, options.call_timeout, Some(first), more),
             endpoint: endpoint.to_string(),
             call_timeout: options.call_timeout,
             metrics: options.metrics,
             secured,
+            store: StoreInfo {
+                version: info.server_version,
+                submission_key_policy: info.submission_key_policy,
+                task_guard_policy: info.task_guard_policy,
+                receipt_retention: Duration::from_secs(info.receipt_retention_seconds.max(0) as u64),
+            },
         })
     }
 
@@ -297,84 +410,175 @@ impl CorndogsQueue {
         self.secured
     }
 
+    /// What the store said about itself when the queue connected.
+    pub fn store(&self) -> &StoreInfo {
+        &self.store
+    }
+
     /// Declare what this queue publishes. A host calls it once for a registry
     /// it then passes in [`QueueOptions`].
     pub fn declare_metrics(metrics: &Registry) {
-        metrics
-            .declare(
+        for (name, kind, help, buckets) in [
+            (
                 CALL_SECONDS,
                 MetricKind::Histogram,
                 "How long one call to the durable store took, by operation.",
-                &[0.001, 0.005, 0.025, 0.1, 0.5, 2.0, 10.0, 30.0],
-            )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "the metric `{CALL_SECONDS}` is not a name the registry accepts: {}",
-                    e.0
-                )
-            });
-        metrics
-            .declare(
+                &[0.001, 0.005, 0.025, 0.1, 0.5, 2.0, 10.0, 30.0][..],
+            ),
+            (
                 CALL_FAILURES,
                 MetricKind::Counter,
                 "Calls to the durable store that produced no answer, by operation and reason.",
-                &[],
-            )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "the metric `{CALL_FAILURES}` is not a name the registry accepts: {}",
-                    e.0
-                )
-            });
+                &[][..],
+            ),
+            (
+                CALL_RESENDS,
+                MetricKind::Counter,
+                "Requests sent to the durable store again after a lost reply, by operation. The store answers a resend with the first result.",
+                &[][..],
+            ),
+        ] {
+            metrics
+                .declare(name, kind, help, buckets)
+                .unwrap_or_else(|e| {
+                    panic!("the metric `{name}` is not a name the registry accepts: {}", e.0)
+                });
+        }
     }
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    /// Run one call on a pooled connection, inside the deadline.
+    /// How long a request may keep being sent again. A resend after the store
+    /// forgot the first one would run it twice, so the window is half of what
+    /// the store keeps.
+    fn resend_window(&self) -> Duration {
+        self.store.receipt_retention / 2
+    }
+
+    /// Run one call on a pooled connection, inside the deadline, and send it
+    /// again when its reply was lost.
     ///
     /// `op` is the metric label and `what` finishes the sentence a person reads.
+    /// `call` builds the same request each time it runs, so a resend carries
+    /// the same submission key or operation ID and the same bytes.
     fn call<R, F>(&self, op: &str, what: &str, call: F) -> Result<R, TallyOwlError>
     where
-        F: FnOnce(&CorndogsClient<Transport>) -> Result<R, String>,
+        F: Fn(&Client) -> Result<R, ClientError>,
     {
         let started = Instant::now();
-        let outcome = self.pool.run(call, timed_out);
+        let mut sends = 0;
+        let outcome = loop {
+            sends += 1;
+            let outcome = match self.pool.run(|client| Ok(call(client)), |_| false) {
+                Ok(answer) => answer.map_err(Failure::Client),
+                Err(PoolError::Busy) => Err(Failure::Busy),
+                Err(PoolError::TimedOut) => unreachable!("the closure never fails"),
+                Err(PoolError::Failed(reason)) => Err(Failure::Dial(reason)),
+            };
+            // **Only a lost reply is sent again.** The request reached the
+            // store or it did not, and the same key makes either case one
+            // result. A ServiceError is the store's answer, an unknown
+            // operation is a store too old to know it, and a dial that failed
+            // sent nothing.
+            let resend = matches!(
+                &outcome,
+                Err(Failure::Client(ClientError::Transport(reason))) if !unknown_operation(reason)
+            ) && sends < MAX_SENDS
+                && started.elapsed() + self.call_timeout < self.resend_window();
+            if !resend {
+                break outcome;
+            }
+            if let Some(metrics) = &self.metrics {
+                metrics.increment(CALL_RESENDS, &labels(&[("op", op)]));
+            }
+        };
         if let Some(metrics) = &self.metrics {
             metrics.observe(
                 CALL_SECONDS,
                 &labels(&[("op", op)]),
                 started.elapsed().as_secs_f64(),
             );
-            let reason = match &outcome {
-                Ok(_) => None,
-                Err(PoolError::Busy) => Some("busy"),
-                Err(PoolError::TimedOut) => Some("timed-out"),
-                Err(PoolError::Failed(_)) => Some("failed"),
-            };
-            if let Some(reason) = reason {
-                metrics.increment(CALL_FAILURES, &labels(&[("op", op), ("reason", reason)]));
+            if let Err(failure) = &outcome {
+                metrics.increment(
+                    CALL_FAILURES,
+                    &labels(&[("op", op), ("reason", failure.label())]),
+                );
             }
         }
-        outcome.map_err(|e| {
-            let reason = match e {
-                PoolError::Busy => format!(
-                    "Every connection to it stayed busy for {} ms.",
-                    self.call_timeout.as_millis()
-                ),
-                PoolError::TimedOut => format!(
-                    "It did not answer within {} ms.",
-                    self.call_timeout.as_millis()
-                ),
-                PoolError::Failed(reason) => reason,
-            };
-            TallyOwlError::unavailable(format!(
-                "We could not reach the durable store at {} to {what}. {reason}",
-                self.endpoint
-            ))
-        })
+        outcome.map_err(|failure| self.explain(failure, what))
     }
+
+    /// The sentence a person reads for a call that produced no result.
+    fn explain(&self, failure: Failure, what: &str) -> TallyOwlError {
+        let endpoint = &self.endpoint;
+        match failure {
+            Failure::Client(ClientError::Service { code, message }) if claim_ended(code) => {
+                TallyOwlError::failed_precondition(format!(
+                    "The durable store did not {what}, because this worker's claim on the task had ended. The task timed out and went back to the queue, so another attempt runs it. The store said: {message}"
+                ))
+                .retryable(false)
+            }
+            Failure::Client(ClientError::Service { code, message }) => TallyOwlError::internal(
+                format!(
+                    "The durable store at {endpoint} refused to {what} with code {code}: {message}. This is a defect in TallyOwl, or a Corndogs policy that TallyOwl does not meet."
+                ),
+            ),
+            Failure::Client(ClientError::Transport(reason)) if unknown_operation(&reason) => {
+                too_old(endpoint, "a release older than 0.8.0")
+            }
+            Failure::Client(ClientError::Transport(reason)) if timed_out(&reason) => {
+                TallyOwlError::unavailable(format!(
+                    "We could not reach the durable store at {endpoint} to {what}. It did not answer within {} ms.",
+                    self.call_timeout.as_millis()
+                ))
+            }
+            Failure::Client(ClientError::Transport(reason)) | Failure::Dial(reason) => {
+                TallyOwlError::unavailable(format!(
+                    "We could not reach the durable store at {endpoint} to {what}. {reason}"
+                ))
+            }
+            Failure::Busy => TallyOwlError::unavailable(format!(
+                "We could not reach the durable store at {endpoint} to {what}. Every connection to it stayed busy for {} ms.",
+                self.call_timeout.as_millis()
+            )),
+        }
+    }
+}
+
+/// Why one call produced no result.
+enum Failure {
+    /// Every connection was in use for the whole wait.
+    Busy,
+    /// A connection could not be opened, so nothing was sent.
+    Dial(String),
+    /// The client's own failure, or the store's answer.
+    Client(ClientError),
+}
+
+impl Failure {
+    fn label(&self) -> &'static str {
+        match self {
+            Failure::Busy => "busy",
+            Failure::Dial(_) => "failed",
+            Failure::Client(ClientError::Service { code, .. }) if claim_ended(*code) => {
+                "claim-ended"
+            }
+            Failure::Client(ClientError::Service { .. }) => "refused",
+            Failure::Client(ClientError::Transport(reason)) if timed_out(reason) => "timed-out",
+            Failure::Client(ClientError::Transport(_)) => "failed",
+        }
+    }
+}
+
+fn too_old(endpoint: &str, what: &str) -> TallyOwlError {
+    TallyOwlError::new(
+        ErrorCode::SchemaUnsupported,
+        format!(
+            "The durable store at {endpoint} is Corndogs {what}. TallyOwl needs submission keys and task guards, which Corndogs 0.8.0 added. Upgrade Corndogs to 0.8.0 or later; see docs/DEPLOYMENT.md."
+        ),
+    )
 }
 
 impl DurableQueue for CorndogsQueue {
@@ -384,7 +588,11 @@ impl DurableQueue for CorndogsQueue {
         payload: Vec<u8>,
         priority: i64,
     ) -> Result<String, TallyOwlError> {
-        let request = SubmitTaskRequest {
+        let request = SubmitKeyedTaskRequest {
+            // One key for this submission. A resend carries the same key, so a
+            // lost reply leaves one task and not two.
+            submission_key: request_id("submit"),
+            guarded: true,
             queue: queue.to_string(),
             current_state: STATE_QUEUED.to_string(),
             auto_target_state: STATE_SENDING.to_string(),
@@ -395,12 +603,10 @@ impl DurableQueue for CorndogsQueue {
             payload,
             priority,
         };
-        let response = self.call("submit", "accept a batch", move |client| {
-            client.submit_task(request).map_err(|e| e.to_string())
+        let response = self.call("submit", "accept a batch", |client| {
+            client.submit_keyed_task(request.clone())
         })?;
-        response.task.map(|t| t.uuid).ok_or_else(|| {
-            TallyOwlError::internal("The durable store accepted a batch and returned no task.")
-        })
+        Ok(response.receipt.task_uuid)
     }
 
     fn claim(
@@ -408,7 +614,8 @@ impl DurableQueue for CorndogsQueue {
         queue: &str,
         timeout_seconds: i64,
     ) -> Result<Option<ClaimedTask>, TallyOwlError> {
-        let request = GetNextTaskRequest {
+        let request = ClaimGuardedTaskRequest {
+            operation_id: request_id("claim"),
             queue: queue.to_string(),
             current_state: STATE_QUEUED.to_string(),
             // The claim carries a timeout, so a worker that dies mid-send
@@ -417,26 +624,35 @@ impl DurableQueue for CorndogsQueue {
             override_current_state: String::new(),
             override_auto_target_state: STATE_QUEUED.to_string(),
         };
-        let response = self.call("claim", "claim a batch", move |client| {
-            client.get_next_task(request).map_err(|e| e.to_string())
-        })?;
+        let response = match self.call("claim", "claim a batch", |client| {
+            client.claim_guarded_task(request.clone())
+        }) {
+            Ok(response) => response,
+            // A resent claim whose task went back to the queue in between. The
+            // task is not this worker's, and the next claim finds it.
+            Err(e) if e.code == ErrorCode::FailedPrecondition => return Ok(None),
+            Err(e) => return Err(e),
+        };
         Ok(response.delivery.map(|d| ClaimedTask {
-            uuid: d.task.uuid,
+            uuid: d.task.task.uuid,
             payload: d.payload,
-            queue: d.task.queue,
-            current_state: d.task.current_state,
-            priority: d.task.priority,
+            queue: d.task.task.queue,
+            current_state: d.task.task.current_state,
+            priority: d.task.task.priority,
+            revision: d.task.revision,
         }))
     }
 
     fn complete(&self, task: &ClaimedTask) -> Result<(), TallyOwlError> {
-        let request = CompleteTaskRequest {
+        let request = CompleteGuardedTaskRequest {
+            operation_id: request_id("complete"),
             uuid: task.uuid.clone(),
             queue: task.queue.clone(),
-            current_state: task.current_state.clone(),
+            expected_revision: task.revision,
+            expected_state: Some(task.current_state.clone()),
         };
-        self.call("complete", "finish a batch", move |client| {
-            client.complete_task(request).map_err(|e| e.to_string())
+        self.call("complete", "finish a batch", |client| {
+            client.complete_guarded_task(request.clone())
         })?;
         Ok(())
     }
@@ -448,16 +664,16 @@ impl DurableQueue for CorndogsQueue {
         payload: Option<Vec<u8>>,
     ) -> Result<(), TallyOwlError> {
         let request = park_request(task, delay_seconds, payload);
-        self.call("park", "delay a retry", move |client| {
-            client.update_task(request).map_err(|e| e.to_string())
+        self.call("park", "delay a retry", |client| {
+            client.update_guarded_task(request.clone())
         })?;
         Ok(())
     }
 
     fn quarantine(&self, task: &ClaimedTask, queue: &str) -> Result<(), TallyOwlError> {
         let request = quarantine_request(task, queue);
-        self.call("quarantine", "quarantine a batch", move |client| {
-            client.update_task(request).map_err(|e| e.to_string())
+        self.call("quarantine", "quarantine a batch", |client| {
+            client.update_guarded_task(request.clone())
         })?;
         Ok(())
     }
@@ -467,19 +683,16 @@ impl DurableQueue for CorndogsQueue {
             at_time: at_nanos,
             queue: queue.to_string(),
         };
-        let response = self.call("sweep", "return expired batches for retry", move |client| {
-            client
-                .clean_up_timed_out(request)
-                .map_err(|e| e.to_string())
+        // A sweep is safe to run again, so a lost reply needs no key.
+        let response = self.call("sweep", "return expired batches for retry", |client| {
+            client.clean_up_timed_out(request.clone())
         })?;
         Ok(response.timed_out)
     }
 
     fn counts(&self) -> Result<Vec<QueueCounts>, TallyOwlError> {
         let response = self.call("counts", "count what is waiting", |client| {
-            client
-                .get_queue_and_state_counts(GetQueueAndStateCountsRequest {})
-                .map_err(|e| e.to_string())
+            client.get_queue_and_state_counts(GetQueueAndStateCountsRequest {})
         })?;
         let mut out: Vec<QueueCounts> = response
             .queue_and_state_counts
@@ -501,16 +714,19 @@ impl DurableQueue for CorndogsQueue {
 ///
 /// It names no priority, so Corndogs keeps the one the task was accepted with,
 /// and no payload unless the caller has a new one, so Corndogs keeps the stored
-/// payload. Both rules are Corndogs' own from commit `23caaf1`.
+/// payload. Both rules are Corndogs' own from commit `23caaf1`. It names the
+/// revision of the claim, so a worker whose claim ended changes nothing.
 fn park_request(
     task: &ClaimedTask,
     delay_seconds: i64,
     payload: Option<Vec<u8>>,
-) -> UpdateTaskRequest {
-    UpdateTaskRequest {
+) -> UpdateGuardedTaskRequest {
+    UpdateGuardedTaskRequest {
+        operation_id: request_id("park"),
         uuid: task.uuid.clone(),
         queue: task.queue.clone(),
-        current_state: task.current_state.clone(),
+        expected_revision: task.revision,
+        expected_state: Some(task.current_state.clone()),
         // The sweep swaps these back when the timeout expires, which is how a
         // delay is expressed without a polling loop.
         new_state: STATE_BACKOFF.to_string(),
@@ -523,11 +739,13 @@ fn park_request(
 
 /// Move a claimed task out of the retry path, keeping its priority for the
 /// person who replays it.
-fn quarantine_request(task: &ClaimedTask, queue: &str) -> UpdateTaskRequest {
-    UpdateTaskRequest {
+fn quarantine_request(task: &ClaimedTask, queue: &str) -> UpdateGuardedTaskRequest {
+    UpdateGuardedTaskRequest {
+        operation_id: request_id("quarantine"),
         uuid: task.uuid.clone(),
         queue: task.queue.clone(),
-        current_state: task.current_state.clone(),
+        expected_revision: task.revision,
+        expected_state: Some(task.current_state.clone()),
         new_state: format!("quarantined-into-{queue}"),
         auto_target_state: String::new(),
         timeout: -1,
@@ -561,6 +779,10 @@ pub mod testing {
         /// keeps it, which is the rule Corndogs follows from commit `23caaf1`,
         /// and `CorndogsQueue` names none.
         priority: std::collections::BTreeMap<String, i64>,
+        /// The revision each task holds now. A claim and every release move it
+        /// on, as Corndogs does, so a change from a worker whose claim ended
+        /// is refused here too.
+        revision: std::collections::BTreeMap<String, i64>,
         queued: VecDeque<(String, Vec<u8>)>,
         claimed: Vec<(String, Vec<u8>)>,
         parked: Vec<(String, Vec<u8>)>,
@@ -635,6 +857,7 @@ pub mod testing {
             let mut inner = self.inner.lock().unwrap();
             let parked = std::mem::take(&mut inner.parked);
             for entry in parked {
+                inner.bump(&entry.0);
                 inner.queued.push_back(entry);
             }
         }
@@ -652,7 +875,34 @@ pub mod testing {
             let mut inner = self.inner.lock().unwrap();
             let claimed = std::mem::take(&mut inner.claimed);
             for entry in claimed {
+                inner.bump(&entry.0);
                 inner.queued.push_back(entry);
+            }
+        }
+    }
+
+    impl Inner {
+        fn bump(&mut self, uuid: &str) -> i64 {
+            let held = self.revision.entry(uuid.to_string()).or_insert(0);
+            *held += 1;
+            *held
+        }
+
+        /// Take a claimed task out of the claimed set, if the claim still
+        /// holds it. The same refusal Corndogs gives, in the words
+        /// `CorndogsQueue` uses.
+        fn take_claimed(&mut self, task: &ClaimedTask) -> Result<Vec<u8>, TallyOwlError> {
+            let holds = self.revision.get(&task.uuid) == Some(&task.revision);
+            match self.claimed.iter().position(|(u, _)| u == &task.uuid) {
+                Some(position) if holds => {
+                    self.bump(&task.uuid);
+                    Ok(self.claimed.remove(position).1)
+                }
+                _ => Err(TallyOwlError::failed_precondition(format!(
+                    "The durable store did not change the task {}, because this worker's claim on it had ended.",
+                    task.uuid
+                ))
+                .retryable(false)),
             }
         }
     }
@@ -702,18 +952,20 @@ pub mod testing {
             };
             let (uuid, payload) = inner.queued.remove(position).expect("found above");
             inner.claimed.push((uuid.clone(), payload.clone()));
+            let revision = inner.bump(&uuid);
             Ok(Some(ClaimedTask {
                 uuid,
                 payload,
                 queue: queue.to_string(),
                 current_state: STATE_SENDING.to_string(),
                 priority,
+                revision,
             }))
         }
 
         fn complete(&self, task: &ClaimedTask) -> Result<(), TallyOwlError> {
             let mut inner = self.inner.lock().unwrap();
-            inner.claimed.retain(|(uuid, _)| uuid != &task.uuid);
+            inner.take_claimed(task)?;
             inner.completed.push(task.uuid.clone());
             Ok(())
         }
@@ -725,19 +977,19 @@ pub mod testing {
             payload: Option<Vec<u8>>,
         ) -> Result<(), TallyOwlError> {
             let mut inner = self.inner.lock().unwrap();
-            if let Some(position) = inner.claimed.iter().position(|(u, _)| u == &task.uuid) {
-                let (uuid, held) = inner.claimed.remove(position);
-                // A replaced payload is how the attempt count survives the
-                // wait. A double that dropped it would make every retry look
-                // like a first attempt, which is the defect this replaces.
-                inner.parked.push((uuid, payload.unwrap_or(held)));
-            }
+            let held = inner.take_claimed(task)?;
+            // A replaced payload is how the attempt count survives the wait. A
+            // double that dropped it would make every retry look like a first
+            // attempt, which is the defect this replaces.
+            inner
+                .parked
+                .push((task.uuid.clone(), payload.unwrap_or(held)));
             Ok(())
         }
 
         fn quarantine(&self, task: &ClaimedTask, _queue: &str) -> Result<(), TallyOwlError> {
             let mut inner = self.inner.lock().unwrap();
-            inner.claimed.retain(|(uuid, _)| uuid != &task.uuid);
+            inner.take_claimed(task)?;
             inner.quarantined.push(task.uuid.clone());
             Ok(())
         }
@@ -795,6 +1047,7 @@ pub mod testing {
             let parked = std::mem::take(&mut inner.parked);
             let moved = parked.len() as i64;
             for entry in parked {
+                inner.bump(&entry.0);
                 inner.queued.push_back(entry);
             }
             Ok(moved)
@@ -845,10 +1098,304 @@ mod tests {
             queue: "delivery".into(),
             current_state: STATE_SENDING.into(),
             priority: 5,
+            revision: 3,
         };
         assert_eq!(park_request(&task, 30, None).priority, None);
         assert_eq!(park_request(&task, 30, None).payload, None);
         assert_eq!(quarantine_request(&task, "quarantine").priority, None);
+    }
+
+    #[test]
+    fn a_worker_whose_claim_ended_changes_nothing() {
+        // The sweep returned a slow worker's task and a second worker claimed
+        // it. Before Corndogs 0.8.0 the slow worker's completion still applied,
+        // and the second worker's claim was lost under it.
+        let queue = FakeQueue::new();
+        queue.submit("delivery", b"x".to_vec(), 0).unwrap();
+        let slow = queue.claim("delivery", 30).unwrap().expect("a task");
+        queue.expire_claims();
+        let second = queue
+            .claim("delivery", 30)
+            .unwrap()
+            .expect("the task again");
+        assert_eq!(second.uuid, slow.uuid);
+
+        let refused = queue
+            .complete(&slow)
+            .expect_err("the slow worker's claim ended");
+        assert_eq!(refused.code, ErrorCode::FailedPrecondition);
+        assert!(!refused.retryable);
+        assert!(queue.park(&slow, 1, None).is_err());
+        assert!(queue.quarantine(&slow, "quarantine").is_err());
+
+        queue.complete(&second).expect("the second claim stands");
+        assert_eq!(queue.completed(), vec![second.uuid]);
+    }
+
+    /// Every request a scripted connection received: the operation and the
+    /// bytes.
+    type Sent = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+    /// A connection that answers from a script and keeps every request.
+    struct Scripted {
+        sent: Sent,
+        answer: Answer,
+    }
+
+    type Answer = Arc<dyn Fn(&str, usize) -> Result<Vec<u8>, ClientError> + Send + Sync>;
+
+    impl corndogs::Transport for Scripted {
+        fn call(&self, _service: &str, op: &str, req: &[u8]) -> Result<Vec<u8>, ClientError> {
+            let mut sent = self.sent.lock().unwrap();
+            sent.push((op.to_string(), req.to_vec()));
+            let seen = sent.iter().filter(|(held, _)| held == op).count();
+            drop(sent);
+            (self.answer)(op, seen)
+        }
+    }
+
+    fn server_info(features: &[&str], retention_seconds: i64) -> Vec<u8> {
+        corndogs::encode_get_server_info_response(&corndogs::GetServerInfoResponse {
+            server_version: "0.8.0".into(),
+            features: features.iter().map(|f| f.to_string()).collect(),
+            submission_key_policy: "required".into(),
+            task_guard_policy: "required".into(),
+            receipt_retention_seconds: retention_seconds,
+        })
+    }
+
+    fn task(uuid: &str) -> corndogs::GuardedTask {
+        corndogs::GuardedTask {
+            task: corndogs::Task {
+                uuid: uuid.into(),
+                queue: "delivery".into(),
+                current_state: STATE_QUEUED.into(),
+                auto_target_state: STATE_SENDING.into(),
+                submit_time: 0,
+                update_time: 0,
+                timeout: -1,
+                priority: 0,
+            },
+            guarded: true,
+            revision: 1,
+            terminal: false,
+        }
+    }
+
+    fn submitted(uuid: &str) -> Vec<u8> {
+        corndogs::encode_submit_keyed_task_response(&corndogs::SubmitKeyedTaskResponse {
+            receipt: corndogs::SubmissionReceipt {
+                queue: "delivery".into(),
+                submission_key: "k".into(),
+                task_uuid: uuid.into(),
+                accepted_at: 0,
+                expires_at: 0,
+                guarded: true,
+            },
+            replayed: false,
+            task: Some(task(uuid)),
+        })
+    }
+
+    const LOST: &str = "corndogs: outcome uncertain: connection reset by peer";
+
+    /// A queue over one scripted connection. `answer` sees every operation
+    /// except the server check, which reports `retention_seconds`.
+    fn scripted(
+        retention_seconds: i64,
+        answer: impl Fn(&str, usize) -> Result<Vec<u8>, ClientError> + Send + Sync + 'static,
+    ) -> (Result<CorndogsQueue, TallyOwlError>, Sent) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let carrier = Scripted {
+            sent: Arc::clone(&sent),
+            answer: Arc::new(move |op, seen| match op {
+                "GetServerInfo" => Ok(server_info(&REQUIRED_FEATURES, retention_seconds)),
+                _ => answer(op, seen),
+            }),
+        };
+        let queue = CorndogsQueue::from_carriers(
+            "corndogs.test:5080",
+            QueueOptions {
+                connections: 1,
+                call_timeout: Duration::from_secs(5),
+                metrics: None,
+                tls: None,
+            },
+            false,
+            Carrier(Box::new(carrier)),
+            Box::new(|| Err("one connection only".to_string())),
+        );
+        (queue, sent)
+    }
+
+    fn sends_of(sent: &Mutex<Vec<(String, Vec<u8>)>>, op: &str) -> Vec<Vec<u8>> {
+        sent.lock()
+            .unwrap()
+            .iter()
+            .filter(|(held, _)| held == op)
+            .map(|(_, bytes)| bytes.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_lost_submission_reply_is_sent_again_with_the_same_key_and_leaves_one_task() {
+        // Before Corndogs 0.8.0, a lost reply left the caller two choices: a
+        // retry that could make a second task, or a refusal for a batch the
+        // store already held.
+        let (queue, sent) = scripted(3_600, |op, seen| match (op, seen) {
+            ("SubmitKeyedTask", 1) => Err(ClientError::Transport(LOST.into())),
+            ("SubmitKeyedTask", _) => Ok(submitted("t-1")),
+            _ => unreachable!("{op}"),
+        });
+        let queue = queue.expect("a 0.8.0 store");
+        assert_eq!(
+            queue.submit("delivery", b"batch".to_vec(), 4).unwrap(),
+            "t-1"
+        );
+
+        let sends = sends_of(&sent, "SubmitKeyedTask");
+        assert_eq!(sends.len(), 2);
+        assert_eq!(sends[0], sends[1], "a resend carries the same bytes");
+        let request = corndogs::decode_submit_keyed_task_request(&sends[0]).unwrap();
+        assert!(request.guarded, "a stale worker cannot change the task");
+        assert!(!request.submission_key.is_empty());
+        assert!(request.submission_key.len() <= 128);
+        assert_eq!(request.priority, 4);
+    }
+
+    #[test]
+    fn two_submissions_carry_two_keys() {
+        // One key for two batches would make the second one the first one's
+        // replay, and the second batch would be gone.
+        let (queue, sent) = scripted(3_600, |_, _| Ok(submitted("t")));
+        let queue = queue.unwrap();
+        queue.submit("delivery", b"one".to_vec(), 0).unwrap();
+        queue.submit("delivery", b"two".to_vec(), 0).unwrap();
+        let keys: Vec<String> = sends_of(&sent, "SubmitKeyedTask")
+            .iter()
+            .map(|bytes| {
+                corndogs::decode_submit_keyed_task_request(bytes)
+                    .unwrap()
+                    .submission_key
+            })
+            .collect();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1]);
+    }
+
+    #[test]
+    fn a_reply_lost_every_time_is_sent_three_times_and_then_reported() {
+        let (queue, sent) = scripted(3_600, |_, _| Err(ClientError::Transport(LOST.into())));
+        let failure = queue
+            .unwrap()
+            .submit("delivery", b"x".to_vec(), 0)
+            .expect_err("no reply");
+        assert_eq!(failure.code, ErrorCode::Unavailable);
+        assert!(failure.retryable);
+        assert_eq!(sends_of(&sent, "SubmitKeyedTask").len(), MAX_SENDS as usize);
+    }
+
+    #[test]
+    fn a_store_that_keeps_receipts_briefly_gets_no_resend() {
+        // A resend after the store forgot the key would make a second task.
+        // One minute of retention and a five-second deadline leave room; one
+        // that is shorter than two deadlines does not.
+        let (queue, sent) = scripted(5, |_, _| Err(ClientError::Transport(LOST.into())));
+        queue
+            .unwrap()
+            .submit("delivery", b"x".to_vec(), 0)
+            .expect_err("no reply");
+        assert_eq!(sends_of(&sent, "SubmitKeyedTask").len(), 1);
+    }
+
+    #[test]
+    fn the_stores_answer_is_not_sent_again() {
+        // A ServiceError is final. Code 5 means the claim ended: the task timed
+        // out and went back to the queue.
+        let (queue, sent) = scripted(3_600, |_, _| {
+            Err(ClientError::Service {
+                code: 5,
+                message: "revision conflict".into(),
+            })
+        });
+        let queue = queue.unwrap();
+        let claimed = ClaimedTask {
+            uuid: "t".into(),
+            payload: Vec::new(),
+            queue: "delivery".into(),
+            current_state: STATE_SENDING.into(),
+            priority: 0,
+            revision: 2,
+        };
+        let failure = queue.complete(&claimed).expect_err("the claim ended");
+        assert_eq!(failure.code, ErrorCode::FailedPrecondition);
+        assert!(!failure.retryable);
+        assert!(failure.message.contains("claim"), "{}", failure.message);
+        let sends = sends_of(&sent, "CompleteGuardedTask");
+        assert_eq!(sends.len(), 1);
+        let request = corndogs::decode_complete_guarded_task_request(&sends[0]).unwrap();
+        assert_eq!(request.expected_revision, 2);
+        assert_eq!(request.expected_state.as_deref(), Some(STATE_SENDING));
+    }
+
+    #[test]
+    fn a_resent_claim_whose_task_went_back_finds_nothing() {
+        // Code 8: the first claim reached the store, its reply was lost, and
+        // the task timed out before the resend. It is not this worker's.
+        let (queue, _) = scripted(3_600, |_, seen| match seen {
+            1 => Err(ClientError::Transport(LOST.into())),
+            _ => Err(ClientError::Service {
+                code: 8,
+                message: "claim superseded".into(),
+            }),
+        });
+        assert_eq!(queue.unwrap().claim("delivery", 30).unwrap(), None);
+    }
+
+    #[test]
+    fn a_store_older_than_0_8_0_is_refused_when_the_queue_connects() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let carrier = Scripted {
+            sent,
+            answer: Arc::new(|_, _| {
+                Err(ClientError::Transport(
+                    "corndogs: transport status 2: unknown operation GetServerInfo".into(),
+                ))
+            }),
+        };
+        let refused = CorndogsQueue::from_carriers(
+            "corndogs.test:5080",
+            QueueOptions::default(),
+            false,
+            Carrier(Box::new(carrier)),
+            Box::new(|| Err("no".to_string())),
+        )
+        .err()
+        .expect("an old store is refused");
+        assert_eq!(refused.code, ErrorCode::SchemaUnsupported);
+        assert!(refused.message.contains("0.8.0"), "{}", refused.message);
+    }
+
+    #[test]
+    fn a_store_without_task_guards_is_refused_by_name() {
+        let carrier = Scripted {
+            sent: Arc::new(Mutex::new(Vec::new())),
+            answer: Arc::new(|_, _| Ok(server_info(&["submission-keys-v1"], 3_600))),
+        };
+        let refused = CorndogsQueue::from_carriers(
+            "corndogs.test:5080",
+            QueueOptions::default(),
+            false,
+            Carrier(Box::new(carrier)),
+            Box::new(|| Err("no".to_string())),
+        )
+        .err()
+        .expect("refused");
+        assert!(
+            refused.message.contains("task-guards-v1"),
+            "{}",
+            refused.message
+        );
     }
 
     #[test]

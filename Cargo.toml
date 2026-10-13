@@ -81,7 +81,7 @@ csilgen-transport = { git = "https://github.com/catalystcommunity/csilgen", rev 
 # the checkout, so a Git dependency reaches it exactly as it reaches
 # `csilgen-transport`, which is the same shape. Pinned by revision for the same
 # reason: LinkKeys does not publish it.
-linkkeys-local-rp = { git = "https://github.com/catalystcommunity/linkkeys", rev = "3b8c389f9a5b9f77cfea049fd75e6a745622f213" }
+linkkeys-local-rp = { git = "https://github.com/catalystcommunity/linkkeys", rev = "03fcbd8e700715fb686bce2016136ecd8071f307" }
 # The SDK speaks in `DateTime<Utc>`, so the head does too at that boundary.
 # Everywhere else a time is milliseconds since the epoch, per CONVENTIONS.md.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
@@ -93,7 +93,7 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 
 # The Corndogs durable task queue client, generated from the Corndogs CSIL
 # contract in that project. Pinned by revision for the same reason.
-corndogs = { git = "https://github.com/catalystcommunity/corndogs", rev = "21d018211ec895c3af5785bc18c446db6c77ee53", features = ["tls"] }
+corndogs = { git = "https://github.com/catalystcommunity/corndogs", rev = "f1b6ec6086dd0341c09629791bfaa959397b3f9c", features = ["tls"] }
 
 # The storage format. `zstd` and `xxhash-rust` are on the hot path; `blake3`
 # gives a segment its content address, which needs collision resistance and the

@@ -44,7 +44,7 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from .commands import REPOSITORY_ROOT, ToolFailed, require, say, warn
-from .dev import _binary, _corndogs_command, _wait_for_port
+from .dev import CORNDOGS_REQUIRED, _binary, _corndogs_command, _wait_for_port
 
 
 def _is_running(pid: int) -> bool:
@@ -406,6 +406,7 @@ def up(
                 "CORNDOGS_FILESTORE_SYNC": "group",
                 "CORNDOGS_LISTEN": ADDRESSES["corndogs"],
                 "CORNDOGS_HTTP_LISTEN": "127.0.0.1:5481",
+                **CORNDOGS_REQUIRED,
                 "LOGLEVEL": "error",
             },
             wait_for=ADDRESSES["corndogs"],

@@ -338,7 +338,12 @@ name is the last pod's.
 {{- end -}}
 {{- $tag := (splitList ":" (.Values.corndogsDeployment.image | toString)) | last -}}
 {{- if or (eq $tag "latest") (not (contains ":" (.Values.corndogsDeployment.image | toString))) -}}
-{{- fail "corndogsDeployment.image has the tag `latest` or no tag. The queue carries every receipt, and its version must not change when a pod moves. Give the image a version tag, for example corndogs:0.7.6." -}}
+{{- fail "corndogsDeployment.image has the tag `latest` or no tag. The queue carries every receipt, and its version must not change when a pod moves. Give the image a version tag, for example corndogs:0.8.0." -}}
+{{- end -}}
+{{- range $name, $policy := dict "submissionKeyPolicy" .Values.corndogsDeployment.resilience.submissionKeyPolicy "taskGuardPolicy" .Values.corndogsDeployment.resilience.taskGuardPolicy -}}
+{{- if not (has $policy (list "required" "compatibility")) -}}
+{{- fail (printf "corndogsDeployment.resilience.%s is `%v`. Corndogs accepts `required` or `compatibility`, and does not start with another value. See docs/DEPLOYMENT.md section 7c." $name $policy) -}}
+{{- end -}}
 {{- end -}}
 {{- if and (not .Values.corndogsDeployment.tlsSecret) (not .Values.transport.allowPlaintext) -}}
 {{- fail "corndogsDeployment.enabled is true and corndogsDeployment.tlsSecret is empty. Collectors reach this Corndogs over the pod network, and D62 puts TLS on that hop. Make a certificate for the names `<release>-corndogs` and `<release>-corndogs.<namespace>.svc`, signed by the installation authority, store it in a kubernetes.io/tls Secret, and name it in corndogsDeployment.tlsSecret. Or set transport.allowPlaintext=true if something else protects this network. See docs/DEPLOYMENT.md section 7c." -}}

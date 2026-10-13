@@ -2376,3 +2376,72 @@ The build settled these points, which the text above did not:
   `tallyowl-head ca create` makes a root and an intermediate for the home
   profile and for tests.
 
+
+## D63. Submission keys and task guards on every Corndogs request — Accepted
+
+Corndogs release 0.8.0 added two features: submission keys and task guards.
+See its `docs/resilience.md`. Before 0.8.0 TallyOwl had two problems with
+Corndogs that it could not fix:
+
+- **A lost reply to a submission.** The caller cannot know whether the task
+  exists. A refusal loses nothing, but the producer sends the batch again and
+  Corndogs holds two tasks. A retry of the submission has the same result.
+  Final storage deduplicates the batch ID, so the count stays correct, but the
+  queue does the work twice.
+- **A worker whose claim ended.** The sweep returns a task when its claim
+  times out, and another worker claims it. The first worker could still
+  complete, park, or quarantine the task, and the second worker's claim was
+  lost. `UpdateTask` also accepted a wrong current state.
+
+### The decision
+
+`tallyowl-queue` uses only the new operations: `SubmitKeyedTask` with
+`guarded = true`, `ClaimGuardedTask`, `UpdateGuardedTask`, and
+`CompleteGuardedTask`. `CleanUpTimedOut` and the count do not change.
+
+- **One submission key for each call to `submit`.** The key is random. It is
+  not the batch ID. Corndogs compares the request bytes for a key, and the
+  task payload holds the time the collector accepted the batch. A producer's
+  retry of the same batch therefore has different bytes, and a key made from
+  the batch ID would get "submission key conflict". A key made from the batch
+  ID would also put the deduplication of one tenant in a namespace that other
+  tenants can write to. Final storage stays the place that deduplicates a
+  batch ID (D4).
+- **One operation ID for each claim and each change.** A claim returns the
+  revision of the task. Each change names that revision and the state the
+  claim gave. A change from a worker whose claim ended returns code 5, and
+  `tallyowl-queue` reports it as `failed-precondition`, not retryable. The
+  callers already treat a failed change as "the sweep returns the task, and
+  final storage counts it once".
+- **A lost reply is sent again.** The queue sends the same bytes again, at
+  most three times in total. A resend happens only while the elapsed time plus
+  one call deadline is less than half of the Corndogs receipt retention. A
+  resend after Corndogs forgot the key would make a second task. A
+  ServiceError, a failed dial, and "unknown operation" are not sent again.
+- **TallyOwl requires Corndogs 0.8.0.** The queue calls `GetServerInfo` when it
+  connects and refuses a server that does not list `submission-keys-v1` and
+  `task-guards-v1`. The error is `schema-unsupported` and says to upgrade
+  Corndogs. Corndogs says that a client must not change to a legacy request
+  after "unknown operation", so there is no fall-back.
+- **The sidecar requires both features.** The head chart starts the sidecar
+  with `CORNDOGS_SUBMISSION_KEY_POLICY=required` and
+  `CORNDOGS_TASK_GUARD_POLICY=required` by default
+  (`corndogsDeployment.resilience`). Every TallyOwl request of this release
+  has a key or a guard, so the policy refuses only a request from an older
+  component. The local tools start Corndogs with the same policies.
+
+### What this costs
+
+- **No downgrade.** A Corndogs 0.7.x server does not read guarded tasks. To go
+  back, restore the backup of the queue from before the upgrade, or drain the
+  queue first. DEPLOYMENT.md section 7c says this.
+- **A collector from an older release** writes legacy requests, and a sidecar
+  with `required` refuses them. TallyOwl has no installation that runs an
+  older release. An operator who has one sets the policies to
+  `compatibility` until every collector is upgraded.
+- **A shorter retention means fewer resends.** At the minimum retention of one
+  minute and the default call deadline of 30 seconds, the queue sends nothing
+  again. That is safe: the caller gets "durable store unavailable", as before.
+
+**Cost to change:** cheap. The change is in one crate.
+**Revisit:** when Corndogs adds a feature that changes these rules.

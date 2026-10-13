@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 
 from .commands import REPOSITORY_ROOT, ToolFailed, require, say, warn
-from .dev import _corndogs_command, _wait_for_port
+from .dev import CORNDOGS_REQUIRED, _corndogs_command, _wait_for_port
 from .soak import _stop_pid, _write_yaml
 
 RUN_DIR = REPOSITORY_ROOT / "run" / "drill"
@@ -471,6 +471,7 @@ def _start_stack(drill: Drill) -> None:
             "CORNDOGS_FILESTORE_SYNC": "group",
             "CORNDOGS_LISTEN": ADDRESSES["corndogs"],
             "CORNDOGS_HTTP_LISTEN": "127.0.0.1:5781",
+            **CORNDOGS_REQUIRED,
             "LOGLEVEL": "error",
         },
         wait_for=ADDRESSES["corndogs"],

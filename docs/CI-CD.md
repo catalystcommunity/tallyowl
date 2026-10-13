@@ -94,8 +94,12 @@ Every job's command is `runnerlib run --job-command true`, and
 
 Two facts the proposal had wrong, recorded so nobody restores it from memory:
 
-- job YAML cannot set resource limits. CPU and memory ceilings come from the
-  organization's execution profile, not from the repository;
+- ~~job YAML cannot set resource limits~~. It can: `job.resources` sets the
+  CPU request and limit and the memory limit of the job container (L190).
+  **It does not reach the `docker` capability's daemon.** Reactorcide adds that
+  daemon as a separate Docker-in-Docker sidecar with no requests, no limits,
+  and an `emptyDir` with no size limit (`kubernetes_runner.go` in Reactorcide).
+  An image build, and every kind node, runs in that sidecar;
 - workflow variables, outputs, change detection, and `for_each` come from
   runnerlib's `src.workflow` module inside a plugin, not from standalone
   pipeline scripts.
@@ -224,6 +228,15 @@ workflow only. **It is not known yet that kind can run nested in a job pod on
 this cluster.** kind talks to the daemon that the capability gives, and
 `kubectl` must reach the API server that kind publishes on that daemon's
 host. The first run tells.
+
+**The job's `resources` do not size the work.** They apply to the job
+container, which runs `kubectl`, `helm`, and two small builds. The image build
+and the cluster run in the Docker-in-Docker sidecar, which Reactorcide gives no
+requests and no limits. Measured on a workstation: the four kind nodes with
+both releases and the three-head cell use about 1.7 GiB at rest, so the peak
+is the release image build, the same compile that the package job sizes at 4
+to 8 CPUs and 12 GiB. The sidecar also needs about 20 GB of disk. Until
+Reactorcide can size the sidecar, the job relies on spare room on the node.
 
 The job fetches pinned `kind` and `kubectl`, because the runner image has
 neither. It needs OpenSSL 3 or later and Go, which the runner image has.

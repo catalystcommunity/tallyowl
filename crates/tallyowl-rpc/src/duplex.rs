@@ -159,6 +159,39 @@ impl TlsDuplex {
         }
     }
 
+    /// Close a connection whose handshake this side refused, so the peer reads
+    /// the reason.
+    ///
+    /// The alert that says why is already queued. Dropping the socket at once
+    /// loses it: with TLS 1.3 the client has finished its side of the
+    /// handshake and sent its first request, so this side closes with unread
+    /// input, the kernel answers with a reset, and the client reports "broken
+    /// pipe", which reads as a network fault that a retry could fix. So this
+    /// sends the alert, closes only the write side, and reads and discards
+    /// what the client sends until it closes or `limit` passes. The client then
+    /// reads the alert and reports the refusal it is.
+    pub fn linger_close(&self, limit: std::time::Duration) {
+        let _ = self.flush_records();
+        if let Ok(socket) = self.session.output.lock() {
+            let _ = socket.shutdown_write();
+        }
+        let Ok(mut input) = self.session.input.lock() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + limit;
+        let mut discard = [0u8; 4096];
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || input.socket.set_read_timeout(Some(left)).is_err() {
+                return;
+            }
+            match input.socket.read(&mut discard) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    }
+
     /// The peer's certificate chain, leaf first, once the handshake has run.
     pub fn peer_certificates(&self) -> io::Result<Option<Vec<Vec<u8>>>> {
         let connection = self

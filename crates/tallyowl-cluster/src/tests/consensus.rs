@@ -550,7 +550,14 @@ fn a_learner_follows_the_log_without_enlarging_the_write_quorum() {
         .expect("the write commits on the voters");
 
     // The learner catches up, and it did not have to for the write to commit.
-    let target = leader.registry.applied_index(&group);
+    // The target is the furthest voter: under load the leadership can move
+    // during the write, and the node found as leader before it can then be
+    // behind the entry that holds the row.
+    let target = nodes[..2]
+        .iter()
+        .map(|node| node.registry.applied_index(&group))
+        .max()
+        .unwrap_or(0);
     let mut reached = false;
     for _ in 0..500 {
         if nodes[2].registry.applied_index(&group) >= target {
@@ -1867,10 +1874,18 @@ fn a_voter_that_lost_its_disk_does_not_vote_until_it_has_caught_up() {
         !marker.exists(),
         "the hold would come back at the next start"
     );
+    // The hold ends when the log reaches the leader's commit, which is the
+    // Raft rule for a safe vote. The node applies those entries a moment
+    // later, so the applied index is not the thing to check here: under load
+    // it can still be 0 when the hold ends.
     let leader = nodes.iter().find(|n| n.name == leader_name).unwrap();
+    let held = nodes[lost]
+        .registry
+        .health_of(&group)
+        .map(|health| health.last_log)
+        .unwrap_or(0);
     assert!(
-        nodes[lost].registry.applied_index(&group) > 0
-            || leader.registry.applied_index(&group) == 0,
+        held > 0 || leader.registry.applied_index(&group) == 0,
         "the hold ended before the node held anything"
     );
     nodes[lost].lose(&group);

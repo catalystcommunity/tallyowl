@@ -6910,5 +6910,12 @@ with its latest release on GitHub.
 - The SDK brings hickory-resolver 0.26, tokio, and `url`. `./tools.sh audit`
   passes.
 
+**The PR build failed on a newer Rust.** The runner image is
+`runnerbase:latest`, and it moved to Rust 1.99. Rust 1.99 deprecates
+`fetch_update` on atomics and names it `try_update`, and the lint runs with
+`-D warnings`. The one use, in the peer queue of `raft/network.rs`, is now
+`try_update`, which Rust 1.98 also has. Clippy and `test-rust` pass inside the
+runner image itself (1,588 tests).
+
 **Cost to change:** cheap.
 **Revisit:** at the next release.

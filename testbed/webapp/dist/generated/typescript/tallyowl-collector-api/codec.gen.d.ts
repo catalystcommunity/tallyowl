@@ -1,4 +1,4 @@
-import type { AliasPayload, Batch, CampaignCostPayload, CampaignParameters, CampaignTouchPayload, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, CollectionPolicy, CollectorHealth, CommitBatchRequest, CommitBatchResponse, Consent, ConversionPayload, DeliveryTask, Envelope, ErrorPayload, EventPayload, FeatureExposurePayload, FetchPolicyRequest, FetchPolicyResponse, GroupPayload, HealthRequest, HistogramValue, IdentifyPayload, InteractionPayload, Measurement, MetricPointPayload, PageViewPayload, PolicyVersionRequest, PolicyVersionResponse, Property, ProtectedKey, RejectedItem, ResolveKeyRequest, ResolveKeyResponse, RetentionRule, SamplingClause, ServiceError, SessionEndPayload, SessionStartPayload, SpanLink, SpanPayload, StackFrame, SubmitBatchRequest, SubmitBatchResponse, TailRule, TelemetryItem, TypedValue } from "./types.gen.ts";
+import type { AlertNotifyRequest, AlertNotifyResponse, AliasPayload, Batch, CampaignCostPayload, CampaignParameters, CampaignTouchPayload, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, CollectionPolicy, CollectorHealth, CommitBatchRequest, CommitBatchResponse, Consent, ConversionPayload, DeliveryTask, Envelope, ErrorPayload, EventPayload, FeatureExposurePayload, FetchPolicyRequest, FetchPolicyResponse, GroupPayload, HealthRequest, HistogramValue, IdentifyPayload, InteractionPayload, Measurement, MetricPointPayload, PageViewPayload, PolicyVersionRequest, PolicyVersionResponse, Property, ProtectedKey, RejectedItem, ResolveKeyRequest, ResolveKeyResponse, RetentionRule, SamplingClause, ServiceError, SessionEndPayload, SessionStartPayload, SpanLink, SpanPayload, StackFrame, SubmitBatchRequest, SubmitBatchResponse, TailRule, TelemetryItem, TypedValue } from "./types.gen.ts";
 /** A CBOR semantic tag wrapping an inner value (e.g. tag 0 timestamp, tag 4 decimal). */
 export type CborTag = {
     readonly tag: number;
@@ -240,3 +240,11 @@ export declare function toPolicyVersionResponseCborValue(v: PolicyVersionRespons
 export declare function fromPolicyVersionResponseCborValue(value: CborValue): PolicyVersionResponse;
 export declare function toPolicyVersionResponseCbor(v: PolicyVersionResponse): Uint8Array;
 export declare function fromPolicyVersionResponseCbor(bytes: Uint8Array): PolicyVersionResponse;
+export declare function toAlertNotifyRequestCborValue(v: AlertNotifyRequest): CborValue;
+export declare function fromAlertNotifyRequestCborValue(value: CborValue): AlertNotifyRequest;
+export declare function toAlertNotifyRequestCbor(v: AlertNotifyRequest): Uint8Array;
+export declare function fromAlertNotifyRequestCbor(bytes: Uint8Array): AlertNotifyRequest;
+export declare function toAlertNotifyResponseCborValue(v: AlertNotifyResponse): CborValue;
+export declare function fromAlertNotifyResponseCborValue(value: CborValue): AlertNotifyResponse;
+export declare function toAlertNotifyResponseCbor(v: AlertNotifyResponse): Uint8Array;
+export declare function fromAlertNotifyResponseCbor(bytes: Uint8Array): AlertNotifyResponse;

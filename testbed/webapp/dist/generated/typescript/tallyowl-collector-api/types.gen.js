@@ -419,3 +419,11 @@ export function validateCampaignCostPayload(value) {
         errors.push("currency: length must be between 3 and 3");
     return errors;
 }
+export function validateAlertNotifyRequest(value) {
+    const errors = [];
+    if (value.signature.length < 64 || value.signature.length > 64)
+        errors.push("signature: length must be between 64 and 64");
+    if (value.body.length < 1 || value.body.length > 65536)
+        errors.push("body: length must be between 1 and 65536");
+    return errors;
+}

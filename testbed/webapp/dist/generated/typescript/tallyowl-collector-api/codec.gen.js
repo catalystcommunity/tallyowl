@@ -1643,3 +1643,37 @@ export function toPolicyVersionResponseCbor(v) {
 export function fromPolicyVersionResponseCbor(bytes) {
     return fromPolicyVersionResponseCborValue(decode(bytes));
 }
+export function toAlertNotifyRequestCborValue(v) {
+    const csilMap = new Map();
+    csilMap.set("body", v.body);
+    csilMap.set("signature", v.signature);
+    csilMap.set("signed_at", v.signedAt);
+    return csilMap;
+}
+export function fromAlertNotifyRequestCborValue(value) {
+    return {
+        signedAt: asNumber(requireKey(value, "signed_at")),
+        signature: asString(requireKey(value, "signature")),
+        body: asBytes(requireKey(value, "body")),
+    };
+}
+export function toAlertNotifyRequestCbor(v) {
+    return encodeValue(toAlertNotifyRequestCborValue(v));
+}
+export function fromAlertNotifyRequestCbor(bytes) {
+    return fromAlertNotifyRequestCborValue(decode(bytes));
+}
+export function toAlertNotifyResponseCborValue(v) {
+    const csilMap = new Map();
+    return csilMap;
+}
+export function fromAlertNotifyResponseCborValue(value) {
+    void value;
+    return {};
+}
+export function toAlertNotifyResponseCbor(v) {
+    return encodeValue(toAlertNotifyResponseCborValue(v));
+}
+export function fromAlertNotifyResponseCbor(bytes) {
+    return fromAlertNotifyResponseCborValue(decode(bytes));
+}

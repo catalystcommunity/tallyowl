@@ -479,6 +479,35 @@ export interface PolicyVersionResponse {
     samplingRate: number;
     enabledKinds: TelemetryKind[];
 }
+/**
+ * One alert notification, as the head sends it to an application that
+ * declares `TallyOwlAlertReceiver`. docs/ALERTS.md section 6 and D62.
+ *
+ * The head signs it the same way it signs a webhook: a keyed BLAKE3 hash, with
+ * the target's secret, over the decimal text of `signed_at`, a full stop, and
+ * `body`. A receiver verifies before it reads `body`, and refuses a
+ * `signed_at` that is more than five minutes from its own clock.
+ *
+ * - `signed_at` is milliseconds since 1970, the same number a webhook sends in
+ * its timestamp header, so one verification serves both channels.
+ * - `signature` is the lowercase hexadecimal text of the 32-byte hash, the
+ * same text a webhook sends in its signature header.
+ * - `body` is bytes, not a record: it is the exact UTF-8 JSON that was signed.
+ * A receiver verifies these bytes. A record would make a receiver encode it
+ * again to verify it, and two encoders need not agree byte for byte.
+ */
+export interface AlertNotifyRequest {
+    signedAt: Timestamp;
+    signature: string;
+    body: Uint8Array;
+}
+/**
+ * The receiver took the notification. A receiver that refuses one answers a
+ * `ServiceError`: `unauthenticated` for a signature that does not verify or a
+ * time outside the window. The head does not send that notification again.
+ */
+export interface AlertNotifyResponse {
+}
 export declare function validateDeliveryTask(value: DeliveryTask): string[];
 export declare function validateResolveKeyRequest(value: ResolveKeyRequest): string[];
 export declare function validateResolveKeyResponse(value: ResolveKeyResponse): string[];
@@ -512,3 +541,4 @@ export declare function validateSpanPayload(value: SpanPayload): string[];
 export declare function validateMetricPointPayload(value: MetricPointPayload): string[];
 export declare function validateCampaignTouchPayload(value: CampaignTouchPayload): string[];
 export declare function validateCampaignCostPayload(value: CampaignCostPayload): string[];
+export declare function validateAlertNotifyRequest(value: AlertNotifyRequest): string[];

@@ -1,6 +1,6 @@
 {
   "name": "@catalystcommunity/tallyowl-testbed-webapp",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "seedstore's web application. It is instrumented with the TallyOwl browser package and reaches TallyOwl only through its own backend.",
   "license": "Apache-2.0",
   "private": true,

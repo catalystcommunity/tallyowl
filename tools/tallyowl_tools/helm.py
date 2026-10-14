@@ -709,6 +709,24 @@ def check_disruption_budget(rendered: str, replicas: int) -> None:
     raise ToolFailed(f"The chart rendered no disruption budget for {replicas} replicas.")
 
 
+def check_spread_on_unlabelled_nodes(rendered: str, chart: str) -> None:
+    """A default install schedules on nodes that carry only the labels every node has.
+
+    A hard spread constraint filters out each node that lacks its topology key.
+    A cluster with no `topology.kubernetes.io/zone` label, which is most bare
+    metal, then has no node for the pod, and the pod stays Pending.
+    """
+    workload = _workload(rendered, chart)
+    for constraint in workload["spec"]["template"]["spec"].get("topologySpreadConstraints", []):
+        key = constraint.get("topologyKey")
+        if constraint.get("whenUnsatisfiable") == "DoNotSchedule" and key != "kubernetes.io/hostname":
+            raise ToolFailed(
+                f"The {chart} chart requires the node label {key} by default. A cluster "
+                "whose nodes do not have it cannot schedule the pod. Use ScheduleAnyway."
+            )
+    say(f"The {chart} chart schedules on nodes with no zone label.")
+
+
 def check_self_observation_target(rendered: str) -> None:
     """The head dials `metrics.selfObservation.endpoint`, so it is never a bind address.
 
@@ -855,6 +873,8 @@ def check() -> int:
     check_rendered_binds(collector.stdout, "tallyowl-collector")
     check_pod_hardening(head.stdout, "tallyowl")
     check_pod_hardening(collector.stdout, "tallyowl-collector")
+    check_spread_on_unlabelled_nodes(head.stdout, "tallyowl")
+    check_spread_on_unlabelled_nodes(collector.stdout, "tallyowl-collector")
 
     say("Rendering both charts in plaintext, which an operator has to ask for.")
     plain_head = run(

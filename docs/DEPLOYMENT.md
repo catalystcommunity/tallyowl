@@ -532,11 +532,13 @@ that show convergence.
 - a stateless pod gets a new node ID for each start.
 
 The head chart carries three groups of values for this. A home installation has
-one replica and none of them applies to it.
+one replica, so these values do not move it. They can still stop it: a pod
+with a required constraint goes only to a node that has the label of that
+constraint.
 
 | Value | Meaning |
 | --- | --- |
-| `topologySpread.constraints` | Spread replicas across zones and then across nodes, with a skew of one |
+| `topologySpread.constraints` | Spread replicas across zones and then across nodes, with a skew of one. The zone constraint is `ScheduleAnyway`, because many clusters give no node a `topology.kubernetes.io/zone` label. In a cluster whose nodes all have a zone label, set it to `DoNotSchedule`. `helm-check` refuses a default that requires a label other than `kubernetes.io/hostname` |
 | `affinity.antiAffinity` | `required` by default: two voters of one tablet never share a node |
 | `disruption.minAvailable` | How many replicas must stay during a voluntary disruption. Empty by default, which means a majority: two of three, three of five |
 

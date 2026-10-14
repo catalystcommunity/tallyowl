@@ -205,6 +205,36 @@ spec:
 """
 
 
+def spread(zone_rule: str) -> str:
+    return f"""
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: home
+spec:
+  template:
+    spec:
+      topologySpreadConstraints:
+        - topologyKey: topology.kubernetes.io/zone
+          maxSkew: 1
+          whenUnsatisfiable: {zone_rule}
+        - topologyKey: kubernetes.io/hostname
+          maxSkew: 1
+          whenUnsatisfiable: DoNotSchedule
+"""
+
+
+class SpreadOnUnlabelledNodes(unittest.TestCase):
+    def test_a_preferred_zone_and_a_required_node_pass(self) -> None:
+        helm.check_spread_on_unlabelled_nodes(spread("ScheduleAnyway"), "tallyowl")
+
+    def test_a_required_zone_is_refused(self) -> None:
+        # 0.3.0 rendered this, and its head stayed Pending on a cluster whose
+        # nodes had no zone label.
+        with self.assertRaisesRegex(ToolFailed, "topology.kubernetes.io/zone"):
+            helm.check_spread_on_unlabelled_nodes(spread("DoNotSchedule"), "tallyowl")
+
+
 class PodHardening(unittest.TestCase):
     def test_a_hardened_pod_passes(self) -> None:
         helm.check_pod_hardening(pod(), "tallyowl")

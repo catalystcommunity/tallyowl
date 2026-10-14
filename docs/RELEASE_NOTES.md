@@ -8,7 +8,18 @@ repository here uses starts an untagged repository at 0.1.0.
 
 This is a first release. Read the limits before you install it.
 
-## Not released yet — changes after 0.2.1
+## Not released yet — changes after 0.3.0
+
+- **The head chart schedules on a cluster whose nodes have no zone label.**
+  The zone spread constraint was `DoNotSchedule`. Kubernetes then removes each
+  node that has no `topology.kubernetes.io/zone` label, so on most bare metal
+  the head pod stayed Pending. The constraint is now `ScheduleAnyway`. The
+  node constraint and the required anti-affinity still keep two voters off one
+  node. In a cluster whose nodes all have a zone label, set the zone constraint
+  to `DoNotSchedule` again. Until you upgrade, set `topologySpread.constraints`
+  to the `kubernetes.io/hostname` entry only.
+
+## 0.3.0 — 2026-10-14
 
 An antagonistic review on 2026-09-20 examined the scalability, the stability,
 and the ease of use of TallyOwl. These are its results.

@@ -487,6 +487,14 @@ class TallyOwlJobsPlugin(Plugin):
         if not code_dir.is_dir():
             raise RuntimeError(f"Code directory does not exist: {code_dir}")
 
+        # The gates start together and each one downloads the same crates.
+        # crates.io then breaks some HTTP/2 streams ("Error in the HTTP2
+        # framing layer"), and cargo's two retries were not enough. One
+        # connection for each download, and more retries, stop that. A value
+        # the job file sets wins.
+        os.environ.setdefault("CARGO_HTTP_MULTIPLEXING", "false")
+        os.environ.setdefault("CARGO_NET_RETRY", "10")
+
         log_stdout(f"Starting TallyOwl job: {name}")
         job(code_dir)
         log_stdout(f"Completed TallyOwl job: {name}")

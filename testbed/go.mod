@@ -3,15 +3,15 @@ module github.com/CatalystCommunity/tallyowl/testbed
 go 1.26.3
 
 require (
-	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api v0.3.0
-	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-ingest-api v0.3.0
-	github.com/CatalystCommunity/tallyowl/packages/driver-go v0.3.0
+	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api v0.3.1
+	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-ingest-api v0.3.1
+	github.com/CatalystCommunity/tallyowl/packages/driver-go v0.3.1
 	github.com/catalystcommunity/csilgen/transports/go v0.0.0-20260926220402-baec1dad191c
 )
 
 replace github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api => ../generated/go/tallyowl-collector-api
 
-require github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-control-api v0.3.0
+require github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-control-api v0.3.1
 
 require (
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect

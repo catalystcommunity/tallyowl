@@ -6919,3 +6919,30 @@ runner image itself (1,588 tests).
 
 **Cost to change:** cheap.
 **Revisit:** at the next release.
+
+## L196. The head pod stayed Pending on a cluster with no zone labels
+
+**Phase:** after 0.3.0
+**Decision:** the first installation of 0.3.0 on a k3s cluster, on
+2026-10-14, left the head pod Pending. The scheduler said "didn't match pod
+topology spread constraints (missing required label)". No node of that
+cluster has a `topology.kubernetes.io/zone` label, and the zone constraint of
+the head chart was `DoNotSchedule`. A required constraint removes each node
+that does not have its label.
+
+`./tools.sh kind-check` did not find it, because its KinD configuration gives
+each worker a zone label. That label stays, because the replicated cell needs
+it to test zone spread.
+
+- The zone constraint is now `ScheduleAnyway`. The node constraint stays
+  `DoNotSchedule`, and `affinity.antiAffinity` stays `required`, so two voters
+  never share a node.
+- `helm-check` renders each chart with its defaults and refuses a required
+  spread constraint on a key other than `kubernetes.io/hostname`
+  (`check_spread_on_unlabelled_nodes`). Tests: `SpreadOnUnlabelledNodes`.
+- DEPLOYMENT.md section 6 no longer says that these values do not apply to a
+  home installation.
+
+**Cost to change:** cheap.
+**Revisit:** if a profile needs a required zone spread, make it a profile
+value, not the default.

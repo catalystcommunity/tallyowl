@@ -71,10 +71,16 @@ topologySpread:
   enabled: true
   # A zone first, then a node. Skew of one means the replicas differ by at most
   # one in each domain.
+  #
+  # The zone constraint is a preference. A hard constraint removes each node
+  # that has no `topology.kubernetes.io/zone` label, and many clusters, most
+  # bare metal among them, label no node. In a cluster whose nodes all have a
+  # zone, set it to DoNotSchedule. The node constraint and `affinity` below
+  # keep two voters off one node in every cluster.
   constraints:
     - topologyKey: topology.kubernetes.io/zone
       maxSkew: 1
-      whenUnsatisfiable: DoNotSchedule
+      whenUnsatisfiable: ScheduleAnyway
     - topologyKey: kubernetes.io/hostname
       maxSkew: 1
       whenUnsatisfiable: DoNotSchedule

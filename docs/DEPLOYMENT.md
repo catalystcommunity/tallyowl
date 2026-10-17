@@ -381,6 +381,87 @@ address nothing serves when the two disagree.
 The dashboard carries `TallyOwlControl` and refuses every other service, so it
 is not an ingest surface. Telemetry reaches a collector over CSIL.
 
+### Sign-in
+
+LinkKeys does the authentication. TallyOwl makes the session. D7 gives two
+modes. Set the mode in `linkkeys.mode`.
+
+| Mode | Who signs the request | Approval at the person's domain |
+| --- | --- | --- |
+| `domain` (default) | A LinkKeys server of your home domain, with its RP function on | Not necessary |
+| `local` | A key that TallyOwl makes itself | Necessary at each domain, before the first sign-in |
+
+Use `domain` when you have a home domain with a LinkKeys server. Use `local`
+only when the installation has no domain.
+
+| Value | Meaning |
+| --- | --- |
+| `linkkeys.enabled` | Accept sign-ins; off by default |
+| `linkkeys.trustedDomains` | The domains of the people who can sign in |
+| `linkkeys.callbackUrl` | The public address of the dashboard callback |
+| `linkkeys.rp.address` | The `host:port` of the RP server's TCP listener |
+| `linkkeys.rp.domain` | The home domain of the RP server |
+| `linkkeys.rp.fingerprints` | The `fp=` values of the RP server's `_linkkeys` DNS record |
+| `deployment.linkkeysApiKeySecret.name` | The Secret that holds the RP API key |
+
+To set up `domain` mode:
+
+1. On the RP server, make a service account with the `api_access` relation.
+   The command shows the API key one time only.
+
+   ```sh
+   linkkeys user create tallyowl "TallyOwl" --api-key --relation api_access
+   ```
+
+2. Store the key in a Secret in the TallyOwl namespace. Do not put the key in
+   a values file.
+
+   ```sh
+   kubectl --namespace tallyowl create secret generic tallyowl-linkkeys \
+     --from-file=api-key=<the file that holds the key>
+   ```
+
+3. Get the fingerprints from the `_linkkeys` TXT record of the home domain.
+
+   ```sh
+   dig +short TXT _linkkeys.<home domain>
+   ```
+
+4. Set the values. Use the in-cluster Service address of the RP server. A
+   public name often does not connect from a pod. The fingerprints, not the
+   name, make the connection trusted.
+
+   ```yaml
+   deployment:
+     linkkeysApiKeySecret:
+       name: tallyowl-linkkeys
+   linkkeys:
+     enabled: true
+     trustedDomains: people.example
+     callbackUrl: https://tallyowl.example.com/sign-in/callback
+     rp:
+       address: linkkeys.linkkeys.svc.cluster.local:4987
+       domain: example.com
+       fingerprints: <fp1>,<fp2>
+   ```
+
+5. Sign in. Then give yourself a role. A sign-in gives no role. Find your
+   subject in the head log line "Somebody signed in", and run the
+   `member add` verb as a maintenance Job.
+
+   ```text
+   member add default <subject> owner
+   ```
+
+In `domain` mode, `linkkeys.callbackUrl` must be an `https://` address on
+the RP domain or on a name under it. The person's LinkKeys server refuses a
+sign-in that returns to another address, and `config check` refuses it first.
+
+When the RP server rotates its key, add the new fingerprint to
+`linkkeys.rp.fingerprints` before the rotation. When a sign-in fails, the
+browser shows one message. The head log line "A sign-in was refused" gives
+the cause.
+
 ### Integrity and recovery
 
 | Value | Meaning | Default |

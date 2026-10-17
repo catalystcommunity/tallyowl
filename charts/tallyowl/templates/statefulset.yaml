@@ -118,6 +118,13 @@ spec:
                   name: {{ .Values.deployment.apiKeySecret.name }}
                   key: {{ .Values.deployment.apiKeySecret.key }}
             {{- end }}
+            {{- if .Values.deployment.linkkeysApiKeySecret.name }}
+            - name: SECRET_TALLYOWL_LINKKEYS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.deployment.linkkeysApiKeySecret.name }}
+                  key: {{ .Values.deployment.linkkeysApiKeySecret.key }}
+            {{- end }}
             {{- with .Values.deployment.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

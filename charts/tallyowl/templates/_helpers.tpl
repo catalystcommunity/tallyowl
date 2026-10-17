@@ -96,6 +96,9 @@ refuses a host name there.
 {{- if .Values.deployment.apiKeySecret.name -}}
 {{- $_ := set $settings.collector "apiKey" "env:SECRET_TALLYOWL_API_KEY" -}}
 {{- end -}}
+{{- if .Values.deployment.linkkeysApiKeySecret.name -}}
+{{- $_ := set $settings.linkkeys.rp "apiKey" "env:SECRET_TALLYOWL_LINKKEYS_API_KEY" -}}
+{{- end -}}
 {{- /*
 D62. The files of `deployment.tls`, at the paths `tallyowl.securityMounts`
 mounts them.

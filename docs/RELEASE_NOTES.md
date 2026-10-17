@@ -8,7 +8,31 @@ repository here uses starts an untagged repository at 0.1.0.
 
 This is a first release. Read the limits before you install it.
 
-## Not released yet — changes after 0.3.0
+## Not released yet — changes after 0.3.1
+
+### Read this before you upgrade
+
+- **LinkKeys sign-in uses a domain-backed RP server by default (D7).** The
+  new setting `linkkeys.mode` is `domain` by default. An installation that
+  signs in with LinkKeys and has no `linkkeys.rp.*` settings does not start
+  after the upgrade, and `config check` names each missing setting. To keep
+  the behavior of 0.3.1, set `linkkeys.mode` to `local`. An installation with
+  `linkkeys.enabled` false is not affected.
+
+### Changes
+
+- **Domain-backed sign-in.** A LinkKeys server of your home domain, with its
+  RP function on, signs each sign-in request. The person's own domain checks
+  the home domain in DNS, so the domain administrator does not approve
+  TallyOwl first. The head calls the RP server over TLS. The fingerprints in
+  `linkkeys.rp.fingerprints` are the trust anchor. The API key comes from a
+  Secret through `deployment.linkkeysApiKeySecret`. See DEPLOYMENT.md
+  section 4, "Sign-in".
+- The head checks each assertion against the sign-in that started it: the
+  domain, the relying party, the nonce, and the times. A refused sign-in shows
+  one message in the browser, and the head log gives the cause.
+
+## 0.3.1 — 2026-10-14
 
 - **The head chart schedules on a cluster whose nodes have no zone label.**
   The zone spread constraint was `DoNotSchedule`. Kubernetes then removes each

@@ -693,6 +693,27 @@ def check_key_secret(rendered: str, chart: str, secret: str) -> None:
     say(f"The {chart} key is a reference to the Secret `{secret}`.")
 
 
+def check_linkkeys_key_secret(rendered: str, secret: str) -> None:
+    """The RP server key reaches the head as a reference, and never as a value."""
+    settings = _rendered_settings(rendered, "tallyowl")
+    reference = ((settings.get("linkkeys") or {}).get("rp") or {}).get("apiKey")
+    if reference != "env:SECRET_TALLYOWL_LINKKEYS_API_KEY":
+        raise ToolFailed(
+            f"The tallyowl chart renders `linkkeys.rp.apiKey` as {reference!r} with "
+            "an RP key Secret named. It must be `env:SECRET_TALLYOWL_LINKKEYS_API_KEY`."
+        )
+    container = _workload(rendered, "tallyowl")["spec"]["template"]["spec"]["containers"][0]
+    entry = _environment(container).get("SECRET_TALLYOWL_LINKKEYS_API_KEY") or {}
+    if ((entry.get("valueFrom") or {}).get("secretKeyRef") or {}).get("name") != secret:
+        raise ToolFailed(
+            "The tallyowl pod does not fill SECRET_TALLYOWL_LINKKEYS_API_KEY from the "
+            f"Secret `{secret}`, so the reference in the settings points at nothing."
+        )
+    if "value" in entry:
+        raise ToolFailed("The tallyowl pod carries the RP key as a literal value.")
+    say(f"The tallyowl RP key is a reference to the Secret `{secret}`.")
+
+
 def check_disruption_budget(rendered: str, replicas: int) -> None:
     """A voluntary disruption never takes a majority of the voters."""
     majority = replicas // 2 + 1
@@ -924,6 +945,23 @@ def check() -> int:
         ("tallyowl", "home", "self-observation", observed.stdout),
         ("tallyowl-collector", "home", "OpenTelemetry receiver", receiving.stdout),
     ]
+
+    say("Rendering the head with a domain-backed LinkKeys sign-in.")
+    signing_in = run(
+        [
+            helm, "template", "home", str(HEAD_CHART), *HEAD_SECURE,
+            "--set", "linkkeys.enabled=true",
+            "--set", "linkkeys.trustedDomains=id.example",
+            "--set", "linkkeys.rp.address=linkkeys.linkkeys.svc.cluster.local:4987",
+            "--set", "linkkeys.rp.domain=home.example",
+            "--set", "linkkeys.callbackUrl=https://tallyowl.home.example/sign-in/callback",
+            "--set", "linkkeys.rp.fingerprints=" + "ab" * 32,
+            "--set", "deployment.linkkeysApiKeySecret.name=tallyowl-linkkeys",
+        ],
+        capture=True,
+    )
+    check_linkkeys_key_secret(signing_in.stdout, "tallyowl-linkkeys")
+    accepted.append(("tallyowl", "home", "domain-backed sign-in", signing_in.stdout))
 
     say("Rendering a maintenance Job.")
     maintained = run(

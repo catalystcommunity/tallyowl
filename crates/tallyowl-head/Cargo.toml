@@ -46,6 +46,9 @@ tallyowl-cluster-api = { workspace = true }
 blake3 = { workspace = true }
 # LinkKeys owns human authentication. See src/linkkeys.rs.
 linkkeys-local-rp = { workspace = true }
+liblinkkeys = { workspace = true }
+linkkeys-rpc-client = { workspace = true }
+url = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 # An alert webhook is the one outbound connection to something TallyOwl does not

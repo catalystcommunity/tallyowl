@@ -877,6 +877,32 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         &background,
     ));
 
+    // D7: the domain-backed relying party is the default. Its API key is
+    // resolved here, once, so a reference that points at nothing stops the
+    // start rather than the first sign-in. The value is never logged.
+    let sign_in_mode = tallyowl_head::linkkeys::Mode::parse(config.text("linkkeys.mode"))
+        .expect("the loader accepts only `domain` and `local` for `linkkeys.mode`");
+    let sign_in_rp: Option<Arc<dyn tallyowl_head::linkkeys_rp::RpCaller>> = if config
+        .boolean("linkkeys.enabled")
+        && sign_in_mode == tallyowl_head::linkkeys::Mode::Domain
+    {
+        let api_key = config.secret("linkkeys.rp.apiKey")?;
+        logger.info(
+            "LinkKeys sign-in uses an RP server.",
+            &[
+                ("address", config.text("linkkeys.rp.address")),
+                ("rp_domain", config.text("linkkeys.rp.domain")),
+            ],
+        );
+        Some(Arc::new(tallyowl_head::linkkeys_rp::TcpRpCaller::new(
+            config.text("linkkeys.rp.address").to_string(),
+            config.list("linkkeys.rp.fingerprints"),
+            api_key.expose().to_string(),
+        )))
+    } else {
+        None
+    };
+
     let service = HeadService {
         ingest: Arc::new(Ingest {
             golden_signal_bucket_ms: config.duration_ms("metrics.goldenSignalResolution"),
@@ -907,6 +933,8 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             metrics: Arc::clone(&metrics),
             settings: tallyowl_head::linkkeys::LinkKeysSettings {
                 enabled: config.boolean("linkkeys.enabled"),
+                mode: sign_in_mode,
+                rp_domain: config.text("linkkeys.rp.domain").to_string(),
                 trusted_domains: config
                     .list("linkkeys.trustedDomains")
                     .into_iter()
@@ -916,6 +944,9 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 app_name: config.text("linkkeys.appName").to_string(),
                 session_lifetime_ms: config.duration_ms("linkkeys.sessionLifetime"),
             },
+            rp: sign_in_rp,
+            dns: None,
+            logger: Arc::clone(&logger),
         }),
         logger: Arc::clone(&logger),
         policy: Arc::clone(&policy),

@@ -21,6 +21,7 @@ pub mod identity;
 pub mod ingest;
 pub mod lifecycle;
 pub mod linkkeys;
+pub mod linkkeys_rp;
 pub mod listeners;
 pub mod money;
 pub mod notify;

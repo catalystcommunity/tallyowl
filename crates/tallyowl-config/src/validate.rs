@@ -474,6 +474,67 @@ fn check_single_values(resolved: &Resolved, errors: &mut Vec<ConfigError>) {
         ));
     }
 
+    // A domain-backed sign-in needs its RP server. Without these the head
+    // starts and every sign-in fails, which looks like LinkKeys is down.
+    if resolved.boolean("linkkeys.enabled") && resolved.text("linkkeys.mode") == "domain" {
+        for (setting, example) in [
+            (
+                "linkkeys.rp.address",
+                "linkkeys.linkkeys.svc.cluster.local:4987",
+            ),
+            ("linkkeys.rp.domain", "example.com"),
+            ("linkkeys.rp.apiKey", "file:/etc/tallyowl/linkkeys-api.key"),
+        ] {
+            if resolved.text(setting).trim().is_empty() {
+                errors.push(refuse(
+                    setting,
+                    format!(
+                        "`linkkeys.mode` is `domain`, and `{setting}` is empty. A domain-backed sign-in needs its RP server. Set it, or set `linkkeys.mode` to `local`. A valid example is `{example}`."
+                    ),
+                ));
+            }
+        }
+        // The person's LinkKeys server refuses a callback that is not HTTPS on
+        // the RP domain or under it. Say so here, not at the first sign-in.
+        let rp_domain = resolved
+            .text("linkkeys.rp.domain")
+            .trim()
+            .to_ascii_lowercase();
+        let callback = resolved.text("linkkeys.callbackUrl");
+        let host = callback
+            .strip_prefix("https://")
+            .map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(rest))
+            .map(|authority| authority.rsplit_once('@').map_or(authority, |(_, h)| h))
+            .map(|authority| {
+                authority
+                    .split(':')
+                    .next()
+                    .unwrap_or(authority)
+                    .to_ascii_lowercase()
+            });
+        let within = host
+            .as_deref()
+            .is_some_and(|host| host == rp_domain || host.ends_with(&format!(".{rp_domain}")));
+        if !rp_domain.is_empty() && !within {
+            errors.push(refuse(
+                "linkkeys.callbackUrl",
+                format!(
+                    "`linkkeys.callbackUrl` is `{callback}`, and in `domain` mode it must be an `https://` address on `{rp_domain}` or a name under it. A LinkKeys server refuses a sign-in that returns anywhere else. A valid example is `https://tallyowl.{rp_domain}/sign-in/callback`."
+                ),
+            ));
+        }
+        if resolved
+            .list("linkkeys.rp.fingerprints")
+            .iter()
+            .all(|f| f.trim().is_empty())
+        {
+            errors.push(refuse(
+                "linkkeys.rp.fingerprints",
+                "`linkkeys.mode` is `domain`, and `linkkeys.rp.fingerprints` is empty, so no RP server can be trusted. Set the `fp=` values of the RP server's `_linkkeys` DNS record, or set `linkkeys.mode` to `local`.".to_string(),
+            ));
+        }
+    }
+
     // The dashboard serves the path, and LinkKeys is told the whole address.
     // When they differ, the browser returns to a path the dashboard does not
     // serve and the sign-in ends on a 404.
@@ -1210,6 +1271,42 @@ mod tests {
     }
 
     #[test]
+    fn a_domain_backed_sign_in_needs_its_rp_server() {
+        let on = "linkkeys:\n  enabled: true\n  trustedDomains: id.example\n";
+        for setting in [
+            "linkkeys.rp.address",
+            "linkkeys.rp.domain",
+            "linkkeys.rp.apiKey",
+            "linkkeys.rp.fingerprints",
+        ] {
+            let message = refused_for(on, setting);
+            assert!(message.contains("linkkeys.mode"), "{message}");
+        }
+        let complete = |callback: &str| {
+            format!(
+                "{on}  callbackUrl: {callback}\n  rp:\n    address: linkkeys.linkkeys.svc:4987\n    \
+                 domain: home.example\n    fingerprints: abc123\n    \
+                 apiKey: env:SECRET_TALLYOWL_LINKKEYS_API_KEY\ndashboard:\n  callbackPath: /cb\n"
+            )
+        };
+        assert!(with(&complete("https://owl.home.example/cb")).is_ok());
+        assert!(with(&complete("https://home.example:8443/cb")).is_ok());
+        // The person's LinkKeys server would refuse each of these.
+        for refused in [
+            "http://owl.home.example/cb",
+            "https://owl.other.example/cb",
+            "https://nothome.example/cb",
+            "https://home.example.attacker.example/cb",
+        ] {
+            let message = refused_for(&complete(refused), "linkkeys.callbackUrl");
+            assert!(message.contains("home.example"), "{message}");
+        }
+        // The local mode and a sign-in that is off need none of it.
+        assert!(with(&format!("{on}  mode: local\n")).is_ok());
+        assert!(with("linkkeys:\n  enabled: false\n").is_ok());
+    }
+
+    #[test]
     fn the_home_profile_needs_no_certificate_at_all() {
         assert!(with("").is_ok());
         assert!(with("installation:\n  profile: home\n").is_ok());
@@ -1240,7 +1337,7 @@ mod tests {
     fn the_callback_path_must_be_the_path_of_the_callback_address() {
         let yaml = |path: &str| {
             format!(
-                "linkkeys:\n  enabled: true\n  trustedDomains: id.example\n  callbackUrl: https://owl.example/auth/return?x=1\ndashboard:\n  callbackPath: {path}\n"
+                "linkkeys:\n  enabled: true\n  mode: local\n  trustedDomains: id.example\n  callbackUrl: https://owl.example/auth/return?x=1\ndashboard:\n  callbackPath: {path}\n"
             )
         };
         let message = refused_for(&yaml("/sign-in/callback"), "dashboard.callbackPath");

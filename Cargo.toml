@@ -82,6 +82,14 @@ csilgen-transport = { git = "https://github.com/catalystcommunity/csilgen", rev 
 # `csilgen-transport`, which is the same shape. Pinned by revision for the same
 # reason: LinkKeys does not publish it.
 linkkeys-local-rp = { git = "https://github.com/catalystcommunity/linkkeys", rev = "03fcbd8e700715fb686bce2016136ecd8071f307" }
+# The domain-backed relying party, which D7 makes the default, has no packaged
+# Rust SDK. The head calls the RP server itself with the protocol types of
+# `liblinkkeys` and the pinned TLS configuration of `linkkeys-rpc-client`. Both
+# are in the same checkout at the same revision as the SDK above.
+liblinkkeys = { git = "https://github.com/catalystcommunity/linkkeys", rev = "03fcbd8e700715fb686bce2016136ecd8071f307" }
+linkkeys-rpc-client = { git = "https://github.com/catalystcommunity/linkkeys", rev = "03fcbd8e700715fb686bce2016136ecd8071f307" }
+# The browser address of a domain-backed sign-in carries a username hint.
+url = "2"
 # The SDK speaks in `DateTime<Utc>`, so the head does too at that boundary.
 # Everywhere else a time is milliseconds since the epoch, per CONVENTIONS.md.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

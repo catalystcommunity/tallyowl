@@ -28,6 +28,9 @@ This is a first release. Read the limits before you install it.
   `linkkeys.rp.fingerprints` are the trust anchor. The API key comes from a
   Secret through `deployment.linkkeysApiKeySecret`. See DEPLOYMENT.md
   section 4, "Sign-in".
+- **rustls 0.23.46.** It fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347,
+  RUSTSEC-2026-0348, and RUSTSEC-2026-0349, which were published on
+  2026-10-14 against 0.23.45.
 - The head checks each assertion against the sign-in that started it: the
   domain, the relying party, the nonce, and the times. A refused sign-in shows
   one message in the browser, and the head log gives the cause.

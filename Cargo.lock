@@ -2847,7 +2847,9 @@ dependencies = [
  "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/csilgen?rev=baec1dad191c4ccd522772b5172ee12ba5bf3f6c)",
  "getrandom 0.3.4",
  "libc",
+ "liblinkkeys",
  "linkkeys-local-rp",
+ "linkkeys-rpc-client",
  "rcgen",
  "rustls",
  "rustls-native-certs",
@@ -2866,6 +2868,7 @@ dependencies = [
  "tallyowl-rpc",
  "tallyowl-store",
  "tallyowl-wire",
+ "url",
  "webpki-roots",
  "x509-parser",
 ]

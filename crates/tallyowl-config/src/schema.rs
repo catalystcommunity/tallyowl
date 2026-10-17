@@ -46,6 +46,7 @@ const SLOW_NODE_ACTIONS: &[&str] = &["alert", "demote"];
 /// automatic control, so that is the default.
 const PLACEMENT_MODES: &[&str] = &["automatic", "recommendation-only", "paused"];
 const LOG_LEVELS: &[&str] = &["debug", "info", "warning", "error"];
+const LINKKEYS_MODES: &[&str] = &["domain", "local"];
 const PROFILES: &[&str] = &["home", "replicated", "scaled"];
 
 /// The complete setting list. Keep it sorted by key path, because `config check`
@@ -567,7 +568,7 @@ pub const SCHEMA: &[Setting] = &[
         path: "linkkeys.appName",
         kind: Kind::Text,
         default: "TallyOwl",
-        help: "The name somebody sees at their LinkKeys domain when they approve this installation.",
+        help: "The name somebody sees at their LinkKeys domain when they approve this installation, in `local` mode.",
         example: "TallyOwl at Acme",
     },
     Setting {
@@ -583,6 +584,41 @@ pub const SCHEMA: &[Setting] = &[
         default: "false",
         help: "Accept LinkKeys sign-ins. Off by default, because an installation with no trusted domains has nothing to accept. An operator can always issue a session with `tallyowl-head session create`.",
         example: "true",
+    },
+    Setting {
+        path: "linkkeys.mode",
+        kind: Kind::Enum(LINKKEYS_MODES),
+        default: "domain",
+        help: "Who the relying party is. D7. `domain`: a LinkKeys server of this installation's home domain, with its RP function on, signs each request; set `linkkeys.rp.*`. A person's own domain checks the home domain in DNS, so nobody approves anything first. `local`: this installation generates its own key, and each domain a person signs in from must approve that key first. Use it when the installation has no domain.",
+        example: "domain",
+    },
+    Setting {
+        path: "linkkeys.rp.address",
+        kind: Kind::Text,
+        default: "",
+        help: "The `host:port` of the LinkKeys RP server's TCP listener, in `domain` mode. The head dials it, so in Kubernetes use the Service name, not a public name. The trust comes from `linkkeys.rp.fingerprints`, not from this name.",
+        example: "linkkeys.linkkeys.svc.cluster.local:4987",
+    },
+    Setting {
+        path: "linkkeys.rp.apiKey",
+        kind: Kind::Secret,
+        default: "",
+        help: "A reference to the API key of the RP server account TallyOwl uses, in `domain` mode. Never a key value. Use `file:` or `env:`. The account needs the `api_access` relation. The key lets its holder have the RP server sign and decrypt, so give it to heads only.",
+        example: "file:/etc/tallyowl/linkkeys-api.key",
+    },
+    Setting {
+        path: "linkkeys.rp.domain",
+        kind: Kind::Text,
+        default: "",
+        help: "The home domain of the RP server, in `domain` mode. Each assertion names the relying party it was issued to, and the head refuses an assertion issued to any other.",
+        example: "example.com",
+    },
+    Setting {
+        path: "linkkeys.rp.fingerprints",
+        kind: Kind::TextList,
+        default: "",
+        help: "The SHA-256 fingerprints of the RP server's Ed25519 keys, in `domain` mode: the `fp=` values of its `_linkkeys` DNS record. The head refuses a server whose key is not in this list. Add the new fingerprint here before the server rotates its key.",
+        example: "3f2a…,9c41…",
     },
     Setting {
         path: "linkkeys.sessionLifetime",

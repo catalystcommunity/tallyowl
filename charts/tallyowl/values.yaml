@@ -203,6 +203,14 @@ deployment:
     name: ""
     key: api-key
 
+  # The API key the head presents to its LinkKeys RP server when
+  # `linkkeys.mode` is `domain`. Name a Secret and the chart sets
+  # `linkkeys.rp.apiKey` to `env:SECRET_TALLYOWL_LINKKEYS_API_KEY` and fills
+  # that variable from the Secret. The value never appears in a manifest.
+  linkkeysApiKeySecret:
+    name: ""
+    key: api-key
+
   # Where the head sends its own metrics when `metrics.selfObservation.enabled`
   # is true: the address of a collector Service, for example
   # `tallyowl-collector:5100`. The head dials `collector.listen`, and in a pod
@@ -780,6 +788,20 @@ linkkeys:
   enabled: false
   trustedDomains: ""
   callbackUrl: http://127.0.0.1:5120/sign-in/callback
+  # `domain`: a LinkKeys server of this installation's home domain, with its RP
+  # function on, signs each sign-in, and nobody approves anything first.
+  # `local`: this installation signs with its own key, and each domain a person
+  # signs in from approves that key first. D7.
+  mode: domain
+  # The RP server, in `domain` mode. The fingerprints are the `fp=` values of
+  # its `_linkkeys` DNS record. The API key is a `file:` or `env:` reference,
+  # never a value.
+  rp:
+    address: ""
+    domain: ""
+    fingerprints: ""
+    apiKey: ""
+  # The name a person sees when they approve this installation, in `local` mode.
   appName: TallyOwl
   sessionLifetime: 24h
 

@@ -6946,3 +6946,43 @@ it to test zone spread.
 **Cost to change:** cheap.
 **Revisit:** if a profile needs a required zone spread, make it a profile
 value, not the default.
+
+## L197. Domain-backed LinkKeys sign-in
+
+**Phase:** after 0.3.1
+**Decision:** D7 makes the domain-backed relying party the default and says
+that both modes work in the first release. Only the local mode was built. On
+the first public installation, on 2026-10-17, a sign-in from a trusted domain
+stopped at "An administrator must approve it first", because the local mode
+needs approval at each domain.
+
+- `linkkeys.mode` is `domain` or `local`, and `domain` is the default.
+- LinkKeys has no packaged Rust SDK for this mode. The head calls the four
+  `Rp` operations it needs with the CSIL types of `liblinkkeys` and the pinned
+  TLS configuration of `linkkeys-rpc-client` (`linkkeys_rp.rs`). It does not
+  use `send_request` from that crate, because that function refuses private
+  addresses, and the RP server is usually an in-cluster Service.
+- `sign-request` asks for no claim. TallyOwl needs only the account and its
+  domain, which each assertion carries. So nobody is asked to release a claim,
+  and `userinfo-fetch` is not called.
+- After `verify-assertion` says verified, the head checks the domain, the
+  audience against `linkkeys.rp.domain`, the nonce, and the times, with 5
+  minutes of clock skew. These are the checks of the TypeScript SDK.
+- `config check` refuses a callback that is not `https://` on
+  `linkkeys.rp.domain` or under it, because the person's LinkKeys server
+  refuses it (`callback_within_rp_domain`).
+- An opt-in test signs a request on a deployed RP server
+  (`a_deployed_rp_server_signs_a_request_for_this_key`). On 2026-10-17 it
+  passed against catalystsquad.com with the `tallyowl` service account.
+- The pending sign-in is taken before the RP server is called, as in the
+  local mode, so each one is used once.
+- A refusal shows the caller one sentence. The cause goes to the head log,
+  because the Reactorcide integration showed that a cause in no log cannot be
+  found.
+- Tests answer as an RP server in process (`FakeRp`) and check each refusal.
+  `helm-check` renders the head in this mode, checks that the API key is a
+  Secret reference, and runs `config check` on the render.
+
+**Cost to change:** cheap.
+**Revisit:** when LinkKeys publishes a Rust regular-RP SDK, use it in place of
+`linkkeys_rp.rs`.

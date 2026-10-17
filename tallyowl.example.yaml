@@ -454,6 +454,20 @@ linkkeys:
   enabled: false
   trustedDomains: ""
   callbackUrl: http://127.0.0.1:5120/sign-in/callback
+  # `domain`: a LinkKeys server of this installation's home domain, with its RP
+  # function on, signs each sign-in, and nobody approves anything first.
+  # `local`: this installation signs with its own key, and each domain a person
+  # signs in from approves that key first. D7.
+  mode: domain
+  # The RP server, in `domain` mode. The fingerprints are the `fp=` values of
+  # its `_linkkeys` DNS record. The API key is a `file:` or `env:` reference,
+  # never a value.
+  rp:
+    address: ""
+    domain: ""
+    fingerprints: ""
+    apiKey: ""
+  # The name a person sees when they approve this installation, in `local` mode.
   appName: TallyOwl
   sessionLifetime: 24h
 

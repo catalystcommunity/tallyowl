@@ -3,9 +3,9 @@ module github.com/CatalystCommunity/tallyowl/packages/driver-go
 go 1.26.3
 
 require (
-	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api v0.3.1
-	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-control-api v0.3.1
-	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-ingest-api v0.3.1
+	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api v0.3.2
+	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-control-api v0.3.2
+	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-ingest-api v0.3.2
 	github.com/catalystcommunity/csilgen/transports/go v0.0.0-20260926220402-baec1dad191c
 	lukechampine.com/blake3 v1.4.1
 )

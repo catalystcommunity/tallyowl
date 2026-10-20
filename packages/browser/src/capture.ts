@@ -20,7 +20,7 @@ import type {
 import { property, write, type Value } from "./value.ts";
 
 export const SDK_NAME = "tallyowl-browser";
-export const SDK_VERSION = "0.3.1";
+export const SDK_VERSION = "0.3.2";
 
 /** Milliseconds since the Unix epoch. Every time TallyOwl stores is this. */
 export const nowMs = (): number => Date.now();

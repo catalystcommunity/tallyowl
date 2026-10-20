@@ -1,6 +1,6 @@
 {
   "name": "@catalystcommunity/tallyowl-dashboard",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "The TallyOwl dashboard. It reaches the head over the same-origin browser carrier and speaks the generated control contract.",
   "license": "Apache-2.0",
   "type": "module",

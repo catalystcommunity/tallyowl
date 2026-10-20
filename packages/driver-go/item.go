@@ -13,7 +13,7 @@ import (
 // can tell which client produced an item.
 const (
 	SDKName    = "tallyowl-driver-go"
-	SDKVersion = "0.3.1"
+	SDKVersion = "0.3.2"
 )
 
 // ProtocolVersion is the wire protocol this driver speaks. It travels on every

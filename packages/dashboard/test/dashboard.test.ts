@@ -17,6 +17,7 @@ import { test } from "node:test";
 import { RpcRequest, RpcResponse } from "../../../.deps/csilgen/transports/typescript/src/rpc.ts";
 import {
   CsilDecimal,
+  fromBeginLoginRequestCbor,
   fromQueryNodeBoxCbor,
   fromQueryRequestCbor,
   toBeginLoginResponseCbor,
@@ -755,7 +756,7 @@ test("a pasted operator session signs a person in, and an application key does n
   const forms = all(root).filter((element) => element.tagName === "form");
   assert.equal(forms.length, 2, "a LinkKeys form and a token form");
   const tokenForm = forms[1];
-  const input = all(tokenForm).find((element) => element.tagName === "input") as unknown as {
+  const input = all(tokenForm).find((element) => element.tagName === "text-field") as unknown as {
     value: string;
   };
 
@@ -781,4 +782,131 @@ test("a sign-in returns to the path the head serves", () => {
   assert.equal(callbackPath(() => undefined), "/sign-in/callback");
   // A value that is not a path on this origin is not one to send a browser to.
   assert.equal(callbackPath(() => "https://elsewhere.example/x"), "/sign-in/callback");
+});
+
+// ---------------------------------------------------------------------------
+// The project chooser, sign-out, and an empty chart
+// ---------------------------------------------------------------------------
+
+const OTHER = new Uint8Array(16).fill(4);
+
+function twoProjects(op: string): RpcResponse {
+  return op === "list-projects"
+    ? RpcResponse.ok(
+        "ProjectList",
+        toProjectListCbor({
+          projects: [
+            { projectId: PROJECT, workspaceId: PROJECT, name: "web" },
+            { projectId: OTHER, workspaceId: PROJECT, name: "mobile" },
+          ],
+        }),
+      )
+    : emptyResult();
+}
+
+/// Whether every query of a page named this project.
+function queriedOnly(seen: Seen[], projectId: Uint8Array): boolean {
+  const named = JSON.stringify([...projectId]).slice(1, -1);
+  const queries = seen.filter((call) => call.op === "run-query");
+  return queries.length > 0 && queries.every((call) => JSON.stringify([...call.payload]).includes(named));
+}
+
+test("a person who can read several projects chooses one, and the tab keeps the choice", async () => {
+  // The page drew the first project and offered no other, so a person with
+  // three projects could only ever see one of them.
+  const { fetch, seen } = head(twoProjects);
+  const held = storage();
+  held.setItem("tallyowl.session", "tos_ab_c");
+  const { root, options } = page(new Control({ fetch }), held);
+  await render(options);
+  assert.ok(queriedOnly(seen, PROJECT), "the first project was not drawn");
+
+  const chooser = all(root).find((element) => element.tagName === "combo-box") as unknown as ShimElement & {
+    value: string;
+  };
+  assert.ok(chooser !== undefined, "no project chooser");
+  chooser.value = view.projectKey(OTHER);
+  seen.length = 0;
+  chooser.fire("change");
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(queriedOnly(seen, OTHER), "the chosen project was not drawn");
+
+  // A new page in the same tab draws the project chosen last.
+  seen.length = 0;
+  await render(page(new Control({ fetch }), held).options);
+  assert.ok(queriedOnly(seen, OTHER), "the choice did not last");
+});
+
+test("sign-out forgets the session and brings the sign-in back", async () => {
+  const { fetch } = head(twoProjects);
+  const held = storage();
+  held.setItem("tallyowl.session", "tos_ab_c");
+  const control = new Control({ fetch });
+  const { root, options } = page(control, held);
+  await render(options);
+
+  const signOut = all(root).find((element) => element.tagName === "push-button" && element.textContent === "Sign out");
+  assert.ok(signOut !== undefined, "no sign-out");
+  signOut.fire("click");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(signIn.heldSession(held), undefined);
+  assert.equal(control.session(), undefined);
+  assert.ok(all(root).some((element) => element.tagName === "form"), "the sign-in did not come back");
+});
+
+test("a range with no events says so, and draws no bar", () => {
+  // "No data" and "the chart is broken" must not look the same.
+  const range = { start: 0, end: 24 * 3_600_000, bucketMs: 3_600_000 };
+  const empty = view.eventPanel([], range) as unknown as ShimElement;
+  assert.match(empty.textContent, /No events in this range/);
+  assert.ok(!all(empty).some((element) => element.tagName === "rect"));
+
+  const drawn = view.eventPanel([{ at: 3_600_000, count: 5 }], range) as unknown as ShimElement;
+  const bars = all(drawn).filter((element) => element.tagName === "rect");
+  assert.equal(bars.length, 1);
+  assert.match(drawn.textContent, /5 events/);
+});
+
+test("a login name a person asked to keep fills the sign-in next time", async () => {
+  // A person typed `alice@example.com` once. Next time the field holds it and
+  // "Sign in" is one press. The whole login goes to the head, which takes the
+  // domain out of it and sends the name on to the domain's page.
+  const { fetch, seen } = head((op) =>
+    op === "begin-login"
+      ? RpcResponse.ok(
+          "BeginLoginResponse",
+          toBeginLoginResponseCbor({ redirectUrl: "https://example.com/auth/authorize", loginId: "l", expiresAt: 1 }),
+        )
+      : emptyResult(),
+  );
+  const memory = storage();
+  const first = page(new Control({ fetch }), storage());
+  await render({ ...first.options, memory });
+
+  const fields = (root: ShimElement) =>
+    all(root).filter((element) => element.tagName === "text-field" || element.tagName === "check-box") as unknown as (ShimElement & {
+      value: string;
+      checked: boolean;
+      name: string;
+    })[];
+  const [login, keep] = fields(first.root);
+  assert.equal(login.value, "");
+  assert.equal(keep.checked, true, "remembering is on by default");
+  login.value = "  alice@example.com ";
+  all(first.root).find((element) => element.tagName === "form")!.fire("submit");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fromBeginLoginRequestCbor(seen[0].payload).userDomain, "alice@example.com");
+
+  const second = page(new Control({ fetch }), storage());
+  await render({ ...second.options, memory });
+  const [again, keepAgain] = fields(second.root);
+  assert.equal(again.value, "alice@example.com");
+  const button = all(second.root).find((element) => element.textContent === "Sign in");
+  assert.equal(button?.getAttribute("autofocus"), "", "Sign in does not have the focus");
+
+  // Unticked, the name is forgotten.
+  keepAgain.checked = false;
+  all(second.root).find((element) => element.tagName === "form")!.fire("submit");
+  assert.equal(signIn.rememberedLoginName(memory), "");
 });

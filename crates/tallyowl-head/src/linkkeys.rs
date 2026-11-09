@@ -284,28 +284,36 @@ impl SignIn {
                         identity.domain
                     ))
                 })?;
-        let mut address = url::Url::parse(&address).map_err(|e| {
-            TallyOwlError::internal(format!("The sign-in address is not a URL: {e}"))
-        })?;
-        if let Some(username) = &identity.username {
-            address.query_pairs_mut().append_pair("username", username);
-        }
+        let address = with_username(&address, identity.username.as_deref())?;
 
         let pending = serde_json::json!({
             "nonce": nonce,
             "domain": identity.domain,
             "callbackUrl": request.callback_url,
         });
-        Ok((address.into(), pending.to_string().into_bytes()))
+        Ok((address, pending.to_string().into_bytes()))
     }
 
     /// Sign a request with this installation's own key.
+    ///
+    /// The person types a login such as `alice@example.com` or a domain, as in
+    /// the domain mode. The domain is what is signed in with, and the name goes
+    /// to the domain's sign-in page so the person does not type it again.
     fn begin_local(&self, request: &BeginLoginRequest) -> Result<(String, Vec<u8>), TallyOwlError> {
+        let typed = liblinkkeys::identity_input::parse_identity_input(&request.user_domain)
+            .map_err(|_| {
+                self.count("begin-failed");
+                TallyOwlError::invalid_argument(format!(
+                    "{} is not a LinkKeys domain or login. Type a domain such as example.com, or a \
+                     login such as alice@example.com.",
+                    request.user_domain
+                ))
+            })?;
         let identity = self.identity()?;
         let (redirect, pending) = begin_local_login(BeginLocalLoginConfig::new(
             &identity,
             request.callback_url.clone(),
-            request.user_domain.clone(),
+            typed.domain.clone(),
             Utc::now(),
         ))
         .map_err(|e| {
@@ -315,13 +323,16 @@ impl SignIn {
             // it and may have mistyped it.
             TallyOwlError::unavailable(format!(
                 "We could not start a sign-in with {}. {e}",
-                request.user_domain
+                typed.domain
             ))
         })?;
         let encoded = serde_json::to_vec(&pending).map_err(|e| {
             TallyOwlError::internal(format!("The pending sign-in could not be recorded: {e}"))
         })?;
-        Ok((redirect.redirect_url, encoded))
+        Ok((
+            with_username(&redirect.redirect_url, typed.username.as_deref())?,
+            encoded,
+        ))
     }
 
     /// Finish a sign-in with what the callback carried.
@@ -646,6 +657,19 @@ fn check_assertion(
     }
 }
 
+/// The sign-in address with the person's name on it, so their domain's page
+/// asks only for what proves who they are. A domain typed on its own adds
+/// nothing.
+fn with_username(address: &str, username: Option<&str>) -> Result<String, TallyOwlError> {
+    let Some(username) = username else {
+        return Ok(address.to_string());
+    };
+    let mut address = url::Url::parse(address)
+        .map_err(|e| TallyOwlError::internal(format!("The sign-in address is not a URL: {e}")))?;
+    address.query_pairs_mut().append_pair("username", username);
+    Ok(address.into())
+}
+
 /// Whether the browser came back to the configured callback: the same scheme,
 /// host, port, and path. The query differs, because it carries the token.
 fn same_address(arrived: &str, configured: &str) -> bool {
@@ -789,6 +813,22 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    #[test]
+    fn a_login_puts_its_name_on_the_sign_in_address_and_a_domain_does_not() {
+        // The person typed `alice@example.com` once. Their domain's page must
+        // not ask for the name again, in either mode.
+        let address = "https://example.com/auth/authorize?signed_request=abc";
+        assert_eq!(
+            with_username(address, Some("alice")).expect("an address"),
+            "https://example.com/auth/authorize?signed_request=abc&username=alice"
+        );
+        assert_eq!(with_username(address, None).expect("an address"), address);
+        // A name is a query value, not part of the query.
+        assert!(with_username(address, Some("a&b=c"))
+            .expect("an address")
+            .ends_with("&username=a%26b%3Dc"));
     }
 
     #[test]

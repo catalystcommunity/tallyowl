@@ -1,0 +1,454 @@
+/* The TallyOwl dashboard.
+ *
+ * The look is the Zest design system: its tokens, and its components for the
+ * controls, the frames, the table, and the status bar. This file sets one
+ * accent, orange, and lays out the page. The orange is for the data and for
+ * the one action on a page. Status colors (green, red) mean status only.
+ *
+ * The build bundles the Zest tokens into this file. The content security
+ * policy is `default-src 'self'`: no inline style, no `data:` image, no font
+ * from another origin.
+ */
+
+@import "@catalystcommunity/design-tokens/src/tokens.css";
+
+/* The orange accent. Dark text on it has a contrast of 4.9:1 in light and
+ * 6.7:1 in dark, and the orange against the window is 3.2:1 and 7.3:1, which
+ * are the Zest rules for a highlight and a focus ring. */
+:root {
+  --zest-color-highlight: light-dark(#ea6a12, #ff8a3d);
+  --zest-color-highlight-text: #1d2329;
+  --zest-color-focus: light-dark(#ea6a12, #ff8a3d);
+
+  --page: light-dark(#f3f4f6, #111316);
+  --line: light-dark(#dfe2e6, #2f343b);
+  --ok: light-dark(#1f7a45, #4cc37f);
+  --bad: light-dark(#b42318, #ff9a8f);
+  --bad-soft: light-dark(#fbe9e6, #3a1e1a);
+  --warn: light-dark(#7a4b00, #f5c46b);
+  --warn-soft: light-dark(#fdf2dc, #33270f);
+}
+
+/* General element rules are in the `zest` layer, so that they never win over
+ * a Zest component's own rules. */
+@layer zest {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--zest-color-window-text);
+    font-family: var(--zest-font-family);
+    font-size: var(--zest-font-size);
+    line-height: var(--zest-line-height);
+  }
+
+  h1,
+  h2,
+  p {
+    margin: 0;
+  }
+
+  :focus-visible {
+    outline: var(--zest-focus-width) solid var(--zest-color-focus);
+    outline-offset: var(--zest-focus-offset);
+  }
+}
+
+#dashboard {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.loading {
+  padding: 4em 1em;
+  text-align: center;
+  color: var(--zest-color-secondary-text);
+}
+
+/* Messages ---------------------------------------------------------------- */
+
+.failure {
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent);
+  border-radius: var(--zest-control-radius);
+  background: var(--bad-soft);
+  color: var(--zest-color-window-text);
+  padding: 0.625em 0.875em;
+  font-size: 0.875em;
+}
+
+.note,
+.notes {
+  color: var(--zest-color-secondary-text);
+  font-size: 0.875em;
+}
+
+/* The top bar ------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--zest-gap-related) var(--zest-gap-unrelated);
+  padding: 0.5em var(--zest-margin-window);
+  background: var(--zest-color-window);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.625em;
+}
+
+.mark {
+  display: block;
+  width: 1.75em;
+  height: 1.75em;
+}
+
+.wordmark {
+  font-size: 1.125em;
+  font-weight: 700;
+}
+
+.topbar .project {
+  min-width: min(16em, 100%);
+}
+
+.topbar p.project {
+  min-width: 0;
+  color: var(--zest-color-secondary-text);
+}
+
+.topbar .sign-out {
+  margin-inline-start: auto;
+}
+
+/* The page ---------------------------------------------------------------- */
+
+.content {
+  flex: 1;
+  width: 100%;
+  max-width: 72em;
+  margin: 0 auto;
+  padding: var(--zest-margin-window);
+  display: grid;
+  align-content: start;
+  gap: var(--zest-gap-unrelated);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22em), 1fr));
+  gap: var(--zest-gap-unrelated);
+  align-items: start;
+}
+
+.banner {
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent);
+  border-radius: var(--zest-control-radius);
+  background: var(--bad-soft);
+  padding: 0.75em 1em;
+  font-size: 0.875em;
+}
+
+.banner[data-ready="true"] {
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  background: var(--warn-soft);
+}
+
+.banner h2 {
+  font-size: 1em;
+  margin-bottom: 0.25em;
+}
+
+.banner ul {
+  margin: 0;
+  padding-left: 1.25em;
+}
+
+/* A panel is a Zest group box. The frame is the window color on the page. */
+.panel {
+  min-width: 0;
+}
+
+.panel::part(frame) {
+  background: var(--zest-color-window);
+  border-color: var(--line);
+  padding: 0.25em 1.25em 1.25em;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--zest-gap-related) 1em;
+}
+
+.panel-head .chooser {
+  min-width: min(14em, 100%);
+}
+
+.summary {
+  color: var(--zest-color-secondary-text);
+  font-size: 0.875em;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary strong {
+  color: var(--zest-color-window-text);
+  font-size: 1.75em;
+  font-weight: 700;
+}
+
+/* Charts ------------------------------------------------------------------ */
+
+.chart-frame {
+  position: relative;
+  height: 220px;
+  margin-top: 1em;
+}
+
+.chart-frame.short {
+  height: 140px;
+}
+
+.chart-frame svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.grid {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+.baseline {
+  stroke: var(--zest-color-border);
+  stroke-width: 1;
+}
+
+.bar {
+  fill: var(--zest-color-highlight);
+}
+
+.bar:hover {
+  fill: color-mix(in srgb, var(--zest-color-highlight) 80%, var(--zest-color-window-text));
+}
+
+/* The current hour is not over, so it is drawn lighter. */
+.bar.current {
+  fill: color-mix(in srgb, var(--zest-color-highlight) 45%, var(--zest-color-window));
+}
+
+.line .stroke {
+  fill: none;
+  stroke: var(--zest-color-highlight);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.line .area {
+  fill: color-mix(in srgb, var(--zest-color-highlight) 12%, transparent);
+}
+
+/* With nothing drawn, the grid lines only cross the message. */
+.chart-frame.empty .grid {
+  display: none;
+}
+
+.chart-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1em;
+  text-align: center;
+  color: var(--zest-color-secondary-text);
+  font-size: 0.875em;
+}
+
+.axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.5em;
+  color: var(--zest-color-secondary-text);
+  font-size: 0.75em;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-caption {
+  margin-top: 0.875em;
+  color: var(--zest-color-secondary-text);
+  font-size: 0.8125em;
+}
+
+/* The top events: a Zest table view as tall as its rows. */
+.ranked {
+  --zest-data-view-height: auto;
+  --zest-data-view-row-height: 2.5em;
+  margin-top: 0.75em;
+}
+
+/* The name gives way before the bar does, so every row keeps its bar, and
+ * the bars line up at the end of the cell. */
+.event {
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+}
+
+.event-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.share {
+  flex: none;
+  width: 5em;
+  height: 4px;
+  border-radius: 2px;
+}
+
+.share .track {
+  fill: var(--zest-color-face);
+}
+
+.share .fill {
+  fill: var(--zest-color-highlight);
+}
+
+/* Native tables, for the reports that are not on the main page yet. */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875em;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.5em 0;
+  border-bottom: 1px solid var(--line);
+}
+
+/* The status bar ---------------------------------------------------------- */
+
+.footer {
+  position: sticky;
+  bottom: 0;
+}
+
+.health {
+  gap: 0.5em;
+}
+
+.health .dot {
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+/* Not ready is not shown by color only: the words say it too. */
+.health[data-ready="false"] .dot {
+  background: var(--bad);
+}
+
+/* Sign-in ----------------------------------------------------------------- */
+
+.sign-in {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 2em 1em;
+}
+
+.sign-in-card {
+  width: min(25em, 100%);
+  background: var(--zest-color-window);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--zest-control-radius) * 2);
+  padding: 2em 1.75em 1.5em;
+}
+
+.sign-in-card .mark {
+  width: 2.75em;
+  height: 2.75em;
+}
+
+.sign-in-card h1 {
+  margin: 1rem 0 1.5rem;
+  font-size: 1.375em;
+}
+
+.sign-in-card > .failure {
+  margin: -0.5em 0 1.25em;
+}
+
+.sign-in-card form {
+  display: grid;
+  gap: 0.75em;
+}
+
+.sign-in-card push-button {
+  display: flex;
+}
+
+.sign-in-card push-button button {
+  flex: 1;
+}
+
+.other-way {
+  margin-top: 1.5em;
+}
+
+.other-way form {
+  padding-top: 0.5em;
+}
+
+/* Narrow screens ---------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  .topbar,
+  .content {
+    padding-inline: 1em;
+  }
+
+  .content {
+    padding-block: 1em 2em;
+    gap: 1em;
+  }
+
+  .topbar .project {
+    order: 3;
+    flex: 1 0 100%;
+  }
+
+  .panel::part(frame) {
+    padding-inline: 1em;
+  }
+
+  .chart-frame {
+    height: 180px;
+  }
+
+  .share {
+    width: 2.5em;
+  }
+}

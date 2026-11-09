@@ -11,12 +11,20 @@
     "node": ">=22.18.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json --noEmit && node scripts/build.mjs",
     "test": "tsc -p tsconfig.json && node --test dist/packages/dashboard/test/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "typescript": "^5.7",
-    "@types/node": "^22"
+    "@types/node": "^22",
+    "esbuild": "0.28.2",
+    "typescript": "^5.7"
+  },
+  "dependencies": {
+    "@catalystcommunity/base-components": "0.2.6",
+    "@catalystcommunity/containers": "0.1.2",
+    "@catalystcommunity/controls": "0.1.1",
+    "@catalystcommunity/data-views": "0.1.1",
+    "@catalystcommunity/design-tokens": "0.1.1"
   }
 }

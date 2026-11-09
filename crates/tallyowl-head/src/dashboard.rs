@@ -309,8 +309,7 @@ fn serve_one(
             };
             match std::fs::read(&file) {
                 Ok(bytes) => {
-                    let _ =
-                        write_response(&mut stream, 200, "text/javascript; charset=utf-8", &bytes);
+                    let _ = write_response(&mut stream, 200, asset_type(&file), &bytes);
                 }
                 Err(e) => {
                     logger.warning(
@@ -588,6 +587,23 @@ fn asset_path(assets: &std::path::Path, path: &str) -> Option<PathBuf> {
     Some(file)
 }
 
+/// The content type of one asset, from its extension.
+///
+/// Every response carries `X-Content-Type-Options: nosniff`, so a browser
+/// refuses a stylesheet or a font that arrives as JavaScript. Every asset used
+/// to be served as JavaScript, which was right while the bundle held nothing
+/// else.
+fn asset_type(file: &std::path::Path) -> &'static str {
+    match file.extension().and_then(|extension| extension.to_str()) {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("woff2") => "font/woff2",
+        Some("json" | "map") => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 /// Ingest health as JSON.
 ///
 /// A check that fails names itself and says why. "Unhealthy" with no reason
@@ -667,11 +683,14 @@ fn document(callback_path: &str) -> Vec<u8> {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="tallyowl-callback-path" content="{callback_path}">
+<meta name="color-scheme" content="light dark">
 <title>TallyOwl</title>
+<link rel="icon" href="/assets/app/owl.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/app/dashboard.css">
 </head>
 <body>
-<main id="dashboard">Loading the dashboard.</main>
-<script type="module" src="/assets/packages/dashboard/src/boot.js"></script>
+<main id="dashboard"><p class="loading">Loading the dashboard.</p></main>
+<script type="module" src="/assets/app/dashboard.js"></script>
 </body>
 </html>
 "#
@@ -773,6 +792,28 @@ mod tests {
         ] {
             assert_eq!(asset_path(assets, attempt), None, "{attempt} escaped");
         }
+    }
+
+    #[test]
+    fn each_asset_is_served_as_what_it_is() {
+        // The responses carry `nosniff`, so a stylesheet served as JavaScript
+        // is refused and the page draws unstyled.
+        let of = |name: &str| asset_type(std::path::Path::new(name));
+        assert_eq!(of("src/boot.js"), "text/javascript; charset=utf-8");
+        assert_eq!(of("static/dashboard.css"), "text/css; charset=utf-8");
+        assert_eq!(of("static/owl.svg"), "image/svg+xml");
+        assert_eq!(of("static/fonts/figtree.woff2"), "font/woff2");
+        assert_eq!(of("static/fonts/OFL.txt"), "application/octet-stream");
+    }
+
+    #[test]
+    fn the_document_links_the_stylesheet_from_this_origin() {
+        // The content security policy is `default-src 'self'`, so the style
+        // can only arrive as a file from the bundle.
+        let page = String::from_utf8(document("/sign-in/callback")).expect("text");
+        assert!(page.contains(r#"href="/assets/app/dashboard.css""#));
+        assert!(page.contains(r#"src="/assets/app/dashboard.js""#));
+        assert!(!page.contains("<style"));
     }
 
     #[test]

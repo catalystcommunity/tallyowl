@@ -4,8 +4,15 @@
 // and none of them holds state, so a test drives a view without a network and
 // without a browser.
 //
-// The chart is inline SVG. A charting library would be a dependency on the
-// always-on dashboard path, and a count for each bucket needs a polyline.
+// The controls, frames, table, and status bar are Zest components. A view
+// makes each one by its tag name and sets attributes, so this module imports
+// no component class and a test runs it without a browser; `zest.ts` gives
+// each tag its class before the page draws.
+//
+// The charts are inline SVG. A charting library would be a dependency on the
+// always-on dashboard path, and a count for each bucket needs a rectangle.
+// How they look is in `static/dashboard.css`; these functions only give each
+// part a class.
 
 import { type ResultRow, type TypedValue } from "./control-api.ts";
 
@@ -45,105 +52,377 @@ export function pointsFrom(columns: string[], rows: ResultRow[]): Point[] {
   return points.sort((left, right) => left.at - right.at);
 }
 
-/// The event chart.
+/// The time a chart covers, and the width of one of its buckets.
+export interface Range {
+  readonly start: number;
+  readonly end: number;
+  readonly bucketMs: number;
+}
+
+const WHOLE = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+const RATE = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 3 });
+const CLOCK = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+
+/// A count as a person reads it, with the separators of their locale.
+export function whole(value: number): string {
+  return WHOLE.format(value);
+}
+
+/// The event chart: one bar for each bucket, and the axis under it.
 ///
-/// An empty range draws the axis and says there is nothing in it, rather than
+/// An empty range draws the frame and says there is nothing in it, rather than
 /// drawing nothing at all: "no data" and "the chart is broken" must not look
 /// the same.
-export function chart(points: Point[], width = 640, height = 180): SVGElement {
-  const svg = svgElement("svg");
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "Events over time");
+export function eventPanel(points: Point[], range: Range): HTMLElement {
+  const section = panel("events", `Events in the last ${hoursIn(range)} hours`);
+  const total = points.reduce((sum, point) => sum + point.count, 0);
+  const peak = Math.max(0, ...points.map((point) => point.count));
 
-  const axis = svgElement("line");
-  axis.setAttribute("x1", "0");
-  axis.setAttribute("y1", String(height - 1));
-  axis.setAttribute("x2", String(width));
-  axis.setAttribute("y2", String(height - 1));
-  axis.setAttribute("stroke", "currentColor");
-  svg.append(axis);
+  const summary = element("p", "summary");
+  summary.append(element("strong", "", whole(total)), element("span", "", total === 1 ? " event" : " events"));
+  section.append(summary);
 
+  const frame = element("div", points.length === 0 ? "chart-frame empty" : "chart-frame");
+  frame.append(barChart(points, range));
   if (points.length === 0) {
-    const label = svgElement("text");
-    label.setAttribute("x", String(width / 2));
-    label.setAttribute("y", String(height / 2));
-    label.setAttribute("text-anchor", "middle");
-    label.textContent = "No events in this range.";
-    svg.append(label);
-    return svg;
+    frame.append(element("p", "chart-empty", "No events in this range. They show here after an application sends them."));
   }
+  section.append(frame, timeAxis(range));
+  if (peak > 0) {
+    section.append(element("p", "chart-caption", `The busiest hour had ${whole(peak)} ${peak === 1 ? "event" : "events"}. The last bar is the current hour, which is not over yet.`));
+  }
+  return section;
+}
 
-  const highest = Math.max(...points.map((point) => point.count), 1);
-  const step = points.length > 1 ? width / (points.length - 1) : 0;
-  const line = svgElement("polyline");
-  line.setAttribute("fill", "none");
-  line.setAttribute("stroke", "currentColor");
-  line.setAttribute("stroke-width", "2");
-  line.setAttribute(
-    "points",
-    points
-      .map((point, index) => {
-        const x = points.length > 1 ? index * step : width / 2;
-        const y = height - 1 - (point.count / highest) * (height - 12);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(" "),
-  );
-  svg.append(line);
+/// A Zest group box: a frame with a title around one part of the page.
+function panel(className: string, title: string): HTMLElement {
+  const box = element("group-box", `panel ${className}`);
+  box.setAttribute("label", title);
+  return box;
+}
+
+/// The bars. Each bucket of the range has a slot, and a bucket the head did
+/// not return has no bar: a count that is absent had no events in it.
+export function barChart(points: Point[], range: Range): SVGElement {
+  const first = Math.floor(range.start / range.bucketMs) * range.bucketMs;
+  const slots = Math.max(1, Math.ceil((range.end - first) / range.bucketMs));
+  const slotWidth = 10;
+  const width = slots * slotWidth;
+  const height = 100;
+
+  const svg = svgElement("svg");
+  svg.setAttribute("class", "bars");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Events for each hour");
+  svg.append(gridLine(0, width), gridLine(height / 2, width), gridLine(height - 0.5, width, "baseline"));
+
+  const highest = Math.max(1, ...points.map((point) => point.count));
+  for (const point of points) {
+    const slot = Math.floor((point.at - first) / range.bucketMs);
+    if (slot < 0 || slot >= slots || point.count <= 0) continue;
+    // A bucket with one event in it still gets a bar a person can see.
+    const barHeight = Math.max(1.5, (point.count / highest) * (height - 4));
+    const bar = svgElement("rect");
+    bar.setAttribute("class", slot === slots - 1 ? "bar current" : "bar");
+    bar.setAttribute("x", String(slot * slotWidth + 1.5));
+    bar.setAttribute("width", String(slotWidth - 3));
+    bar.setAttribute("y", (height - barHeight).toFixed(2));
+    bar.setAttribute("height", barHeight.toFixed(2));
+    const title = svgElement("title");
+    title.textContent = `${CLOCK.format(point.at)}: ${whole(point.count)} ${point.count === 1 ? "event" : "events"}`;
+    bar.append(title);
+    svg.append(bar);
+  }
   return svg;
 }
 
-/// The ingest health panel.
+/// A rate over time: a line, with the area under it lightly filled.
+///
+/// A point is placed at its time, not at its index. A series that starts
+/// halfway through the range starts halfway across the chart.
+export function lineChart(points: Point[], range: Range, label: string): SVGElement {
+  const width = 600;
+  const height = 100;
+  const svg = svgElement("svg");
+  svg.setAttribute("class", "line");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", label);
+  svg.append(gridLine(0, width), gridLine(height / 2, width), gridLine(height - 0.5, width, "baseline"));
+  if (points.length === 0) return svg;
+
+  const highest = Math.max(...points.map((point) => point.count), Number.MIN_VALUE);
+  const span = Math.max(1, range.end - range.start);
+  const at = (point: Point) => {
+    const x = Math.min(width, Math.max(0, ((point.at - range.start) / span) * width));
+    const y = height - 1 - (point.count / highest) * (height - 6);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  };
+  const line = points.map(at).join(" ");
+  const firstX = at(points[0]).split(",")[0];
+  const lastX = at(points[points.length - 1]).split(",")[0];
+
+  const area = svgElement("polygon");
+  area.setAttribute("class", "area");
+  area.setAttribute("points", `${firstX},${height} ${line} ${lastX},${height}`);
+  const stroke = svgElement("polyline");
+  stroke.setAttribute("class", "stroke");
+  stroke.setAttribute("points", line);
+  stroke.setAttribute("vector-effect", "non-scaling-stroke");
+  svg.append(area, stroke);
+  return svg;
+}
+
+function gridLine(y: number, width: number, kind = "grid"): SVGElement {
+  const line = svgElement("line");
+  line.setAttribute("class", kind);
+  line.setAttribute("x1", "0");
+  line.setAttribute("x2", String(width));
+  line.setAttribute("y1", String(y));
+  line.setAttribute("y2", String(y));
+  line.setAttribute("vector-effect", "non-scaling-stroke");
+  return line;
+}
+
+/// The times under a chart. They are text in the page rather than in the
+/// drawing, so they stay readable when the drawing is narrow.
+export function timeAxis(range: Range): HTMLElement {
+  const axis = element("div", "axis");
+  axis.setAttribute("aria-hidden", "true");
+  const marks = 4;
+  for (let mark = 0; mark <= marks; mark += 1) {
+    const time = range.start + ((range.end - range.start) * mark) / marks;
+    axis.append(element("span", "", mark === marks ? "Now" : CLOCK.format(time)));
+  }
+  return axis;
+}
+
+function hoursIn(range: Range): number {
+  return Math.round((range.end - range.start) / 3_600_000);
+}
+
+/// The ingest health, as a short status for the top of the page.
 ///
 /// A check that fails names itself and says why, because "unhealthy" with no
 /// reason costs an operator the whole diagnosis. See CONVENTIONS.md section 3.
+/// The reasons are in `healthDetail`, under the bar, where they have room.
 export interface HealthReport {
   readonly ready: boolean;
   readonly checks: ReadonlyArray<{ readonly name: string; readonly detail: string }>;
 }
 
-export function health(report: HealthReport): HTMLElement {
-  const panel = document.createElement("section");
-  panel.className = "health";
-
-  const heading = document.createElement("h2");
-  heading.textContent = report.ready ? "Accepting telemetry" : "Not accepting telemetry";
-  panel.append(heading);
-
-  if (report.checks.length > 0) {
-    const list = document.createElement("ul");
-    for (const check of report.checks) {
-      const item = document.createElement("li");
-      item.textContent = `${check.name}: ${check.detail}`;
-      list.append(item);
-    }
-    panel.append(list);
+/// The health, as the first pane of the status bar. The pane is live, so a
+/// screen reader says it when the page draws again with a different answer.
+export function healthStatus(report: HealthReport | undefined): HTMLElement {
+  const pane = element("status-pane", "health");
+  pane.setAttribute("live", "");
+  if (report === undefined) {
+    pane.append(element("span", "", "Health not known"));
+    return pane;
   }
-  return panel;
+  pane.setAttribute("data-ready", String(report.ready));
+  pane.append(element("span", "dot"), element("span", "", report.ready ? "Accepting telemetry" : "Not accepting telemetry"));
+  return pane;
 }
 
-/// The breakdown table beside the chart.
-export function breakdown(columns: string[], rows: ResultRow[]): HTMLElement {
-  const table = document.createElement("table");
-  const head = document.createElement("tr");
-  for (const column of columns) {
-    const cell = document.createElement("th");
-    cell.textContent = column;
-    head.append(cell);
-  }
-  table.append(head);
+/// The bar at the bottom of the page: the health, the range the charts show,
+/// and when the page drew them. The time is there because the page does not
+/// draw again by itself, and a person must know how old the numbers are.
+export function statusBar(report: HealthReport | undefined, range: Range, drawnAt: number): HTMLElement {
+  const bar = element("status-bar", "footer");
+  bar.setAttribute("label", "Status");
+  const span = element("status-pane", "", `Last ${hoursIn(range)} hours, by hour`);
+  const drawn = element("status-pane", "", `Drawn at ${CLOCK.format(drawnAt)}`);
+  drawn.setAttribute("stretch", "");
+  bar.append(healthStatus(report), span, drawn);
+  return bar;
+}
 
-  for (const row of rows) {
-    const line = document.createElement("tr");
-    for (const value of row.values) {
-      const cell = document.createElement("td");
-      cell.textContent = asText(value) ?? String(asNumber(value) ?? "");
-      line.append(cell);
-    }
-    table.append(line);
+/// The checks that need saying, or nothing when every check passed. A panel
+/// that listed every passing check would bury the one that failed.
+export function healthDetail(report: HealthReport): HTMLElement | undefined {
+  if (report.checks.length === 0) return undefined;
+  const banner = element("section", "banner");
+  banner.setAttribute("data-ready", String(report.ready));
+  banner.setAttribute("role", "status");
+  banner.append(element("h2", "", report.ready ? "Accepting telemetry, with warnings" : "Not accepting telemetry"));
+  const list = element("ul");
+  for (const check of report.checks) {
+    const item = element("li");
+    item.append(element("strong", "", check.name), element("span", "", ` ${check.detail}`));
+    list.append(item);
   }
-  return table;
+  banner.append(list);
+  return banner;
+}
+
+/// One project a person can choose.
+export interface ProjectChoice {
+  readonly projectId: Uint8Array;
+  readonly name: string;
+}
+
+/// A project ID as text, for a form value and for storage.
+export function projectKey(projectId: Uint8Array): string {
+  return [...projectId].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/// The bar across the top: the name, the project, and sign-out.
+export function topBar(options: {
+  readonly projects: readonly ProjectChoice[];
+  readonly selected: Uint8Array;
+  readonly onProject: (projectId: Uint8Array) => void;
+  readonly onSignOut: () => void;
+}): HTMLElement {
+  const bar = element("header", "topbar");
+
+  const brand = element("div", "brand");
+  const mark = element("img", "mark");
+  mark.setAttribute("src", OWL);
+  mark.setAttribute("alt", "");
+  brand.append(mark, element("span", "wordmark", "TallyOwl"));
+  bar.append(brand);
+
+  const selectedKey = projectKey(options.selected);
+  if (options.projects.length > 1) {
+    const chooser = chooserOf(
+      "project",
+      "Project",
+      options.projects.map((project) => ({ value: projectKey(project.projectId), label: project.name })),
+      selectedKey,
+    );
+    chooser.addEventListener("change", () => {
+      const chosen = options.projects.find((project) => projectKey(project.projectId) === valueOf(chooser));
+      if (chosen !== undefined) options.onProject(chosen.projectId);
+    });
+    bar.append(chooser);
+  } else {
+    const only = options.projects.find((project) => projectKey(project.projectId) === selectedKey);
+    if (only !== undefined) bar.append(element("p", "project", only.name));
+  }
+
+  const signOut = element("push-button", "sign-out", "Sign out");
+  signOut.setAttribute("variant", "flat");
+  signOut.addEventListener("click", () => options.onSignOut());
+  bar.append(signOut);
+  return bar;
+}
+
+/// Where the owl mark is. The build puts it beside the bundle.
+export const OWL = "/assets/app/owl.svg";
+
+/// A Zest combo box that chooses one of a few values.
+///
+/// The options and the value are attributes, not properties: an attribute
+/// reaches the component however late its tag is defined.
+function chooserOf(
+  name: string,
+  label: string,
+  options: readonly { readonly value: string; readonly label: string }[],
+  selected: string | undefined,
+): HTMLElement {
+  const chooser = element("combo-box", `chooser ${name}`);
+  chooser.setAttribute("name", name);
+  chooser.setAttribute("aria-label", label);
+  chooser.setAttribute("options", JSON.stringify(options));
+  if (selected !== undefined) chooser.setAttribute("value", selected);
+  return chooser;
+}
+
+/// The current value of a Zest control.
+function valueOf(control: HTMLElement): string {
+  return (control as HTMLElement & { value?: string }).value ?? "";
+}
+
+/// The most frequent events, each with a bar for its share of the busiest.
+///
+/// It is a Zest table view, so a person can sort it and move through it with
+/// the keyboard. The columns of a table view have fixed widths, so the event
+/// column takes the width that the count leaves.
+export function breakdown(columns: string[], rows: ResultRow[]): HTMLElement {
+  const section = panel("top-events", "Top events");
+
+  const name = columns.indexOf("name");
+  const count = columns.indexOf("events");
+  const entries = rows
+    .map((row) => ({
+      name: asText(row.values[name === -1 ? 0 : name]) ?? "",
+      count: asNumber(row.values[count === -1 ? row.values.length - 1 : count]) ?? 0,
+    }))
+    .filter((entry) => entry.name.length > 0);
+
+  if (entries.length === 0) {
+    section.append(note("No events in this range."));
+    return section;
+  }
+
+  const highest = Math.max(1, ...entries.map((entry) => entry.count));
+  const table = element("table-view", "ranked") as TableView;
+  table.setAttribute("label", "Top events");
+  table.keyOf = (entry) => (entry as { name: string }).name;
+  table.columns = [
+    {
+      key: "name",
+      label: "Event",
+      width: 240,
+      sortValue: (entry: { name: string }) => entry.name,
+      // The view reuses a cell for another row, so this replaces what the
+      // cell held and adds nothing that stays.
+      render: (cell: HTMLElement, value: unknown, entry: { count: number }) => {
+        const line = element("span", "event");
+        line.append(element("span", "event-name", String(value)), share(entry.count / highest));
+        cell.replaceChildren(line);
+      },
+    },
+    { key: "count", label: "Count", type: "number", width: COUNT_WIDTH, format: (value: number) => whole(value) },
+  ];
+  table.items = entries;
+  fitFirstColumn(table);
+  section.append(table);
+  return section;
+}
+
+const COUNT_WIDTH = 96;
+
+/// What the dashboard sets on a Zest table view.
+interface TableView extends HTMLElement {
+  keyOf: (item: unknown) => unknown;
+  columns: unknown[];
+  items: unknown[];
+  setColumnWidth?: (index: number, width: number) => void;
+}
+
+/// Give the event column the width of the table that the count does not use.
+function fitFirstColumn(table: TableView): void {
+  if (typeof ResizeObserver === "undefined") return;
+  new ResizeObserver(([entry]) => {
+    // The rows add a 0.25em selection bar at their start, about 4px.
+    const width = Math.floor(entry.contentRect.width) - COUNT_WIDTH - 5;
+    table.setColumnWidth?.(0, Math.max(160, width));
+  }).observe(table);
+}
+
+/// A thin bar for one share. It is a drawing rather than a styled box, because
+/// the content security policy refuses a width set in a `style` attribute.
+function share(fraction: number): SVGElement {
+  const svg = svgElement("svg");
+  svg.setAttribute("class", "share");
+  svg.setAttribute("viewBox", "0 0 100 4");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const track = svgElement("rect");
+  track.setAttribute("class", "track");
+  track.setAttribute("width", "100");
+  track.setAttribute("height", "4");
+  const fill = svgElement("rect");
+  fill.setAttribute("class", "fill");
+  fill.setAttribute("width", Math.max(1, fraction * 100).toFixed(1));
+  fill.setAttribute("height", "4");
+  svg.append(track, fill);
+  return svg;
 }
 
 /// Read a metric-rate result into points, in time order.
@@ -164,45 +443,52 @@ export function ratePointsFrom(columns: string[], rows: ResultRow[]): Point[] {
   return points.sort((left, right) => left.at - right.at);
 }
 
-/// The metric chart, with the metric's name above it.
+/// The metric panel: a chooser for the metric, and its rate.
 ///
 /// The name is shown because a rate with no name is a line nobody can act on,
-/// and the unit is each second because that is what `rate` answers.
-export function metricChart(name: string, points: Point[]): HTMLElement {
-  const section = document.createElement("section");
-  section.className = "metric";
-  const heading = document.createElement("h2");
-  heading.textContent = `${name}, each second`;
-  section.append(heading, chart(points));
-  if (points.length === 0) {
-    section.append(note(`No points for ${name} in this range.`));
+/// and the unit is each second because that is what `rate` answers. The names
+/// come from the head rather than from configuration, because a configured
+/// list goes stale the moment an application declares an instrument.
+export function metricPanel(
+  names: string[],
+  chosen: string,
+  points: Point[],
+  range: Range,
+  onSelect: (name: string) => void,
+): HTMLElement {
+  const section = panel("metric", "Metrics");
+  const head = element("div", "panel-head");
+  const summary = element("p", "summary");
+  const latest = points.at(-1);
+  if (latest !== undefined) {
+    summary.append(element("strong", "", RATE.format(latest.count)), element("span", "", " each second, latest hour"));
+  } else {
+    summary.append(element("span", "", "Each second"));
   }
+  head.append(summary, metricChooser(names, chosen, onSelect));
+  section.append(head);
+
+  const frame = element("div", points.length === 0 ? "chart-frame short empty" : "chart-frame short");
+  frame.append(lineChart(points, range, `${chosen}, each second`));
+  if (points.length === 0) frame.append(element("p", "chart-empty", `No points for ${chosen} in this range.`));
+  section.append(frame, timeAxis(range));
   return section;
 }
 
 /// A chooser for the metric the chart draws.
-///
-/// The names come from the head rather than from configuration, because a
-/// configured list goes stale the moment an application declares an instrument.
 export function metricChooser(
   names: string[],
   selected: string | undefined,
   onSelect: (name: string) => void,
 ): HTMLElement {
-  const label = document.createElement("label");
-  label.textContent = "Metric";
-  const select = document.createElement("select");
-  select.name = "metric";
-  for (const name of names) {
-    const option = document.createElement("option");
-    option.value = name;
-    option.textContent = name;
-    if (name === selected) option.selected = true;
-    select.append(option);
-  }
-  select.addEventListener("change", () => onSelect(select.value));
-  label.append(select);
-  return label;
+  const chooser = chooserOf(
+    "metric",
+    "Metric",
+    names.map((name) => ({ value: name, label: name })),
+    selected,
+  );
+  chooser.addEventListener("change", () => onSelect(valueOf(chooser)));
+  return chooser;
 }
 
 /// The metric names a project holds, read out of a breakdown result.
@@ -218,10 +504,16 @@ export function metricNamesFrom(columns: string[], rows: ResultRow[]): string[] 
 
 /// A quiet note beside a chart. It is not a failure, so it does not shout.
 function note(message: string): HTMLElement {
-  const element = document.createElement("p");
-  element.className = "note";
-  element.textContent = message;
-  return element;
+  return element("p", "note", message);
+}
+
+/// One element, with its class and its text. Text and children are not mixed
+/// on one element: a caller that needs both appends a child for the text.
+function element(tag: string, className = "", text?: string): HTMLElement {
+  const made = document.createElement(tag);
+  if (className.length > 0) made.className = className;
+  if (text !== undefined) made.textContent = text;
+  return made;
 }
 
 /// A message a person can act on. Every failure the dashboard shows goes

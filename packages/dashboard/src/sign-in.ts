@@ -27,6 +27,31 @@ export interface Storage {
   removeItem(key: string): void;
 }
 
+const LOGIN_NAME_KEY = "tallyowl.login.name";
+
+/// The login name a person asked this browser to remember, or "".
+///
+/// It is kept in `localStorage`, unlike the session: it is not a credential,
+/// and its use is that it is still there next week. A browser that refuses
+/// storage gets an empty field, not a failure.
+export function rememberedLoginName(memory: Storage | undefined): string {
+  try {
+    return memory?.getItem(LOGIN_NAME_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/// Keep the login name, or forget it when the person unticked "Remember".
+export function rememberLoginName(memory: Storage | undefined, name: string, remember: boolean): void {
+  try {
+    if (remember && name.length > 0) memory?.setItem(LOGIN_NAME_KEY, name);
+    else memory?.removeItem(LOGIN_NAME_KEY);
+  } catch {
+    // This browser keeps nothing. The person types the name again next time.
+  }
+}
+
 /// The session this tab holds, if any.
 export function heldSession(storage: Storage): string | undefined {
   return storage.getItem(SESSION_KEY) ?? undefined;

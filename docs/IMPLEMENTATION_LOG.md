@@ -6986,3 +6986,81 @@ needs approval at each domain.
 **Cost to change:** cheap.
 **Revisit:** when LinkKeys publishes a Rust regular-RP SDK, use it in place of
 `linkkeys_rp.rs`.
+
+## L198. A dashboard design
+
+**Phase:** after 0.3.2
+**Decision:** The dashboard had no stylesheet. The browser defaults drew it,
+and the owner asked for a design with an orange accent that is calm and easy
+to read. The first public installation also has three projects, and the
+dashboard showed only the first.
+
+- The owner then asked for Zest and native browser APIs, with no framework.
+  The dashboard had no framework before; it used TypeScript and DOM calls. It
+  now uses the Zest components (`push-button`, `text-field`, `check-box`,
+  `combo-box`, `group-box`, `table-view`, `status-bar`) and the Zest design
+  tokens, from npm at exact versions: base-components 0.2.6, controls 0.1.1,
+  containers 0.1.2, data-views 0.1.1, design-tokens 0.1.1. All are
+  Apache-2.0.
+- The views make each component by its tag name and set attributes. Only
+  `src/zest.ts` imports the Zest classes, and only `boot.ts` imports it. A
+  Zest class extends `HTMLElement`, so the unit tests, which run in Node with
+  a small document shim, never load one. `src/zest-modules.d.ts` declares the
+  imported names, because Zest publishes no type declarations. Do not name it
+  `zest.d.ts`: TypeScript ignores a declaration file with the base name of a
+  source file in the same directory.
+- `zest.ts` imports each class from its own module, not from the package
+  index. Through the indexes, esbuild kept every component of each family,
+  and the script was 199 KB in place of 126 KB (34 KB with gzip).
+- `npm run build` checks the types, then `scripts/build.mjs` bundles
+  `src/boot.ts` into `dist/app/dashboard.js` and `static/dashboard.css` with
+  the Zest tokens into `dist/app/dashboard.css`, and copies the owl. The
+  content security policy is `default-src 'self'`, so an inline import map
+  cannot resolve the package names, and one bundle is also fewer requests.
+  esbuild (MIT) is a build dependency only. The CSS target is
+  `chrome123, firefox120, safari17.5`, so that `light-dark()` stays.
+- The style is a file in the bundle. The dashboard cannot use an inline style,
+  a `style` attribute, a `data:` image, or a font from another origin. Zest
+  sets its styles through adopted style sheets and the CSSOM, which the policy
+  allows. A browser check with the same policy showed no violation. The share
+  bars and the charts are SVG, and SVG attributes set their sizes.
+- A table view has fixed column widths in pixels. A `ResizeObserver` gives the
+  event column the width that the count column does not use.
+- The head sends each asset with the content type of its extension
+  (`asset_type`). Each response has `nosniff`, so a stylesheet sent as
+  JavaScript is refused.
+- One accent color, orange, is for the data and for the primary action. It is
+  the Zest highlight and focus color: `light-dark(#ea6a12, #ff8a3d)`, with
+  dark text (`#1d2329`). White text on that orange is less than 4.5:1. The
+  orange against the window is 3.2:1 in light, which meets the Zest rule of
+  3:1 for a highlight and a focus ring. Green and red are for status only.
+- The event chart shows one bar for each hour. The bar of the current hour is
+  lighter, because that hour is not complete. A bucket that the head does not
+  return has no bar. The times under the chart are page text, so that they
+  stay readable on a narrow screen.
+- The project chooser lists the projects from `list-projects`. The tab keeps
+  the choice in `sessionStorage` (`tallyowl.project`). A stored project that
+  the session cannot read now is ignored.
+- The sign-in field asks for a login name, such as `you@example.com`. The
+  owner asked to type the login once. The head takes the domain from the name
+  and adds `username` to the sign-in address, in both modes (`with_username`).
+  The `local` mode used to send the whole text as the domain, so a login name
+  failed there.
+- The page keeps the login name in `localStorage` (`tallyowl.login.name`)
+  when "Remember my login name" is on, which is the default. The session stays
+  in `sessionStorage`. The login name is not a credential, and its use is that
+  it is still there next week. CatalystCal does the same
+  (`catalystcal.login.name`).
+- "Sign out" removes the session from the tab. The control contract has no
+  operation that ends a session on the head, so the token stays valid until
+  it expires.
+- The font is the Zest font token (`system-ui`). The first design included
+  the Figtree font. It was removed with the change to Zest.
+- The health moved from the top bar to a Zest status bar at the bottom, with
+  the range of the charts and the time of the draw. The page does not draw
+  again by itself, so a person must see how old the numbers are.
+
+**Cost to change:** cheap.
+**Revisit:** when the control contract gets an operation that ends a session,
+call it from "Sign out".
+

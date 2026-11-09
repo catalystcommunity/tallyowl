@@ -8,7 +8,44 @@ repository here uses starts an untagged repository at 0.1.0.
 
 This is a first release. Read the limits before you install it.
 
-## Not released yet — changes after 0.3.1
+## Not released yet — changes after 0.3.2
+
+- **A new dashboard design, built with Zest.** The dashboard uses the Zest
+  components and the Zest design tokens: buttons, fields, check boxes, combo
+  boxes, group boxes, a table view, and a status bar. It has a light and a dark
+  color scheme and one orange accent. The event chart shows one bar for each
+  hour, with times under it. The top events are a table that you can sort and
+  move through with the keyboard, with a bar for each count. The metric chart
+  shows its latest rate.
+- **A status bar.** The bottom of the page shows the health of the head, the
+  range of the charts, and the time the page drew them.
+- The dashboard is one script and one stylesheet. The build makes them with
+  esbuild. Before, the browser loaded each module as a separate request.
+- **A project chooser.** A person who can read more than one project chooses
+  the project at the top of the page. The browser tab keeps the choice. Before,
+  the dashboard showed only the first project.
+- **Sign out.** The dashboard has a "Sign out" button. It removes the session
+  from the browser tab. The session token stays valid on the head until it
+  expires.
+- **Sign in with your login name.** The sign-in page asks for your LinkKeys
+  login name, for example `you@example.com`. The head takes the domain from
+  the login name and sends your browser to the sign-in page of that domain,
+  with your name already filled in. This is true in the `domain` and the
+  `local` mode. Before, the `local` mode accepted a domain only.
+- **The browser remembers your login name.** "Remember my login name" is on
+  by default. The next time, the name is in the field and "Sign in" has the
+  focus, so one click or Enter signs you in. Untick the box to forget the
+  name. The name is kept in `localStorage`. It is not a credential.
+- The session-token form is under "Use a session token instead".
+- The head sends each dashboard file with the content type of its extension:
+  JavaScript, CSS, or SVG. Before, it sent each file as JavaScript, and a
+  browser refuses a stylesheet with that type.
+- The dashboard files are now at `/assets/app/` in the `dashboard.assets`
+  directory: `dashboard.js`, `dashboard.css`, and `owl.svg`. The image build
+  makes them. If you build the dashboard yourself, run `npm run build` in
+  `packages/dashboard`.
+
+## 0.3.2 — 2026-10-20
 
 ### Read this before you upgrade
 

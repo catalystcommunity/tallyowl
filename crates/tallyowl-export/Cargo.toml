@@ -17,6 +17,6 @@ tallyowl-obs = { workspace = true }
 # AGENTS.md: "Arrow and Parquet are optional export dependencies, not
 # dependencies of the always-on collector, storage, query, or dashboard path."
 # They live here and nowhere else, so a minimal build never loads them.
-parquet = { version = "56", default-features = false, features = ["arrow", "zstd"] }
-arrow-array = "56"
-arrow-schema = "56"
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
+arrow-array = "60"
+arrow-schema = "60"

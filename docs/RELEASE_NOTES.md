@@ -44,6 +44,11 @@ This is a first release. Read the limits before you install it.
   directory: `dashboard.js`, `dashboard.css`, and `owl.svg`. The image build
   makes them. If you build the dashboard yourself, run `npm run build` in
   `packages/dashboard`.
+- **Security updates for dependencies.** The Parquet export uses `parquet`
+  and `arrow` 60. Version 56 used `thrift` 0.17, which can allocate memory
+  without a limit when it reads a hostile file (RUSTSEC-2026-0435). The
+  `zstd` crates, `rustls-webpki`, and `webpki-roots` have the versions that
+  fix their advisories. The export columns did not change.
 
 ## 0.3.2 — 2026-10-20
 

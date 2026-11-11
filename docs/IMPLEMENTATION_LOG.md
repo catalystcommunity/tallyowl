@@ -7064,3 +7064,48 @@ dashboard showed only the first.
 **Revisit:** when the control contract gets an operation that ends a session,
 call it from "Sign out".
 
+
+## L199. LinkKeys v0.16.7: consent for each application
+
+**Phase:** after 0.4.0
+**Decision:** on 2026-11-11 the three LinkKeys crates (`linkkeys-local-rp`,
+`liblinkkeys`, `linkkeys-rpc-client`) moved from v0.16.3 (`03fcbd8`) to
+v0.16.7 (`3227a58`). The head sends `application_id: "tallyowl"` in each
+`Rp/sign-request` (`APPLICATION_ID` in `linkkeys.rs`).
+
+**Why.**
+
+- In v0.16.7 the IDP of a person keeps standing consent for each application:
+  the API-key account, the RP domain, and an application ID. Before, it kept
+  consent for each RP domain.
+- When `application_id` is not in the request, the RP server uses the username
+  of the account. The server refuses the request when that username is not
+  1-128 characters of `A-Z a-z 0-9 - _ .`. A fixed ID makes the sign-in
+  independent of the name of the account.
+- The account is part of the application identity. Thus two installations on
+  one RP domain, each with its own account, get separate consent with the same
+  ID.
+
+**What changes for a person.**
+
+- Consent from before the IDP upgrade has no application. It does not cover a
+  request that names one. Each person sees the consent screen of their domain
+  one more time. TallyOwl asks for no claim, so the screen shows TallyOwl and
+  the display name of the account only.
+- The consent screen shows the display name of the API-key account. The
+  deployment guide creates the account as `TallyOwl`.
+
+**What does not change.**
+
+- `config check` still requires `linkkeys.callbackUrl` on the RP domain in
+  `domain` mode. An IDP at v0.16.7 accepts a callback on another host, but an
+  older IDP refuses it, and the IDP of each person signs in, not the IDP of the
+  installation.
+- The head asks for no claim, so the new `newly_requested` rule does not apply.
+
+**Audit.** LinkKeys v0.16.7 uses hickory 0.26. The ignore for
+RUSTSEC-2026-0119 (hickory-proto 0.24) is removed from `.cargo/audit.toml`.
+
+**Cost to change:** cheap.
+**Revisit:** when most LinkKeys domains run v0.16.7 or later, the head can
+accept a callback outside the RP domain.

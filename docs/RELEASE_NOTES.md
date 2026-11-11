@@ -8,7 +8,27 @@ repository here uses starts an untagged repository at 0.1.0.
 
 This is a first release. Read the limits before you install it.
 
-## Not released yet — changes after 0.3.2
+## Not released yet — changes after 0.4.0
+
+### Read this before you upgrade
+
+- **Each person consents to TallyOwl one more time.** The head uses LinkKeys
+  v0.16.7. A LinkKeys domain at v0.16.7 or later keeps consent for each
+  application, not for each domain. Consent that a person gave before their
+  domain upgraded does not cover TallyOwl. At the next sign-in, the consent
+  screen of their domain opens one time. TallyOwl asks for no claim.
+
+### Changes
+
+- The head sends the application ID `tallyowl` when it asks the RP server to
+  sign a sign-in. The consent screen shows the display name of the API-key
+  account. Give that account a name that people recognize, for example
+  `TallyOwl`. Without the ID, an RP server at v0.16.7 uses the username of
+  the account, and it refuses a username that is not a valid application ID.
+- The audit no longer passes over RUSTSEC-2026-0119. LinkKeys v0.16.7 uses
+  hickory 0.26, which does not have the problem.
+
+## 0.4.0 — 2026-11-09
 
 - **A new dashboard design, built with Zest.** The dashboard uses the Zest
   components and the Zest design tokens: buttons, fields, check boxes, combo

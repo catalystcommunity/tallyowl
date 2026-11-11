@@ -1338,6 +1338,42 @@ impl GroupRegistry {
         }
     }
 
+    /// Wait until this node has applied the group's log up to `index`, or give
+    /// up.
+    ///
+    /// It wakes on each change to the consensus metrics, so it returns as soon
+    /// as the entry is applied, and `within` only bounds a node that never
+    /// catches up.
+    pub fn await_applied(
+        &self,
+        key: &GroupKey,
+        index: u64,
+        within: Duration,
+    ) -> Result<(), TallyOwlError> {
+        let running = self.group(key)?;
+        let mut metrics = running.raft.metrics();
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let applied = metrics.borrow().last_applied.map(|log_id| log_id.index);
+            if applied.is_some_and(|applied| applied >= index) {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let changed = self
+                .runtime
+                .block_on(async { tokio::time::timeout(left, metrics.changed()).await });
+            if left.is_zero() || !matches!(changed, Ok(Ok(()))) {
+                return Err(TallyOwlError::unavailable(format!(
+                    "This node did not apply {} up to index {index} within {} seconds. It has \
+                     applied up to {}.",
+                    key.label(),
+                    within.as_secs(),
+                    applied.unwrap_or(0)
+                )));
+            }
+        }
+    }
+
     /// Take a snapshot of one group now, rather than waiting for the policy.
     pub fn snapshot_now(&self, key: &GroupKey) -> Result<(), TallyOwlError> {
         let running = self.group(key)?;

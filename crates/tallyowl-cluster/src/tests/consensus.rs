@@ -1905,6 +1905,12 @@ fn unsafe_recovery_forms_one_voter_when_two_of_three_are_gone() {
     let members: Vec<Member> = nodes.iter().map(|n| n.member()).collect();
     start_group(&nodes, &group, &members);
     let leader_name = leader_of(&nodes, &group).name.clone();
+    // The two commits here are not what is tested, so neither may fail on the
+    // default ten seconds. On a CI runner that is busy with the other jobs of
+    // the same change, the commit after the recovery did, once.
+    for node in &nodes {
+        node.registry.set_write_timeout(Duration::from_secs(60));
+    }
     {
         let leader = nodes.iter().find(|n| n.name == leader_name).unwrap();
         let store = ReplicatedStore::new(
@@ -1927,17 +1933,16 @@ fn unsafe_recovery_forms_one_voter_when_two_of_three_are_gone() {
         .applied_index(&group);
 
     // The survivor is a follower, which is the harder case. Wait until it holds
-    // the write, then lose the other two.
+    // the write, then lose the other two. A survivor that is behind is another
+    // case, so the wait fails rather than going on without it.
     let survivor = nodes
         .iter()
         .position(|n| n.name != leader_name)
         .expect("a follower");
-    for _ in 0..500 {
-        if nodes[survivor].registry.applied_index(&group) >= applied {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    nodes[survivor]
+        .registry
+        .await_applied(&group, applied, ELECTION_PATIENCE)
+        .expect("the follower applies the write");
     for (index, node) in nodes.iter_mut().enumerate() {
         if index != survivor {
             node.lose(&group);

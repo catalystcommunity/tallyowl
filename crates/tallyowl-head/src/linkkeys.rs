@@ -117,6 +117,12 @@ impl Mode {
     }
 }
 
+/// The application this head names in each sign-in it asks the RP server to
+/// sign. A person's domain keeps standing consent for each application of an
+/// RP account, so a sign-in to TallyOwl does not use consent that the person
+/// gave to another application of the same account.
+pub const APPLICATION_ID: &str = "tallyowl";
+
 /// What an installation configured for LinkKeys.
 #[derive(Debug, Clone)]
 pub struct LinkKeysSettings {
@@ -241,6 +247,11 @@ impl SignIn {
                 encode_rp_sign_request(&RpSignRequest {
                     callback_url: request.callback_url.clone(),
                     nonce: nonce.clone(),
+                    // The person's domain keeps standing consent for each
+                    // application of an RP account. Without this field the
+                    // RP server uses the account's username, and refuses
+                    // the request when that name is not a valid identifier.
+                    application_id: Some(APPLICATION_ID.to_string()),
                     // TallyOwl needs the account and its domain, which every
                     // assertion carries. It asks for no claim, so a person is
                     // not asked to release one.
@@ -1100,6 +1111,12 @@ mod tests {
         assert_eq!(sent.nonce.len(), 32);
         // No claim is asked for, so nobody is asked to release one.
         assert!(sent.requested_claims.is_none());
+        // The consent a person gives is for TallyOwl, whatever the RP
+        // account is called.
+        assert_eq!(sent.application_id.as_deref(), Some(APPLICATION_ID));
+        assert!(liblinkkeys::application_keys::is_valid_identifier(
+            APPLICATION_ID
+        ));
     }
 
     #[test]

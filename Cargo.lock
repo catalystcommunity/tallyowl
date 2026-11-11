@@ -750,7 +750,7 @@ dependencies = [
 [[package]]
 name = "csilgen-transport"
 version = "0.1.0"
-source = "git+https://github.com/catalystcommunity/linkkeys?rev=03fcbd8e700715fb686bce2016136ecd8071f307#03fcbd8e700715fb686bce2016136ecd8071f307"
+source = "git+https://github.com/catalystcommunity/linkkeys?rev=3227a58c78a795a876b86258793375df291d3dcd#3227a58c78a795a876b86258793375df291d3dcd"
 dependencies = [
  "ciborium",
  "ciborium-io",
@@ -1493,7 +1493,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "liblinkkeys"
 version = "0.1.0"
-source = "git+https://github.com/catalystcommunity/linkkeys?rev=03fcbd8e700715fb686bce2016136ecd8071f307#03fcbd8e700715fb686bce2016136ecd8071f307"
+source = "git+https://github.com/catalystcommunity/linkkeys?rev=3227a58c78a795a876b86258793375df291d3dcd#3227a58c78a795a876b86258793375df291d3dcd"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1522,11 +1522,11 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "linkkeys-local-rp"
 version = "0.1.0"
-source = "git+https://github.com/catalystcommunity/linkkeys?rev=03fcbd8e700715fb686bce2016136ecd8071f307#03fcbd8e700715fb686bce2016136ecd8071f307"
+source = "git+https://github.com/catalystcommunity/linkkeys?rev=3227a58c78a795a876b86258793375df291d3dcd#3227a58c78a795a876b86258793375df291d3dcd"
 dependencies = [
  "base64ct",
  "chrono",
- "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/linkkeys?rev=03fcbd8e700715fb686bce2016136ecd8071f307)",
+ "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/linkkeys?rev=3227a58c78a795a876b86258793375df291d3dcd)",
  "hickory-resolver",
  "liblinkkeys",
  "linkkeys-rpc-client",
@@ -1540,10 +1540,10 @@ dependencies = [
 [[package]]
 name = "linkkeys-rpc-client"
 version = "0.1.0"
-source = "git+https://github.com/catalystcommunity/linkkeys?rev=03fcbd8e700715fb686bce2016136ecd8071f307#03fcbd8e700715fb686bce2016136ecd8071f307"
+source = "git+https://github.com/catalystcommunity/linkkeys?rev=3227a58c78a795a876b86258793375df291d3dcd#3227a58c78a795a876b86258793375df291d3dcd"
 dependencies = [
  "ciborium",
- "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/linkkeys?rev=03fcbd8e700715fb686bce2016136ecd8071f307)",
+ "csilgen-transport 0.1.0 (git+https://github.com/catalystcommunity/linkkeys?rev=3227a58c78a795a876b86258793375df291d3dcd)",
  "liblinkkeys",
  "log",
  "rcgen",

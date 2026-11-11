@@ -144,6 +144,7 @@ mod tests {
         encode_rp_sign_request(&RpSignRequest {
             callback_url: "https://tallyowl.example/sign-in/callback".into(),
             nonce: "00112233445566778899aabbccddeeff".into(),
+            application_id: Some("tallyowl".into()),
             requested_claims: None,
             authentication_requirements: None,
             flow_context: None,

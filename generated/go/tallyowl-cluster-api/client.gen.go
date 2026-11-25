@@ -5,22 +5,13 @@ package tallyowlclusterapi
 
 import (
 	"context"
-	"fmt"
 )
 
-// ClientError is returned by a generated client call: a structured error the
-// service returned (Code/Message), or a transport-level failure (Err).
-type ClientError struct {
-	Code    int64
-	Message string
-	Err     error
-}
-
-func (e *ClientError) Error() string {
-	if e.Err != nil {
-		return "transport error: " + e.Err.Error()
-	}
-	return fmt.Sprintf("service error %d: %s", e.Code, e.Message)
+// WireReply is a status-zero CSIL-RPC reply: Variant names the declared output arm
+// that Payload encodes. A transport returns it from CallReply.
+type WireReply struct {
+	Variant *string
+	Payload []byte
 }
 
 // Transport is the caller-supplied byte carrier: it performs the call named by
@@ -28,9 +19,12 @@ func (e *ClientError) Error() string {
 // bytes, or an error. Both names are the verbatim CSIL names (service as written,
 // op in kebab-case as written), ready to go on the wire unmodified. The generated
 // client owns (de)serialization via the codec; the carrier only moves bytes, so
-// it can be HTTP, a queue, or an in-process loop.
+// it can be HTTP, a queue, or an in-process loop. CallReply serves operations
+// that declare several reply arms: it also returns the reply variant, so the
+// client can return the success arm or the declared error arm.
 type Transport interface {
 	Call(ctx context.Context, service string, op string, req []byte) ([]byte, error)
+	CallReply(ctx context.Context, service string, op string, req []byte) (WireReply, error)
 }
 
 // TallyOwlReplicationClient is a typed client for the TallyOwlReplication service. The client owns
@@ -45,65 +39,149 @@ func NewTallyOwlReplicationClient(transport Transport) *TallyOwlReplicationClien
 
 func (c *TallyOwlReplicationClient) DeliverConsensus(ctx context.Context, req ConsensusMessage) (ConsensusReply, error) {
 	var csilZero ConsensusReply
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlReplication", "deliver-consensus", EncodeConsensusMessage(req))
+	csilReq, csilErr := EncodeConsensusMessage(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlReplication", "deliver-consensus", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeConsensusReply(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlReplication", "deliver-consensus", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeConsensusReply(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlReplicationClient) FetchSnapshotChunk(ctx context.Context, req SnapshotChunkRequest) (SnapshotChunk, error) {
 	var csilZero SnapshotChunk
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlReplication", "fetch-snapshot-chunk", EncodeSnapshotChunkRequest(req))
+	csilReq, csilErr := EncodeSnapshotChunkRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlReplication", "fetch-snapshot-chunk", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeSnapshotChunk(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlReplication", "fetch-snapshot-chunk", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeSnapshotChunk(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlReplicationClient) FetchSegment(ctx context.Context, req SegmentTransferRequest) (SegmentTransfer, error) {
 	var csilZero SegmentTransfer
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlReplication", "fetch-segment", EncodeSegmentTransferRequest(req))
+	csilReq, csilErr := EncodeSegmentTransferRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlReplication", "fetch-segment", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeSegmentTransfer(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlReplication", "fetch-segment", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeSegmentTransfer(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlReplicationClient) PartialAggregate(ctx context.Context, req PartialQueryRequest) (PartialQueryResponse, error) {
 	var csilZero PartialQueryResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlReplication", "partial-aggregate", EncodePartialQueryRequest(req))
+	csilReq, csilErr := EncodePartialQueryRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlReplication", "partial-aggregate", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodePartialQueryResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlReplication", "partial-aggregate", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodePartialQueryResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlReplicationClient) ReplicaStatus(ctx context.Context, req ReplicaStatusRequest) (ReplicaStatus, error) {
 	var csilZero ReplicaStatus
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlReplication", "replica-status", EncodeReplicaStatusRequest(req))
+	csilReq, csilErr := EncodeReplicaStatusRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlReplication", "replica-status", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeReplicaStatus(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlReplication", "replica-status", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeReplicaStatus(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlReplicationClient) ReportHealth(ctx context.Context, req NodeHealthReport) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlReplication", "report-health", EncodeNodeHealthReport(req))
+	csilReq, csilErr := EncodeNodeHealthReport(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlReplication", "report-health", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlReplication", "report-health", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlReplicationClient) ListSegments(ctx context.Context, req SegmentListRequest) (SegmentList, error) {
 	var csilZero SegmentList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlReplication", "list-segments", EncodeSegmentListRequest(req))
+	csilReq, csilErr := EncodeSegmentListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlReplication", "list-segments", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeSegmentList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlReplication", "list-segments", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeSegmentList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 // TallyOwlClusterClient is a typed client for the TallyOwlCluster service. The client owns
@@ -118,144 +196,336 @@ func NewTallyOwlClusterClient(transport Transport) *TallyOwlClusterClient {
 
 func (c *TallyOwlClusterClient) DescribeTopology(ctx context.Context, req DescribeTopologyRequest) (TopologyResponse, error) {
 	var csilZero TopologyResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "describe-topology", EncodeDescribeTopologyRequest(req))
+	csilReq, csilErr := EncodeDescribeTopologyRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "describe-topology", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeTopologyResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "describe-topology", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeTopologyResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) Route(ctx context.Context, req RouteRequest) (RouteResponse, error) {
 	var csilZero RouteResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "route", EncodeRouteRequest(req))
+	csilReq, csilErr := EncodeRouteRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "route", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeRouteResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "route", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeRouteResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) BootstrapGroup(ctx context.Context, req BootstrapGroupRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "bootstrap-group", EncodeBootstrapGroupRequest(req))
+	csilReq, csilErr := EncodeBootstrapGroupRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "bootstrap-group", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "bootstrap-group", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) AddReplica(ctx context.Context, req ChangeReplicaRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "add-replica", EncodeChangeReplicaRequest(req))
+	csilReq, csilErr := EncodeChangeReplicaRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "add-replica", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "add-replica", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) RemoveReplica(ctx context.Context, req RemoveReplicaRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "remove-replica", EncodeRemoveReplicaRequest(req))
+	csilReq, csilErr := EncodeRemoveReplicaRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "remove-replica", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "remove-replica", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) SplitTablet(ctx context.Context, req SplitTabletRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "split-tablet", EncodeSplitTabletRequest(req))
+	csilReq, csilErr := EncodeSplitTabletRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "split-tablet", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "split-tablet", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) MergeTablets(ctx context.Context, req MergeTabletsRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "merge-tablets", EncodeMergeTabletsRequest(req))
+	csilReq, csilErr := EncodeMergeTabletsRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "merge-tablets", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "merge-tablets", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) MoveTablet(ctx context.Context, req MoveTabletRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "move-tablet", EncodeMoveTabletRequest(req))
+	csilReq, csilErr := EncodeMoveTabletRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "move-tablet", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "move-tablet", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) SetReceiptPolicy(ctx context.Context, req SetReceiptPolicyRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "set-receipt-policy", EncodeSetReceiptPolicyRequest(req))
+	csilReq, csilErr := EncodeSetReceiptPolicyRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "set-receipt-policy", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "set-receipt-policy", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) FailOverRegion(ctx context.Context, req FailOverRegionRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "fail-over-region", EncodeFailOverRegionRequest(req))
+	csilReq, csilErr := EncodeFailOverRegionRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "fail-over-region", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "fail-over-region", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) UnsafeRecover(ctx context.Context, req UnsafeRecoverRequest) (UnsafeRecoverResponse, error) {
 	var csilZero UnsafeRecoverResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "unsafe-recover", EncodeUnsafeRecoverRequest(req))
+	csilReq, csilErr := EncodeUnsafeRecoverRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "unsafe-recover", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeUnsafeRecoverResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "unsafe-recover", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeUnsafeRecoverResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) ClearDegraded(ctx context.Context, req ClearDegradedRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "clear-degraded", EncodeClearDegradedRequest(req))
+	csilReq, csilErr := EncodeClearDegradedRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "clear-degraded", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "clear-degraded", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) SnapshotCluster(ctx context.Context, req ClusterSnapshotRequest) (ClusterSnapshotResponse, error) {
 	var csilZero ClusterSnapshotResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "snapshot-cluster", EncodeClusterSnapshotRequest(req))
+	csilReq, csilErr := EncodeClusterSnapshotRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "snapshot-cluster", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterSnapshotResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "snapshot-cluster", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterSnapshotResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) Restore(ctx context.Context, req RestoreRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "restore", EncodeRestoreRequest(req))
+	csilReq, csilErr := EncodeRestoreRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "restore", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "restore", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) Directory(ctx context.Context, req DirectoryRequest) (DirectoryResponse, error) {
 	var csilZero DirectoryResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "directory", EncodeDirectoryRequest(req))
+	csilReq, csilErr := EncodeDirectoryRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "directory", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeDirectoryResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "directory", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeDirectoryResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlClusterClient) AssignProject(ctx context.Context, req AssignProjectRequest) (ClusterAck, error) {
 	var csilZero ClusterAck
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCluster", "assign-project", EncodeAssignProjectRequest(req))
+	csilReq, csilErr := EncodeAssignProjectRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCluster", "assign-project", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeClusterAck(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCluster", "assign-project", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeClusterAck(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }

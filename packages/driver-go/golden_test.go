@@ -123,7 +123,7 @@ func built(t *testing.T) map[string][]byte {
 	out := map[string][]byte{}
 
 	typed := func(name string, v Value) {
-		out[name] = collector.EncodeTypedValue(v.Wire())
+		out[name] = mustEncode(collector.EncodeTypedValue(v.Wire()))
 	}
 	typed("typed-value-null", Null())
 	typed("typed-value-bool", Bool(true))
@@ -134,22 +134,22 @@ func built(t *testing.T) map[string][]byte {
 	typed("typed-value-text", Text("us-west2"))
 	typed("typed-value-bytes", Bytes([]byte{0xde, 0xad, 0xbe, 0xef}))
 
-	out["property-collector-origin"] = collector.EncodeProperty(
-		Property("region", Text("us-west2"), "collector"))
+	out["property-collector-origin"] = mustEncode(collector.EncodeProperty(
+		Property("region", Text("us-west2"), "collector")))
 
 	amount, err := Measurement("amount", MustDecimal("-0.01"), "USD")
 	if err != nil {
 		t.Fatalf("a decimal is a number: %v", err)
 	}
-	out["measurement-decimal-with-unit"] = collector.EncodeMeasurement(amount)
+	out["measurement-decimal-with-unit"] = mustEncode(collector.EncodeMeasurement(amount))
 
-	out["envelope-minimal"] = collector.EncodeEnvelope(minimalEnvelope())
-	out["envelope-full"] = collector.EncodeEnvelope(fullEnvelope(t))
+	out["envelope-minimal"] = mustEncode(collector.EncodeEnvelope(minimalEnvelope()))
+	out["envelope-full"] = mustEncode(collector.EncodeEnvelope(fullEnvelope(t)))
 
 	event := collector.EventPayload{Name: "checkout-started", Route: text("/checkout")}
-	out["item-event"] = collector.EncodeTelemetryItem(collector.TelemetryItem{
+	out["item-event"] = mustEncode(collector.EncodeTelemetryItem(collector.TelemetryItem{
 		Envelope: minimalEnvelope(), Event: &event,
-	})
+	}))
 
 	pageEnvelope := minimalEnvelope()
 	pageEnvelope.Kind = "page-view"
@@ -162,9 +162,9 @@ func built(t *testing.T) map[string][]byte {
 			Campaign: text("spring"),
 		},
 	}
-	out["item-page-view-with-campaign"] = collector.EncodeTelemetryItem(collector.TelemetryItem{
+	out["item-page-view-with-campaign"] = mustEncode(collector.EncodeTelemetryItem(collector.TelemetryItem{
 		Envelope: pageEnvelope, PageView: &pageView,
-	})
+	}))
 
 	conversionEnvelope := minimalEnvelope()
 	conversionEnvelope.Kind = "conversion"
@@ -172,9 +172,9 @@ func built(t *testing.T) map[string][]byte {
 	conversion := collector.ConversionPayload{
 		Goal: "purchase", Value: &money, Currency: text("USD"),
 	}
-	out["item-conversion-exact-money"] = collector.EncodeTelemetryItem(collector.TelemetryItem{
+	out["item-conversion-exact-money"] = mustEncode(collector.EncodeTelemetryItem(collector.TelemetryItem{
 		Envelope: conversionEnvelope, Conversion: &conversion,
-	})
+	}))
 
 	errorEnvelope := minimalEnvelope()
 	errorEnvelope.Kind = "error"
@@ -192,19 +192,19 @@ func built(t *testing.T) map[string][]byte {
 			InApp:    true,
 		}},
 	}
-	out["item-error-with-frames"] = collector.EncodeTelemetryItem(collector.TelemetryItem{
+	out["item-error-with-frames"] = mustEncode(collector.EncodeTelemetryItem(collector.TelemetryItem{
 		Envelope: errorEnvelope, Error: &errorPayload,
-	})
+	}))
 
 	heartbeatEnvelope := minimalEnvelope()
 	heartbeatEnvelope.Kind = "session-heartbeat"
-	out["item-session-heartbeat-no-payload"] = collector.EncodeTelemetryItem(
-		collector.TelemetryItem{Envelope: heartbeatEnvelope})
+	out["item-session-heartbeat-no-payload"] = mustEncode(collector.EncodeTelemetryItem(
+		collector.TelemetryItem{Envelope: heartbeatEnvelope}))
 
 	a := collector.EventPayload{Name: "a"}
 	b := collector.EventPayload{Name: "b"}
 	compression := collector.Compression("zstd")
-	out["batch-two-items"] = collector.EncodeBatch(collector.Batch{
+	out["batch-two-items"] = mustEncode(collector.EncodeBatch(collector.Batch{
 		BatchId: id(2),
 		Items: []collector.TelemetryItem{
 			{Envelope: minimalEnvelope(), Event: &a},
@@ -212,10 +212,10 @@ func built(t *testing.T) map[string][]byte {
 		},
 		SealedAt:    collector.Timestamp(at),
 		Compression: &compression,
-	})
+	}))
 
 	deduplicated := false
-	out["commit-batch-response-with-rejection"] = collector.EncodeCommitBatchResponse(
+	out["commit-batch-response-with-rejection"] = mustEncode(collector.EncodeCommitBatchResponse(
 		collector.CommitBatchResponse{
 			BatchId:          id(2),
 			Accepted:         1,
@@ -230,16 +230,16 @@ func built(t *testing.T) map[string][]byte {
 				Message: "This item carries no project.",
 			}},
 			Deduplicated: &deduplicated,
-		})
+		}))
 
-	out["service-error-retryable"] = collector.EncodeServiceError(collector.ServiceError{
+	out["service-error-retryable"] = mustEncode(collector.EncodeServiceError(collector.ServiceError{
 		Code:      "unavailable",
 		Message:   "We could not reach the durable store.",
 		Retryable: true,
-	})
+	}))
 
 	ingestEvent := ingest.EventPayload{Name: "checkout-started", Route: text("/checkout")}
-	out["capture-request-one-event"] = ingest.EncodeCaptureRequest(ingest.CaptureRequest{
+	out["capture-request-one-event"] = mustEncode(ingest.EncodeCaptureRequest(ingest.CaptureRequest{
 		Items: []ingest.TelemetryItem{{
 			Envelope: ingest.Envelope{
 				EventId:       id(1),
@@ -252,7 +252,7 @@ func built(t *testing.T) map[string][]byte {
 			},
 			Event: &ingestEvent,
 		}},
-	})
+	}))
 
 	timeRange := control.TimeRange{
 		RangeStart: control.Timestamp(at),
@@ -261,7 +261,7 @@ func built(t *testing.T) map[string][]byte {
 	}
 	scan := control.ScanNode{Scan: "events", ProjectId: id(9), Range: timeRange}
 	scanBox := control.QueryNodeBox{Node: "scan", Scan: &scan}
-	out["query-node-scan"] = control.EncodeQueryNodeBox(scanBox)
+	out["query-node-scan"] = mustEncode(control.EncodeQueryNodeBox(scanBox))
 
 	fieldRef := control.FieldRef{Name: "route", ValueType: text("text")}
 	fieldNode := control.ExpressionNode{Expression: "field", Field: &fieldRef}
@@ -275,11 +275,11 @@ func built(t *testing.T) map[string][]byte {
 	}
 	compare := control.CompareExpr{
 		Compare: "eq",
-		Left:    control.EncodeExpressionNode(fieldNode),
-		Right:   control.EncodeExpressionNode(literalNode),
+		Left:    mustEncode(control.EncodeExpressionNode(fieldNode)),
+		Right:   mustEncode(control.EncodeExpressionNode(literalNode)),
 	}
-	out["expression-compare"] = control.EncodeExpressionNode(
-		control.ExpressionNode{Expression: "compare", Compare: &compare})
+	out["expression-compare"] = mustEncode(control.EncodeExpressionNode(
+		control.ExpressionNode{Expression: "compare", Compare: &compare}))
 
 	interval := control.Interval{FixedMs: func() *control.DurationMs {
 		v := control.DurationMs(60_000)
@@ -289,17 +289,17 @@ func built(t *testing.T) map[string][]byte {
 		Dimensions: []control.Dimension{},
 		Measures:   []control.Measure{{Kind: "count", Alias: "events"}},
 		Interval:   &interval,
-		Input:      control.EncodeQueryNodeBox(scanBox),
+		Input:      mustEncode(control.EncodeQueryNodeBox(scanBox)),
 	}
 	aggregateBox := control.QueryNodeBox{Node: "aggregate", Aggregate: &aggregate}
-	node := control.QueryNodeRef(control.EncodeQueryNodeBox(aggregateBox))
-	out["query-request-trend"] = control.EncodeQueryRequest(control.QueryRequest{
+	node := control.QueryNodeRef(mustEncode(control.EncodeQueryNodeBox(aggregateBox)))
+	out["query-request-trend"] = mustEncode(control.EncodeQueryRequest(control.QueryRequest{
 		AlgebraVersion: 1,
 		Consistency:    "committed",
 		AllowPartial:   false,
 		Form:           "node",
 		Node:           &node,
-	})
+	}))
 
 	return out
 }

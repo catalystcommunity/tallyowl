@@ -3,92 +3,110 @@
 // Target: typescript-client
 
 import type { AssignProjectRequest, BootstrapGroupRequest, ChangeReplicaRequest, ClearDegradedRequest, ClusterAck, ClusterSnapshotRequest, ClusterSnapshotResponse, ConsensusMessage, ConsensusReply, DescribeTopologyRequest, DirectoryRequest, DirectoryResponse, FailOverRegionRequest, MergeTabletsRequest, MoveTabletRequest, NodeHealthReport, PartialQueryRequest, PartialQueryResponse, RemoveReplicaRequest, ReplicaStatus, ReplicaStatusRequest, RestoreRequest, RouteRequest, RouteResponse, SegmentList, SegmentListRequest, SegmentTransfer, SegmentTransferRequest, SetReceiptPolicyRequest, SnapshotChunk, SnapshotChunkRequest, SplitTabletRequest, TopologyResponse, UnsafeRecoverRequest, UnsafeRecoverResponse } from "./types.gen.ts";
-import { fromClusterAckCbor, fromClusterSnapshotResponseCbor, fromConsensusReplyCbor, fromDirectoryResponseCbor, fromPartialQueryResponseCbor, fromReplicaStatusCbor, fromRouteResponseCbor, fromSegmentListCbor, fromSegmentTransferCbor, fromSnapshotChunkCbor, fromTopologyResponseCbor, fromUnsafeRecoverResponseCbor, toAssignProjectRequestCbor, toBootstrapGroupRequestCbor, toChangeReplicaRequestCbor, toClearDegradedRequestCbor, toClusterSnapshotRequestCbor, toConsensusMessageCbor, toDescribeTopologyRequestCbor, toDirectoryRequestCbor, toFailOverRegionRequestCbor, toMergeTabletsRequestCbor, toMoveTabletRequestCbor, toNodeHealthReportCbor, toPartialQueryRequestCbor, toRemoveReplicaRequestCbor, toReplicaStatusRequestCbor, toRestoreRequestCbor, toRouteRequestCbor, toSegmentListRequestCbor, toSegmentTransferRequestCbor, toSetReceiptPolicyRequestCbor, toSnapshotChunkRequestCbor, toSplitTabletRequestCbor, toUnsafeRecoverRequestCbor } from "./codec.gen.ts";
+import { fromClusterAckCbor, fromClusterSnapshotResponseCbor, fromConsensusReplyCbor, fromDirectoryResponseCbor, fromPartialQueryResponseCbor, fromReplicaStatusCbor, fromRouteResponseCbor, fromSegmentListCbor, fromSegmentTransferCbor, fromSnapshotChunkCbor, fromTopologyResponseCbor, fromUnsafeRecoverResponseCbor, resolveRpcReply, toAssignProjectRequestCbor, toBootstrapGroupRequestCbor, toChangeReplicaRequestCbor, toClearDegradedRequestCbor, toClusterSnapshotRequestCbor, toConsensusMessageCbor, toDescribeTopologyRequestCbor, toDirectoryRequestCbor, toFailOverRegionRequestCbor, toMergeTabletsRequestCbor, toMoveTabletRequestCbor, toNodeHealthReportCbor, toPartialQueryRequestCbor, toRemoveReplicaRequestCbor, toReplicaStatusRequestCbor, toRestoreRequestCbor, toRouteRequestCbor, toSegmentListRequestCbor, toSegmentTransferRequestCbor, toSetReceiptPolicyRequestCbor, toSnapshotChunkRequestCbor, toSplitTabletRequestCbor, toUnsafeRecoverRequestCbor } from "./codec.gen.ts";
 
 export interface ServiceTransport {
   call(service: string, op: string, req: Uint8Array): Uint8Array;
+  /**
+   * Perform an operation that declares more than one reply arm. Return the
+   * CSIL-RPC response `variant` (the CSIL name of the arm) with its payload
+   * bytes; the client decodes the arm that the variant names.
+   */
+  callReply(service: string, op: string, req: Uint8Array): { readonly variant?: string | null; readonly payload: Uint8Array };
 }
 
 export class TallyOwlClusterClient {
-  constructor(private readonly t: ServiceTransport) {}
+  private readonly t: ServiceTransport;
+
+  constructor(t: ServiceTransport) {
+    this.t = t;
+  }
 
   /**
    * The whole topology, or one cell's part of it.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   describeTopology(req: DescribeTopologyRequest): TopologyResponse {
-    const csilResp = this.t.call("TallyOwlCluster", "describe-topology", toDescribeTopologyRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "describe-topology", toDescribeTopologyRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "describe-topology", csilReply.variant, csilReply.payload);
     return fromTopologyResponseCbor(csilResp);
   }
 
   /**
    * Where a write for one project and affinity key belongs.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   route(req: RouteRequest): RouteResponse {
-    const csilResp = this.t.call("TallyOwlCluster", "route", toRouteRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "route", toRouteRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "route", csilReply.variant, csilReply.payload);
     return fromRouteResponseCbor(csilResp);
   }
 
   /**
    * Create a group. The only operation that creates a voter set.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   bootstrapGroup(req: BootstrapGroupRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "bootstrap-group", toBootstrapGroupRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "bootstrap-group", toBootstrapGroupRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "bootstrap-group", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Add a replica, voting or not. Online.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   addReplica(req: ChangeReplicaRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "add-replica", toChangeReplicaRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "add-replica", toChangeReplicaRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "add-replica", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Remove a replica. Online, and refused when it would end the quorum.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   removeReplica(req: RemoveReplicaRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "remove-replica", toRemoveReplicaRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "remove-replica", toRemoveReplicaRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "remove-replica", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Split one tablet into two at a virtual-shard boundary.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   splitTablet(req: SplitTabletRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "split-tablet", toSplitTabletRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "split-tablet", toSplitTabletRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "split-tablet", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Merge two adjacent tablets.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   mergeTablets(req: MergeTabletsRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "merge-tablets", toMergeTabletsRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "merge-tablets", toMergeTabletsRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "merge-tablets", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Move a tablet from one node to another, online and with parity checked.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   moveTablet(req: MoveTabletRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "move-tablet", toMoveTabletRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "move-tablet", toMoveTabletRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "move-tablet", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
@@ -96,158 +114,177 @@ export class TallyOwlClusterClient {
    * Change a tablet's receipt policy. `local-one` is refused on a tablet
    * with more than one voter, and the refusal says so rather than quietly
    * selecting another policy.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   setReceiptPolicy(req: SetReceiptPolicyRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "set-receipt-policy", toSetReceiptPolicyRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "set-receipt-policy", toSetReceiptPolicyRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "set-receipt-policy", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Move a tablet's write region behind a fence.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   failOverRegion(req: FailOverRegionRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "fail-over-region", toFailOverRegionRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "fail-over-region", toFailOverRegionRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "fail-over-region", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Force a single-voter membership from a survivor. It can lose an
    * acknowledged write, it is audited, and it marks the range degraded.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   unsafeRecover(req: UnsafeRecoverRequest): UnsafeRecoverResponse {
-    const csilResp = this.t.call("TallyOwlCluster", "unsafe-recover", toUnsafeRecoverRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "unsafe-recover", toUnsafeRecoverRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "unsafe-recover", csilReply.variant, csilReply.payload);
     return fromUnsafeRecoverResponseCbor(csilResp);
   }
 
   /**
    * Clear a degraded mark. It records who accepted the loss.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   clearDegraded(req: ClearDegradedRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "clear-degraded", toClearDegradedRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "clear-degraded", toClearDegradedRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "clear-degraded", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Take a cluster snapshot.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   snapshotCluster(req: ClusterSnapshotRequest): ClusterSnapshotResponse {
-    const csilResp = this.t.call("TallyOwlCluster", "snapshot-cluster", toClusterSnapshotRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "snapshot-cluster", toClusterSnapshotRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "snapshot-cluster", csilReply.variant, csilReply.payload);
     return fromClusterSnapshotResponseCbor(csilResp);
   }
 
   /**
    * Restore from a snapshot. The default answer to a permanent quorum loss.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   restore(req: RestoreRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "restore", toRestoreRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "restore", toRestoreRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "restore", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * The global directory: which cells hold a project.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   directory(req: DirectoryRequest): DirectoryResponse {
-    const csilResp = this.t.call("TallyOwlCluster", "directory", toDirectoryRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "directory", toDirectoryRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "directory", csilReply.variant, csilReply.payload);
     return fromDirectoryResponseCbor(csilResp);
   }
 
   /**
    * Assign a project to cells. Refused while the directory is unreachable,
    * and existing cells keep working through that refusal.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   assignProject(req: AssignProjectRequest): ClusterAck {
-    const csilResp = this.t.call("TallyOwlCluster", "assign-project", toAssignProjectRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCluster", "assign-project", toAssignProjectRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCluster", "assign-project", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 }
 
 export class TallyOwlReplicationClient {
-  constructor(private readonly t: ServiceTransport) {}
+  private readonly t: ServiceTransport;
+
+  constructor(t: ServiceTransport) {
+    this.t = t;
+  }
 
   /**
    * Hand one consensus message to the named group.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   deliverConsensus(req: ConsensusMessage): ConsensusReply {
-    const csilResp = this.t.call("TallyOwlReplication", "deliver-consensus", toConsensusMessageCbor(req));
+    const csilReply = this.t.callReply("TallyOwlReplication", "deliver-consensus", toConsensusMessageCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlReplication", "deliver-consensus", csilReply.variant, csilReply.payload);
     return fromConsensusReplyCbor(csilResp);
   }
 
   /**
    * Read part of a snapshot, so a new or lagging replica can catch up.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   fetchSnapshotChunk(req: SnapshotChunkRequest): SnapshotChunk {
-    const csilResp = this.t.call("TallyOwlReplication", "fetch-snapshot-chunk", toSnapshotChunkRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlReplication", "fetch-snapshot-chunk", toSnapshotChunkRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlReplication", "fetch-snapshot-chunk", csilReply.variant, csilReply.payload);
     return fromSnapshotChunkCbor(csilResp);
   }
 
   /**
    * Read part of a sealed segment, for a tablet that is moving.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   fetchSegment(req: SegmentTransferRequest): SegmentTransfer {
-    const csilResp = this.t.call("TallyOwlReplication", "fetch-segment", toSegmentTransferRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlReplication", "fetch-segment", toSegmentTransferRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlReplication", "fetch-segment", csilReply.variant, csilReply.payload);
     return fromSegmentTransferCbor(csilResp);
   }
 
   /**
    * Compute a partial aggregate over one tablet. The coordinator merges.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   partialAggregate(req: PartialQueryRequest): PartialQueryResponse {
-    const csilResp = this.t.call("TallyOwlReplication", "partial-aggregate", toPartialQueryRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlReplication", "partial-aggregate", toPartialQueryRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlReplication", "partial-aggregate", csilReply.variant, csilReply.payload);
     return fromPartialQueryResponseCbor(csilResp);
   }
 
   /**
    * What this node holds, and how current each of it is.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   replicaStatus(req: ReplicaStatusRequest): ReplicaStatus {
-    const csilResp = this.t.call("TallyOwlReplication", "replica-status", toReplicaStatusRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlReplication", "replica-status", toReplicaStatusRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlReplication", "replica-status", csilReply.variant, csilReply.payload);
     return fromReplicaStatusCbor(csilResp);
   }
 
   /**
    * A node reports its own latency and device readings. The controller
    * compares; the node never decides that it is slow.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   reportHealth(req: NodeHealthReport): ClusterAck {
-    const csilResp = this.t.call("TallyOwlReplication", "report-health", toNodeHealthReportCbor(req));
+    const csilReply = this.t.callReply("TallyOwlReplication", "report-health", toNodeHealthReportCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlReplication", "report-health", csilReply.variant, csilReply.payload);
     return fromClusterAckCbor(csilResp);
   }
 
   /**
    * Which sealed segments this node holds for one tablet.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listSegments(req: SegmentListRequest): SegmentList {
-    const csilResp = this.t.call("TallyOwlReplication", "list-segments", toSegmentListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlReplication", "list-segments", toSegmentListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlReplication", "list-segments", csilReply.variant, csilReply.payload);
     return fromSegmentListCbor(csilResp);
   }
 }

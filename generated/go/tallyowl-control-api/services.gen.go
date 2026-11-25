@@ -41,6 +41,8 @@ type TallyOwlControl interface {
 	ListWorkflows(ctx context.Context, req ListRequest) (WorkflowList, error)
 	RunWorkflow(ctx context.Context, req RunWorkflowRequest) (RunWorkflowResponse, error)
 	ListNotifications(ctx context.Context, req AlertListRequest) (NotificationDeliveryList, error)
+	GetUserPreferences(ctx context.Context, req Empty) (UserPreferences, error)
+	PutUserPreferences(ctx context.Context, req UserPreferences) (UserPreferences, error)
 }
 
 // Wire-id ordinals for the TallyOwlControl service (transport compact profiles).
@@ -77,3 +79,5 @@ const TallyOwlControlOpResolveAlertWireID uint64 = 28
 const TallyOwlControlOpListWorkflowsWireID uint64 = 29
 const TallyOwlControlOpRunWorkflowWireID uint64 = 30
 const TallyOwlControlOpListNotificationsWireID uint64 = 31
+const TallyOwlControlOpGetUserPreferencesWireID uint64 = 32
+const TallyOwlControlOpPutUserPreferencesWireID uint64 = 33

@@ -324,7 +324,11 @@ func (d *Driver) Capture(capture *Capture) error {
 		return fmt.Errorf("this event was not recorded: %w", err)
 	}
 
-	size := len(api.EncodeTelemetryItem(item))
+	encodedItem, err := api.EncodeTelemetryItem(item)
+	if err != nil {
+		return fmt.Errorf("this event was not recorded. It could not be encoded: %w", err)
+	}
+	size := len(encodedItem)
 	if size > d.frameRoom() {
 		return fmt.Errorf(
 			"this event was not recorded. It holds %d KiB and one frame holds %d KiB. Record a smaller event, or raise the frame limit for this driver",
@@ -483,13 +487,21 @@ func (d *Driver) sealLocked() (*pendingBatch, error) {
 	}
 
 	batchID := NewBatchID()
-	encoded := encodeBatch(batchID, items)
+	// Record encoded each item before it went into the buffer, so the encoder
+	// refuses this only if the generated code is wrong. The items are still in
+	// the buffer when it does.
+	encoded, err := encodeBatch(batchID, items)
+	if err != nil {
+		return nil, fmt.Errorf("a batch could not be encoded: %w", err)
+	}
 	// The sizes are of items, and a frame also carries the batch around them. A
 	// driver configured with a batch limit above its frame limit lands here, and
 	// the answer is a smaller batch and never a discarded one.
 	for len(encoded) > d.frameRoom() && len(items) > 1 {
 		items = items[:len(items)/2]
-		encoded = encodeBatch(batchID, items)
+		if encoded, err = encodeBatch(batchID, items); err != nil {
+			return nil, fmt.Errorf("a batch could not be encoded: %w", err)
+		}
 	}
 	take = len(items)
 
@@ -527,7 +539,7 @@ func (d *Driver) sealLocked() (*pendingBatch, error) {
 	return &pendingBatch{batchID: batchID, encoded: encoded, items: take, bytes: bytes}, nil
 }
 
-func encodeBatch(batchID []byte, items []api.TelemetryItem) []byte {
+func encodeBatch(batchID []byte, items []api.TelemetryItem) ([]byte, error) {
 	protocolVersion := uint64(ProtocolVersion)
 	return api.EncodeSubmitBatchRequest(api.SubmitBatchRequest{
 		Batch: api.Batch{

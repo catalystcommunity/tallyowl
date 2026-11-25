@@ -9,8 +9,20 @@ type ExpressionRef []byte
 // QueryNodeRef is a type alias
 type QueryNodeRef []byte
 
-// ExpressionKind is a type alias
 type ExpressionKind string
+
+const (
+	ExpressionKindLiteral ExpressionKind = "literal"
+	ExpressionKindField   ExpressionKind = "field"
+	ExpressionKindCompare ExpressionKind = "compare"
+	ExpressionKindSet     ExpressionKind = "set"
+	ExpressionKindText    ExpressionKind = "text"
+	ExpressionKindNull    ExpressionKind = "null"
+	ExpressionKindLogical ExpressionKind = "logical"
+	ExpressionKindArith   ExpressionKind = "arith"
+	ExpressionKindTime    ExpressionKind = "time"
+	ExpressionKindConvert ExpressionKind = "convert"
+)
 
 // ExpressionNode represents a structured data type
 type ExpressionNode struct {
@@ -27,8 +39,18 @@ type ExpressionNode struct {
 	Convert    *ConvertExpr   `json:"convert,omitempty" yaml:"convert,omitempty"`
 }
 
-// QueryNodeKind is a type alias
 type QueryNodeKind string
+
+const (
+	QueryNodeKindScan      QueryNodeKind = "scan"
+	QueryNodeKindFilter    QueryNodeKind = "filter"
+	QueryNodeKindProject   QueryNodeKind = "project"
+	QueryNodeKindAggregate QueryNodeKind = "aggregate"
+	QueryNodeKindSort      QueryNodeKind = "sort"
+	QueryNodeKindLimit     QueryNodeKind = "limit"
+	QueryNodeKindJoin      QueryNodeKind = "join"
+	QueryNodeKindUnion     QueryNodeKind = "union"
+)
 
 // QueryNodeBox represents a structured data type
 type QueryNodeBox struct {
@@ -50,14 +72,33 @@ type FieldRef struct {
 	Origin    *PropertyOrigin `json:"origin,omitempty" yaml:"origin,omitempty"`
 }
 
-// CompareOp is a type alias
 type CompareOp string
 
-// LogicalOp is a type alias
+const (
+	CompareOpEq CompareOp = "eq"
+	CompareOpNe CompareOp = "ne"
+	CompareOpLt CompareOp = "lt"
+	CompareOpLe CompareOp = "le"
+	CompareOpGt CompareOp = "gt"
+	CompareOpGe CompareOp = "ge"
+)
+
 type LogicalOp string
 
-// ArithOp is a type alias
+const (
+	LogicalOpAnd LogicalOp = "and"
+	LogicalOpOr  LogicalOp = "or"
+	LogicalOpNot LogicalOp = "not"
+)
+
 type ArithOp string
+
+const (
+	ArithOpAdd ArithOp = "add"
+	ArithOpSub ArithOp = "sub"
+	ArithOpMul ArithOp = "mul"
+	ArithOpDiv ArithOp = "div"
+)
 
 // CompareExpr represents a structured data type
 type CompareExpr struct {
@@ -114,8 +155,13 @@ type ConvertExpr struct {
 	Operand   ExpressionRef `json:"operand" yaml:"operand"`
 }
 
-// TimeBasis is a type alias
 type TimeBasis string
+
+const (
+	TimeBasisOccurredAt  TimeBasis = "occurred_at"
+	TimeBasisReceivedAt  TimeBasis = "received_at"
+	TimeBasisCommittedAt TimeBasis = "committed_at"
+)
 
 // Interval represents a structured data type
 type Interval struct {
@@ -131,11 +177,38 @@ type TimeRange struct {
 	Timezone   *string   `json:"timezone,omitempty" yaml:"timezone,omitempty"`
 }
 
-// Dataset is a type alias
 type Dataset string
 
-// MeasureKind is a type alias
+const (
+	DatasetEvents           Dataset = "events"
+	DatasetErrorOccurrences Dataset = "error_occurrences"
+	DatasetErrorGroups      Dataset = "error_groups"
+	DatasetSpans            Dataset = "spans"
+	DatasetMetricPoints     Dataset = "metric_points"
+	DatasetIdentityEdges    Dataset = "identity_edges"
+	DatasetCampaignTouches  Dataset = "campaign_touches"
+	DatasetConversions      Dataset = "conversions"
+	DatasetCampaignCosts    Dataset = "campaign_costs"
+)
+
 type MeasureKind string
+
+const (
+	MeasureKindCount               MeasureKind = "count"
+	MeasureKindSum                 MeasureKind = "sum"
+	MeasureKindMin                 MeasureKind = "min"
+	MeasureKindMax                 MeasureKind = "max"
+	MeasureKindAvg                 MeasureKind = "avg"
+	MeasureKindCountDistinct       MeasureKind = "count_distinct"
+	MeasureKindCountDistinctApprox MeasureKind = "count_distinct_approx"
+	MeasureKindQuantile            MeasureKind = "quantile"
+	MeasureKindQuantileApprox      MeasureKind = "quantile_approx"
+	MeasureKindHistogramMerge      MeasureKind = "histogram_merge"
+	MeasureKindTopK                MeasureKind = "top_k"
+	MeasureKindTopKApprox          MeasureKind = "top_k_approx"
+	MeasureKindRate                MeasureKind = "rate"
+	MeasureKindIncrease            MeasureKind = "increase"
+)
 
 // Measure represents a structured data type
 type Measure struct {
@@ -212,11 +285,20 @@ type UnionNode struct {
 	Union []QueryNodeRef `json:"union" yaml:"union"`
 }
 
-// CorrelationBasis is a type alias
 type CorrelationBasis string
 
-// IdentityResolution is a type alias
+const (
+	CorrelationBasisEndUser CorrelationBasis = "end-user"
+	CorrelationBasisSession CorrelationBasis = "session"
+	CorrelationBasisGroup   CorrelationBasis = "group"
+)
+
 type IdentityResolution string
+
+const (
+	IdentityResolutionEventTime   IdentityResolution = "event-time"
+	IdentityResolutionLatestKnown IdentityResolution = "latest-known"
+)
 
 // FunnelStep represents a structured data type
 type FunnelStep struct {
@@ -279,8 +361,16 @@ type TimelineQuery struct {
 	Resolution *IdentityResolution `json:"resolution,omitempty" yaml:"resolution,omitempty"`
 }
 
-// AttributionModel is a type alias
 type AttributionModel string
+
+const (
+	AttributionModelFirstTouch    AttributionModel = "first-touch"
+	AttributionModelLastTouch     AttributionModel = "last-touch"
+	AttributionModelLastNonDirect AttributionModel = "last-non-direct"
+	AttributionModelLinear        AttributionModel = "linear"
+	AttributionModelPosition      AttributionModel = "position"
+	AttributionModelDecay         AttributionModel = "decay"
+)
 
 // AttributionQuery represents a structured data type
 type AttributionQuery struct {
@@ -306,8 +396,12 @@ type CampaignSummaryQuery struct {
 	Resolution     *IdentityResolution `json:"resolution,omitempty" yaml:"resolution,omitempty"`
 }
 
-// Consistency is a type alias
 type Consistency string
+
+const (
+	ConsistencyCommitted    Consistency = "committed"
+	ConsistencyBoundedStale Consistency = "bounded-stale"
+)
 
 // QueryBudget represents a structured data type
 type QueryBudget struct {
@@ -317,8 +411,18 @@ type QueryBudget struct {
 	MaxRows            *uint64     `json:"max_rows,omitempty" yaml:"max_rows,omitempty"`
 }
 
-// QueryForm is a type alias
 type QueryForm string
+
+const (
+	QueryFormNode            QueryForm = "node"
+	QueryFormFunnel          QueryForm = "funnel"
+	QueryFormRetention       QueryForm = "retention"
+	QueryFormPath            QueryForm = "path"
+	QueryFormTrace           QueryForm = "trace"
+	QueryFormTimeline        QueryForm = "timeline"
+	QueryFormAttribution     QueryForm = "attribution"
+	QueryFormCampaignSummary QueryForm = "campaign-summary"
+)
 
 // QueryRequest represents a structured data type
 type QueryRequest struct {
@@ -371,8 +475,15 @@ type ResultMetadata struct {
 	NextCursor            *[]byte         `json:"next_cursor,omitempty" yaml:"next_cursor,omitempty"`
 }
 
-// RetentionClass is a type alias
 type RetentionClass string
+
+const (
+	RetentionClassProvisional RetentionClass = "provisional"
+	RetentionClassRaw         RetentionClass = "raw"
+	RetentionClassDetailed    RetentionClass = "detailed"
+	RetentionClassRollup      RetentionClass = "rollup"
+	RetentionClassAudit       RetentionClass = "audit"
+)
 
 // ResultRow represents a structured data type
 type ResultRow struct {
@@ -425,11 +536,23 @@ type NotificationTarget struct {
 	SecretRef *string `json:"secret_ref,omitempty" yaml:"secret_ref,omitempty"`
 }
 
-// AlertState is a type alias
 type AlertState string
 
-// AlertOutcome is a type alias
+const (
+	AlertStateOk       AlertState = "ok"
+	AlertStateFiring   AlertState = "firing"
+	AlertStateNoData   AlertState = "no-data"
+	AlertStateUnknown  AlertState = "unknown"
+	AlertStateSilenced AlertState = "silenced"
+)
+
 type AlertOutcome string
+
+const (
+	AlertOutcomeValue  AlertOutcome = "value"
+	AlertOutcomeNoData AlertOutcome = "no-data"
+	AlertOutcomeError  AlertOutcome = "error"
+)
 
 // AlertInstance represents a structured data type
 type AlertInstance struct {
@@ -485,8 +608,16 @@ type NotificationDeliveryList struct {
 	NextCursor *[]byte                `json:"next_cursor,omitempty" yaml:"next_cursor,omitempty"`
 }
 
-// WorkflowKind is a type alias
 type WorkflowKind string
+
+const (
+	WorkflowKindAlertEvaluation  WorkflowKind = "alert-evaluation"
+	WorkflowKindNotification     WorkflowKind = "notification"
+	WorkflowKindProjectorRebuild WorkflowKind = "projector-rebuild"
+	WorkflowKindRetention        WorkflowKind = "retention"
+	WorkflowKindDeletion         WorkflowKind = "deletion"
+	WorkflowKindExport           WorkflowKind = "export"
+)
 
 // WorkflowStatus represents a structured data type
 type WorkflowStatus struct {
@@ -556,6 +687,21 @@ type Membership struct {
 	Role        string      `json:"role" yaml:"role"`
 }
 
+type TimeDisplay string
+
+const (
+	TimeDisplayBrowser TimeDisplay = "browser"
+	TimeDisplayUtc     TimeDisplay = "utc"
+	TimeDisplayZone    TimeDisplay = "zone"
+)
+
+// UserPreferences represents a structured data type
+type UserPreferences struct {
+	TimeDisplay TimeDisplay `json:"time_display" yaml:"time_display"`
+	TimeZone    *string     `json:"time_zone,omitempty" yaml:"time_zone,omitempty"`
+	UpdatedAt   *Timestamp  `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
+}
+
 // Project represents a structured data type
 type Project struct {
 	ProjectId   ProjectId   `json:"project_id" yaml:"project_id"`
@@ -603,11 +749,23 @@ type DeletionResponse struct {
 	Identifiers         []string  `json:"identifiers,omitempty" yaml:"identifiers,omitempty"`
 }
 
-// PolicyScope is a type alias
 type PolicyScope string
 
-// CampaignLinking is a type alias
+const (
+	PolicyScopeInstallation PolicyScope = "installation"
+	PolicyScopeWorkspace    PolicyScope = "workspace"
+	PolicyScopeProject      PolicyScope = "project"
+	PolicyScopeEnvironment  PolicyScope = "environment"
+	PolicyScopeSource       PolicyScope = "source"
+)
+
 type CampaignLinking string
+
+const (
+	CampaignLinkingLinked   CampaignLinking = "linked"
+	CampaignLinkingUnlinked CampaignLinking = "unlinked"
+	CampaignLinkingNone     CampaignLinking = "none"
+)
 
 // PolicyDocument represents a structured data type
 type PolicyDocument struct {
@@ -718,8 +876,20 @@ type SavedRequest struct {
 	Limit     *uint64   `json:"limit,omitempty" yaml:"limit,omitempty"`
 }
 
-// NodeRole is a type alias
 type NodeRole string
+
+const (
+	NodeRoleCollectorIntake       NodeRole = "collector-intake"
+	NodeRoleCollectorForwarder    NodeRole = "collector-forwarder"
+	NodeRoleCompatibilityReceiver NodeRole = "compatibility-receiver"
+	NodeRoleIngestGateway         NodeRole = "ingest-gateway"
+	NodeRoleQueryCoordinator      NodeRole = "query-coordinator"
+	NodeRoleProjector             NodeRole = "projector"
+	NodeRoleWorkflowWorker        NodeRole = "workflow-worker"
+	NodeRoleReadReplica           NodeRole = "read-replica"
+	NodeRoleExportReplica         NodeRole = "export-replica"
+	NodeRoleStorageProcess        NodeRole = "storage-process"
+)
 
 // RoleTokenPolicy represents a structured data type
 type RoleTokenPolicy struct {
@@ -911,8 +1081,18 @@ type Timestamp int64
 // DurationMs is a type alias
 type DurationMs int64
 
-// TypedValueKind is a type alias
 type TypedValueKind string
+
+const (
+	TypedValueKindNull    TypedValueKind = "null"
+	TypedValueKindBool    TypedValueKind = "bool"
+	TypedValueKindInt     TypedValueKind = "int"
+	TypedValueKindUint    TypedValueKind = "uint"
+	TypedValueKindFloat   TypedValueKind = "float"
+	TypedValueKindDecimal TypedValueKind = "decimal"
+	TypedValueKindText    TypedValueKind = "text"
+	TypedValueKindBytes   TypedValueKind = "bytes"
+)
 
 // TypedValue represents a structured data type
 type TypedValue struct {
@@ -926,8 +1106,13 @@ type TypedValue struct {
 	BytesValue   *[]byte        `json:"bytes_value,omitempty" yaml:"bytes_value,omitempty"`
 }
 
-// PropertyOrigin is a type alias
 type PropertyOrigin string
+
+const (
+	PropertyOriginClient    PropertyOrigin = "client"
+	PropertyOriginDriver    PropertyOrigin = "driver"
+	PropertyOriginCollector PropertyOrigin = "collector"
+)
 
 // Property represents a structured data type
 type Property struct {
@@ -939,8 +1124,13 @@ type Property struct {
 // PropertyList is a type alias
 type PropertyList []Property
 
-// MeasurementKind is a type alias
 type MeasurementKind string
+
+const (
+	MeasurementKindFloat   MeasurementKind = "float"
+	MeasurementKindDecimal MeasurementKind = "decimal"
+	MeasurementKindInt     MeasurementKind = "int"
+)
 
 // Measurement represents a structured data type
 type Measurement struct {
@@ -955,8 +1145,13 @@ type Measurement struct {
 // MeasurementList is a type alias
 type MeasurementList []Measurement
 
-// ConsentState is a type alias
 type ConsentState string
+
+const (
+	ConsentStateGranted ConsentState = "granted"
+	ConsentStateDenied  ConsentState = "denied"
+	ConsentStateAbsent  ConsentState = "absent"
+)
 
 // Consent represents a structured data type
 type Consent struct {
@@ -965,8 +1160,26 @@ type Consent struct {
 	PolicyVersion *string      `json:"policy_version,omitempty" yaml:"policy_version,omitempty"`
 }
 
-// TelemetryKind is a type alias
 type TelemetryKind string
+
+const (
+	TelemetryKindEvent            TelemetryKind = "event"
+	TelemetryKindPageView         TelemetryKind = "page-view"
+	TelemetryKindSessionStart     TelemetryKind = "session-start"
+	TelemetryKindSessionEnd       TelemetryKind = "session-end"
+	TelemetryKindSessionHeartbeat TelemetryKind = "session-heartbeat"
+	TelemetryKindInteraction      TelemetryKind = "interaction"
+	TelemetryKindFeatureExposure  TelemetryKind = "feature-exposure"
+	TelemetryKindIdentify         TelemetryKind = "identify"
+	TelemetryKindAlias            TelemetryKind = "alias"
+	TelemetryKindGroup            TelemetryKind = "group"
+	TelemetryKindConversion       TelemetryKind = "conversion"
+	TelemetryKindError            TelemetryKind = "error"
+	TelemetryKindSpan             TelemetryKind = "span"
+	TelemetryKindMetricPoint      TelemetryKind = "metric-point"
+	TelemetryKindCampaignTouch    TelemetryKind = "campaign-touch"
+	TelemetryKindCampaignCost     TelemetryKind = "campaign-cost"
+)
 
 // Envelope represents a structured data type
 type Envelope struct {
@@ -995,8 +1208,22 @@ type Envelope struct {
 	Measurements  *MeasurementList `json:"measurements,omitempty" yaml:"measurements,omitempty"`
 }
 
-// ErrorCode is a type alias
 type ErrorCode string
+
+const (
+	ErrorCodeInvalidArgument    ErrorCode = "invalid-argument"
+	ErrorCodeUnauthenticated    ErrorCode = "unauthenticated"
+	ErrorCodePermissionDenied   ErrorCode = "permission-denied"
+	ErrorCodeNotFound           ErrorCode = "not-found"
+	ErrorCodeAlreadyExists      ErrorCode = "already-exists"
+	ErrorCodeResourceExhausted  ErrorCode = "resource-exhausted"
+	ErrorCodeFailedPrecondition ErrorCode = "failed-precondition"
+	ErrorCodeUnavailable        ErrorCode = "unavailable"
+	ErrorCodeSchemaUnsupported  ErrorCode = "schema-unsupported"
+	ErrorCodeBudgetExceeded     ErrorCode = "budget-exceeded"
+	ErrorCodeIncompleteResult   ErrorCode = "incomplete-result"
+	ErrorCodeInternal           ErrorCode = "internal"
+)
 
 // ServiceError represents a structured data type
 type ServiceError struct {

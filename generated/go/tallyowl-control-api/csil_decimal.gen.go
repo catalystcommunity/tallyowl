@@ -5,7 +5,9 @@ package tallyowlcontrolapi
 
 import (
 	"fmt"
+	"math"
 	"math/big"
+	"strconv"
 	"strings"
 )
 
@@ -28,12 +30,20 @@ func (d CsilDecimal) mantissa() *big.Int {
 	return d.Mantissa
 }
 
+// csilDecimalPlainLimit bounds the zeros String writes. A decoded exponent can be
+// any int64, and plain text for a large one needs memory in proportion to it.
+const csilDecimalPlainLimit = 1000
+
 // String renders the exact value as canonical decimal text. This is the lossless
 // bridge to other decimal libraries, e.g. shopspring.NewFromString(d.String()).
+// An exponent beyond csilDecimalPlainLimit renders as <mantissa>e<exponent>.
 func (d CsilDecimal) String() string {
 	m := d.mantissa()
 	if d.Exponent == 0 {
 		return m.String()
+	}
+	if d.Exponent > csilDecimalPlainLimit || d.Exponent < -csilDecimalPlainLimit {
+		return m.String() + "e" + strconv.FormatInt(d.Exponent, 10)
 	}
 	if d.Exponent > 0 {
 		scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(d.Exponent), nil)
@@ -55,7 +65,16 @@ func (d CsilDecimal) String() string {
 // ParseCsilDecimal parses canonical decimal text (what String produces, and what
 // shopspring.Decimal.String emits) into an exact CsilDecimal.
 func ParseCsilDecimal(s string) (CsilDecimal, error) {
+	bad := fmt.Errorf("CsilDecimal: invalid decimal string %q", s)
 	s = strings.TrimSpace(s)
+	var exp int64
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		e, err := strconv.ParseInt(s[i+1:], 10, 64)
+		if err != nil {
+			return CsilDecimal{}, bad
+		}
+		s, exp = s[:i], e
+	}
 	neg := false
 	switch {
 	case strings.HasPrefix(s, "-"):
@@ -72,14 +91,24 @@ func ParseCsilDecimal(s string) (CsilDecimal, error) {
 	if digits == "" {
 		digits = "0"
 	}
+	// big.Int.SetString also accepts a sign, which would allow a second sign here.
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return CsilDecimal{}, bad
+		}
+	}
 	m, ok := new(big.Int).SetString(digits, 10)
 	if !ok {
-		return CsilDecimal{}, fmt.Errorf("CsilDecimal: invalid decimal string %q", s)
+		return CsilDecimal{}, bad
 	}
 	if neg {
 		m.Neg(m)
 	}
-	return CsilDecimal{Exponent: -int64(len(fracPart)), Mantissa: m}, nil
+	frac := int64(len(fracPart))
+	if exp < math.MinInt64+frac {
+		return CsilDecimal{}, bad
+	}
+	return CsilDecimal{Exponent: exp - frac, Mantissa: m}, nil
 }
 
 // mustParseCsilDecimal parses a bound literal embedded at generation time. The text
@@ -93,18 +122,44 @@ func mustParseCsilDecimal(s string) CsilDecimal {
 }
 
 // Cmp returns -1, 0, or +1 as d is less than, equal to, or greater than other.
-// The comparison is exact: both values are scaled to a common exponent and their
-// integer mantissas compared, so no float rounding can flip the result.
+// The comparison is exact: no float rounding can flip the result.
 func (d CsilDecimal) Cmp(other CsilDecimal) int {
-	dm := new(big.Int).Set(d.mantissa())
-	om := new(big.Int).Set(other.mantissa())
+	dm, om := d.mantissa(), other.mantissa()
+	dSign, oSign := dm.Sign(), om.Sign()
 	switch {
-	case d.Exponent > other.Exponent:
-		scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(d.Exponent-other.Exponent), nil)
-		dm.Mul(dm, scale)
-	case other.Exponent > d.Exponent:
-		scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(other.Exponent-d.Exponent), nil)
-		om.Mul(om, scale)
+	case dSign < oSign:
+		return -1
+	case dSign > oSign:
+		return 1
+	case dSign == 0:
+		return 0
 	}
-	return dm.Cmp(om)
+	c := csilDecimalCmpAbs(dm, d.Exponent, om, other.Exponent)
+	if dSign < 0 {
+		return -c
+	}
+	return c
+}
+
+// csilDecimalCmpAbs compares |a|*10^ea with |b|*10^eb. It compares the decimal
+// orders first, so it scales a mantissa only by a digit-count difference and
+// never by an exponent difference, which a payload chooses.
+func csilDecimalCmpAbs(a *big.Int, ea int64, b *big.Int, eb int64) int {
+	aa, ab := new(big.Int).Abs(a), new(big.Int).Abs(b)
+	da, db := int64(len(aa.String())), int64(len(ab.String()))
+	// The sums are big.Int values because an int64 exponent plus a digit count can
+	// overflow.
+	oa := new(big.Int).Add(big.NewInt(da), big.NewInt(ea))
+	ob := new(big.Int).Add(big.NewInt(db), big.NewInt(eb))
+	if c := oa.Cmp(ob); c != 0 {
+		return c
+	}
+	shift := db - da
+	switch {
+	case shift > 0:
+		aa.Mul(aa, new(big.Int).Exp(big.NewInt(10), big.NewInt(shift), nil))
+	case shift < 0:
+		ab.Mul(ab, new(big.Int).Exp(big.NewInt(10), big.NewInt(-shift), nil))
+	}
+	return aa.Cmp(ab)
 }

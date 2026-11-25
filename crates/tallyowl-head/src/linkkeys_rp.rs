@@ -109,7 +109,26 @@ impl RpCaller for TcpRpCaller {
         let reply = client
             .call("Rp", op, payload, Some(self.api_key.clone()))
             .map_err(|e| format!("Rp/{op} failed: {e}"))?;
-        Ok(reply.payload)
+        reply_payload(op, reply.variant.as_deref(), reply.payload)
+    }
+}
+
+/// The reply of a call that the transport answered. From LinkKeys v0.16.11
+/// the four `Rp` operations that the head calls answer either their response or
+/// an `RpError`, which names the reason. The error is a sentence for the log.
+fn reply_payload(op: &str, variant: Option<&str>, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+    if variant != Some("RpError") {
+        return Ok(payload);
+    }
+    match liblinkkeys::generated::decode_rp_error(&payload) {
+        Ok(refusal) => Err(format!(
+            "Rp/{op} was refused ({}): {}",
+            refusal.code.as_str(),
+            refusal.message
+        )),
+        Err(e) => Err(format!(
+            "Rp/{op} was refused, and the refusal did not decode: {e}"
+        )),
     }
 }
 
@@ -137,18 +156,36 @@ impl Write for Pinned {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use liblinkkeys::generated::types::RpSignRequest;
-    use liblinkkeys::generated::{decode_rp_sign_response, encode_rp_sign_request};
+    use liblinkkeys::generated::types::{RpError, RpErrorCode, RpSignRequest};
+    use liblinkkeys::generated::{
+        decode_rp_sign_response, encode_rp_error, encode_rp_sign_request,
+    };
 
     fn sign_request() -> Vec<u8> {
         encode_rp_sign_request(&RpSignRequest {
             callback_url: "https://tallyowl.example/sign-in/callback".into(),
             nonce: "00112233445566778899aabbccddeeff".into(),
-            application_id: Some("tallyowl".into()),
             requested_claims: None,
             authentication_requirements: None,
             flow_context: None,
         })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_refusal_from_the_rp_server_names_its_reason() {
+        let refusal = encode_rp_error(&RpError {
+            code: RpErrorCode::NotApplicationAccount,
+            message: "Only an application account can sign a request.".into(),
+        })
+        .unwrap();
+        let failure = reply_payload("sign-request", Some("RpError"), refusal).unwrap_err();
+        assert!(failure.contains("not_application_account"), "{failure}");
+        assert!(failure.contains("application account"), "{failure}");
+
+        let answer = reply_payload("sign-request", Some("RpSignResponse"), vec![1, 2]).unwrap();
+        assert_eq!(answer, vec![1, 2]);
+        assert!(reply_payload("sign-request", Some("RpError"), vec![0xff]).is_err());
     }
 
     #[test]

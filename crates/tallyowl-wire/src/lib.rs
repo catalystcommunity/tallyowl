@@ -640,8 +640,12 @@ pub mod query {
     }
 
     /// A node reference: the encoded box that every nesting point carries.
+    ///
+    /// The generated encoder can fail only for a `timestamp`, `date`, or
+    /// `cddl_time` out of range, and the query algebra has none of these. So a
+    /// failure here is a defect in the generated code, not a bad query.
     pub fn node_ref(node: &QueryNodeBox) -> Vec<u8> {
-        encode_query_node_box(node)
+        encode_query_node_box(node).expect("a query node has no value that encode can refuse")
     }
 
     fn blank_expression(kind: ExpressionKind) -> ExpressionNode {
@@ -728,8 +732,10 @@ pub mod query {
 
     /// An expression reference: the encoded node that every nesting point
     /// carries.
+    ///
+    /// It cannot fail, for the reason given at [`node_ref`].
     pub fn expression_ref(node: &ExpressionNode) -> Vec<u8> {
-        encode_expression_node(node)
+        encode_expression_node(node).expect("an expression has no value that encode can refuse")
     }
 
     /// A request over the general algebra.
@@ -1212,9 +1218,10 @@ mod tests {
         // Each package carries its own copy of the shared types, so this is the
         // check that the copies still agree.
         let value = Value::Text("us-west2".into());
-        let a = tallyowl_ingest_api::codec::encode_typed_value(&ingest::write(&value));
-        let b = tallyowl_collector_api::codec::encode_typed_value(&collector::write(&value));
-        let c = tallyowl_control_api::codec::encode_typed_value(&control::write(&value));
+        let a = tallyowl_ingest_api::codec::encode_typed_value(&ingest::write(&value)).unwrap();
+        let b =
+            tallyowl_collector_api::codec::encode_typed_value(&collector::write(&value)).unwrap();
+        let c = tallyowl_control_api::codec::encode_typed_value(&control::write(&value)).unwrap();
         assert_eq!(a, b);
         assert_eq!(b, c);
     }

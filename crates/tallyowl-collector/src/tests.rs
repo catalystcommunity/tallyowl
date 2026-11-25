@@ -445,11 +445,10 @@ fn queue_one_batch(queue: &FakeQueue) {
     };
     // The queue payload is a delivery task, not a bare batch: a forwarder needs
     // the attempt count and the acceptance time that Corndogs does not hold.
-    let payload = crate::task::encode(&crate::task::seal(
-        &batch,
-        &[7; 16],
-        tallyowl_obs::time::now_ms(),
-    ));
+    let payload = crate::task::encode(
+        &crate::task::seal(&batch, &[7; 16], tallyowl_obs::time::now_ms()).unwrap(),
+    )
+    .unwrap();
     queue.submit(QUEUE, payload, 0).unwrap();
 }
 
@@ -757,9 +756,12 @@ fn a_queue_payload_from_a_newer_collector_is_quarantined_rather_than_retried() {
         },
         &[7; 16],
         tallyowl_obs::time::now_ms(),
-    );
+    )
+    .unwrap();
     task.task_version = crate::task::TASK_VERSION + 1;
-    queue.submit(QUEUE, crate::task::encode(&task), 0).unwrap();
+    queue
+        .submit(QUEUE, crate::task::encode(&task).unwrap(), 0)
+        .unwrap();
 
     let (forwarder, _) = forwarder_with(Arc::clone(&queue), Arc::clone(&head));
     assert!(forwarder.deliver_one());
@@ -925,7 +927,9 @@ fn the_oldest_waiting_age_falls_when_the_oldest_batch_is_delivered() {
             sealed_at: 1,
             compression: None,
         };
-        let payload = crate::task::encode(&crate::task::seal(&batch, &[7; 16], accepted_at));
+        let payload =
+            crate::task::encode(&crate::task::seal(&batch, &[7; 16], accepted_at).unwrap())
+                .unwrap();
         queue.submit(QUEUE, payload, 0).unwrap();
     };
     let now = tallyowl_obs::time::now_ms();
@@ -1040,11 +1044,10 @@ fn a_retried_conversion_is_claimed_before_an_ordinary_event_that_arrived_later()
             sealed_at: 1,
             compression: None,
         };
-        crate::task::encode(&crate::task::seal(
-            &batch,
-            &[7; 16],
-            tallyowl_obs::time::now_ms(),
-        ))
+        crate::task::encode(
+            &crate::task::seal(&batch, &[7; 16], tallyowl_obs::time::now_ms()).unwrap(),
+        )
+        .unwrap()
     };
     let conversion = queue.submit(QUEUE, payload_for(1), 5).unwrap();
     assert!(forwarder.deliver_one());
@@ -2087,7 +2090,8 @@ fn submit_over(
         tallyowl_collector_api::codec::encode_submit_batch_request(&batch(
             7,
             vec![item(1, "over-the-wire")],
-        )),
+        ))
+        .unwrap(),
     )
 }
 

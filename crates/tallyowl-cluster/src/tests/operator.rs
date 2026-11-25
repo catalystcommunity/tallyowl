@@ -183,7 +183,7 @@ fn describe_topology_reports_the_cell_the_tablet_and_the_nodes() {
     let response = call(
         &operator,
         "describe-topology",
-        encode_describe_topology_request(&DescribeTopologyRequest { cell: None }),
+        encode_describe_topology_request(&DescribeTopologyRequest { cell: None }).unwrap(),
     );
     let topology = decode_topology_response(&response.payload).expect("a topology");
     assert_eq!(topology.cells.len(), 1);
@@ -207,7 +207,8 @@ fn route_says_which_tablet_a_write_belongs_to_and_at_which_generation() {
         encode_route_request(&RouteRequest {
             project_id: vec![7u8; 16],
             affinity_key: b"trace-1".to_vec(),
-        }),
+        })
+        .unwrap(),
     );
     let route = decode_route_response(&response.payload).expect("a route");
     assert_eq!(route.tablet, "t1");
@@ -228,7 +229,8 @@ fn setting_local_one_on_a_multi_voter_tablet_comes_back_as_a_typed_refusal() {
         encode_set_receipt_policy_request(&SetReceiptPolicyRequest {
             tablet: "t1".into(),
             policy: "local-one".into(),
-        }),
+        })
+        .unwrap(),
     );
     let message = is_error(&response).expect("a typed refusal");
     assert!(message.contains("local-quorum"), "{message}");
@@ -253,7 +255,8 @@ fn a_policy_that_is_not_a_policy_is_refused_and_the_message_lists_the_real_ones(
         encode_set_receipt_policy_request(&SetReceiptPolicyRequest {
             tablet: "t1".into(),
             policy: "whenever".into(),
-        }),
+        })
+        .unwrap(),
     );
     let message = is_error(&response).expect("a typed refusal");
     assert!(
@@ -271,7 +274,8 @@ fn a_split_with_no_point_chooses_the_middle_and_both_children_own_shards() {
         encode_split_tablet_request(&SplitTabletRequest {
             tablet: "t1".into(),
             at_shard: None,
-        }),
+        })
+        .unwrap(),
     );
     let ack = decode_cluster_ack(&response.payload).expect("an acknowledgement");
     assert!(ack.accepted);
@@ -297,7 +301,8 @@ fn unsafe_recovery_over_the_wire_needs_the_tablet_named_twice() {
             confirm_tablet: "t2".into(),
             survivor: "storage-a".into(),
             reason: "two hosts were destroyed".into(),
-        }),
+        })
+        .unwrap(),
     );
     let message = is_error(&response).expect("a typed refusal");
     assert!(
@@ -324,7 +329,8 @@ fn unsafe_recovery_over_the_wire_leaves_one_voter_an_audit_record_and_a_degraded
             confirm_tablet: "t1".into(),
             survivor: "storage-a".into(),
             reason: "the b and c hosts were destroyed with their disks".into(),
-        }),
+        })
+        .unwrap(),
     );
     let outcome = decode_unsafe_recover_response(&response.payload).expect("an outcome");
     assert_eq!(outcome.tablet, "t1");
@@ -348,7 +354,8 @@ fn unsafe_recovery_over_the_wire_leaves_one_voter_an_audit_record_and_a_degraded
             tablet: "t1".into(),
             accepted_by: "tod".into(),
             reason: "reviewed".into(),
-        }),
+        })
+        .unwrap(),
     );
     assert!(
         decode_cluster_ack(&cleared.payload)
@@ -385,7 +392,8 @@ fn a_snapshot_holds_the_rows_and_a_restore_puts_them_back() {
         "snapshot-cluster",
         encode_cluster_snapshot_request(&ClusterSnapshotRequest {
             tablet: Some("t1".into()),
-        }),
+        })
+        .unwrap(),
     );
     assert!(is_error(&response).is_none(), "{:?}", is_error(&response));
     let taken = decode_cluster_snapshot_response(&response.payload).expect("a snapshot");
@@ -403,7 +411,8 @@ fn a_snapshot_holds_the_rows_and_a_restore_puts_them_back() {
         encode_restore_request(&RestoreRequest {
             snapshot_id: taken.snapshot_id.clone(),
             onto_tablet: Some("t1".into()),
-        }),
+        })
+        .unwrap(),
     );
     assert!(is_error(&response).is_none(), "{:?}", is_error(&response));
     let ack = decode_cluster_ack(&response.payload).expect("an acknowledgement");
@@ -436,7 +445,7 @@ fn a_restore_onto_a_node_that_holds_data_refuses_and_names_the_offline_path() {
     let response = call(
         &operator,
         "snapshot-cluster",
-        encode_cluster_snapshot_request(&ClusterSnapshotRequest { tablet: None }),
+        encode_cluster_snapshot_request(&ClusterSnapshotRequest { tablet: None }).unwrap(),
     );
     let taken = decode_cluster_snapshot_response(&response.payload).expect("a snapshot");
 
@@ -446,7 +455,8 @@ fn a_restore_onto_a_node_that_holds_data_refuses_and_names_the_offline_path() {
         encode_restore_request(&RestoreRequest {
             snapshot_id: taken.snapshot_id,
             onto_tablet: None,
-        }),
+        })
+        .unwrap(),
     );
     let message = is_error(&response).expect("a typed refusal");
     assert!(
@@ -472,7 +482,7 @@ fn a_restore_of_a_damaged_snapshot_changes_nothing_and_names_the_file() {
     let response = call(
         &source,
         "snapshot-cluster",
-        encode_cluster_snapshot_request(&ClusterSnapshotRequest { tablet: None }),
+        encode_cluster_snapshot_request(&ClusterSnapshotRequest { tablet: None }).unwrap(),
     );
     let taken = decode_cluster_snapshot_response(&response.payload).expect("a snapshot");
 
@@ -500,7 +510,8 @@ fn a_restore_of_a_damaged_snapshot_changes_nothing_and_names_the_file() {
         encode_restore_request(&RestoreRequest {
             snapshot_id: taken.snapshot_id,
             onto_tablet: Some("t1".into()),
-        }),
+        })
+        .unwrap(),
     );
     let message = is_error(&response).expect("a typed refusal");
     assert!(
@@ -536,7 +547,8 @@ fn a_project_can_be_placed_when_the_directory_is_in_process() {
         encode_assign_project_request(&AssignProjectRequest {
             project_id: vec![1u8; 16],
             cells: vec!["west-1".into()],
-        }),
+        })
+        .unwrap(),
     );
     assert!(
         decode_cluster_ack(&response.payload)
@@ -562,7 +574,8 @@ fn assigning_a_project_to_a_cell_that_does_not_exist_is_refused() {
         encode_assign_project_request(&AssignProjectRequest {
             project_id: vec![1u8; 16],
             cells: vec!["nowhere".into()],
-        }),
+        })
+        .unwrap(),
     );
     let message = is_error(&response).expect("a typed refusal");
     assert!(message.contains("Register the cell"), "{message}");
@@ -606,7 +619,8 @@ fn a_split_or_a_move_is_refused_where_tablets_run_as_groups() {
         encode_split_tablet_request(&SplitTabletRequest {
             tablet: "t1".into(),
             at_shard: None,
-        }),
+        })
+        .unwrap(),
     );
     let message = is_error(&split).expect("a typed refusal");
     assert!(message.contains("not built yet"), "{message}");
@@ -619,7 +633,8 @@ fn a_split_or_a_move_is_refused_where_tablets_run_as_groups() {
             tablet: "t1".into(),
             away_from: "storage-a".into(),
             onto: "storage-b".into(),
-        }),
+        })
+        .unwrap(),
     );
     let message = is_error(&moved).expect("a typed refusal");
     assert!(message.contains("add-replica"), "{message}");

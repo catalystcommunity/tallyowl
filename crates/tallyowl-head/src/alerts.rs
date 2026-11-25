@@ -229,7 +229,8 @@ impl AlertService {
             .put_alert_rule(&AlertRuleRecord {
                 rule_id: rule.rule_id.clone(),
                 project_id,
-                encoded: encode_alert_rule(&stored),
+                encoded: encode_alert_rule(&stored)
+                    .map_err(|e| TallyOwlError::unencodable("The alert rule", e))?,
                 updated_at: now,
                 updated_by: by.to_string(),
             })
@@ -511,7 +512,7 @@ pub fn decide(
         },
         AlertOutcome::Value => match (&rule.threshold, evaluation.value) {
             (Some(threshold), Some(value)) => {
-                match crosses(threshold.compare.clone(), value, threshold.value) {
+                match crosses(threshold.compare, value, threshold.value) {
                     true => AlertState::Firing,
                     false => AlertState::Ok,
                 }
@@ -846,8 +847,8 @@ fn decode_rule(record: &AlertRuleRecord) -> Result<AlertRule, TallyOwlError> {
 }
 
 /// The encoded form of one rule's query, for a task payload.
-pub fn encoded_query(rule: &AlertRule) -> Vec<u8> {
-    encode_query_request(&rule.query)
+pub fn encoded_query(rule: &AlertRule) -> Result<Vec<u8>, TallyOwlError> {
+    encode_query_request(&rule.query).map_err(|e| TallyOwlError::unencodable("The rule's query", e))
 }
 
 /// A target as a person would read it in the operator interface.

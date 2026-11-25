@@ -7109,3 +7109,172 @@ RUSTSEC-2026-0119 (hickory-proto 0.24) is removed from `.cargo/audit.toml`.
 **Cost to change:** cheap.
 **Revisit:** when most LinkKeys domains run v0.16.7 or later, the head can
 accept a callback outside the RP domain.
+
+## L200. csilgen 0.2.15, a time zone for each person, and days on the dashboard
+
+**Phase:** after 0.4.0
+**Decision:** on 2026-11-22:
+
+- The csilgen pin moved from 0.2.9 to 0.2.15 (`CSILGEN_VERSION` and
+  `GENERATOR_VERSION` in `deps.py`). The Rust and Go transport pins moved to
+  the `csilgen/v0.2.15` commit (`9690ed8`). The transports did not change
+  between the two commits. The SHA-256 pins of the csilgen assets are the
+  digests that GitHub records for the release.
+- A person stores a display clock: `browser`, `utc`, or `zone` with an IANA
+  name (`UserPreferences`, wire IDs 32 and 33). The catalog key is
+  `identity/preferences/<hex of the subject>`.
+- The dashboard has a date range picker. A range of four days or less draws by
+  hour, on the clock of the page. A longer range draws by UTC day, and its
+  days are UTC days.
+
+**Why the contract has no `date`.** csilgen 0.2.14 added `date`, a calendar
+day. The contract has no field that is a calendar day. Every instant is
+`Timestamp = int`, milliseconds in UTC. The day-like values are result
+columns: a retention `cohort_start` and a calendar `bucket`. The owner decided
+on 2026-11-22 that these stay integer instants, because an integer is faster
+to group and compare, and that nothing is stored in local time.
+`CampaignCostPayload.period_start` and `period_end` stay instants, because an
+ad platform reports spend in the time zone of its account.
+
+**Why a day bar is a UTC day.** The same owner decision: each bucket is UTC. The
+dashboard asks for a fixed 24-hour interval, which starts at a UTC midnight.
+If the days of a long range were days on a local clock, the first and the last
+bar would hold a part of a day, and the axis would start on the day before the
+first selected day.
+
+**Open, decided in L202.** A calendar `day`, `week`, or `month` bucket with
+`TimeRange.timezone` still starts at local midnight in the query engine
+(`calendar.rs`). That is a UTC instant, but it is aligned to a local day. The
+dashboard does not use it.
+
+**Why the preference is on the account.** The person asked for a setting that
+follows them. The record is keyed by the subject, so a session that ends does
+not lose it. An operator session (`session create <name>`) and a LinkKeys
+sign-in of the same person are two subjects, so they have two records.
+
+**Formatting the generated Rust.** Some lines of the 0.2.15 Rust output are
+not in rustfmt style. `./tools.sh fmt` formatted them, and `gen-check` then
+failed. `generate.py` writes `generated/rust/rustfmt.toml`
+(`disable_all_formatting = true`) with the generated code, so that the drift
+check sees the file too.
+
+**Audit.** `url` moved to 2.5.9 for RUSTSEC-2026-0592. The advisory was on
+`main` before this change.
+
+**Cost to change:** cheap. The preference is display only.
+
+
+## L201. The release job names the unreleased notes
+
+**Phase:** after 0.4.1
+**Decision:** on 2026-11-22, `release stamp` changes the first
+`## Not released yet` heading of `docs/RELEASE_NOTES.md` to
+`## <version> — <UTC date>` (`stamp_release_notes` in `release.py`). The
+release commit carries it. A release with no such section gets a heading that
+says no notes were written.
+
+**Why.** The heading said "Not released yet — changes after 0.4.0". The 0.4.1
+release did not change it, so the notes of 0.4.1 read as unreleased, and the
+next changes went into the same section. The heading now names no version,
+because the release job computes the version from the commits.
+
+**Cost to change:** cheap.
+
+
+## L202. csilgen 0.3.0, UTC days on the dashboard, and whose timezone a query uses
+
+**Phase:** after 0.4.1
+**Decision:** on 2026-11-23:
+
+- The csilgen pin moved from 0.2.15 to 0.3.0. The Rust and Go transport pins
+  moved to the `csilgen/v0.3.0` commit (`cdaf912`). The transports did not
+  change between the two commits.
+- Each generated Rust `encode_*` function now returns
+  `Result<Vec<u8>, CsilCborError>`, and each Go `Encode*` function returns
+  `([]byte, error)`. `tallyowl_rpc::reply` and `error_outcome` take bytes or
+  an encoder result (`ReplyPayload`). A result that is an error becomes
+  transport status 6 (`Internal`), and the server continues. A client path
+  that returns `TallyOwlError` maps the error with
+  `TallyOwlError::unencodable`. The collector forwarder quarantines a task
+  whose commit request it cannot encode, as it does for a task that it cannot
+  decode. A builder that has no error path (`node_ref`, `expression_ref`, the
+  starter panels, a sealed driver batch) uses `expect` and says why it cannot
+  fail.
+- A chosen day on the dashboard is a UTC day for every range length. The
+  picker has `time-zone="UTC"`, and its label says "(UTC)".
+- The owner decided that a timezone for calendar buckets belongs to the
+  question (a saved analysis or a project report), and never to the viewer.
+  The query engine keeps its calendar intervals. `docs/QUERY.md` section 8
+  says so.
+
+**Why the encoders cannot fail here.** A 0.3.0 encoder refuses a `timestamp`,
+`date`, or `cddl_time` outside the years 0001 to 9999, a Go text enum that is
+empty, and a value that refers to itself. The TallyOwl contracts have
+`Timestamp = int` and no `date`, `cddl_time`, or `any`. The Go code sets each
+enum field. So the new error paths are for a defect in the generated code, and
+no request or reply changes on the wire. The golden vectors did not change.
+
+**Why UTC days for short ranges too.** Before, a range of four days or less
+used the days on the clock of the page. Two people in zones three hours apart
+who chose the same days then asked for ranges that started three hours apart,
+and their totals could differ. With UTC days, they ask for the same instants.
+
+**Why the viewer's zone never picks the buckets.** Calendar days on a local
+clock answer a real question ("sales on Black Friday in the shop's zone"). But
+if each viewer's clock chose the boundaries, two people would read different
+counts for the same day of the same analysis. A zone that the question names
+gives the same answer to each person.
+
+**Generated Rust enums are `Copy`.** clippy then refused `.clone()` on
+`NodeRole` and `MemberRole`. `cargo clippy --fix` removed those calls.
+
+**Cost to change:** cheap.
+
+## L203. csilgen 0.3.1, then 0.3.3
+
+**Phase:** after 0.4.1
+**Decision:** on 2026-11-23, the csilgen pin moved from 0.3.0 to 0.3.1. The
+Rust and Go transport pins moved to the `csilgen/v0.3.1` commit (`09f35b0`).
+The transports did not change between `cdaf912` and `09f35b0`.
+
+- The Rust and Go output compiled with no change to handwritten code.
+- In TypeScript, csilgen generates the rule `ServiceError` as
+  `ServiceErrorType`, because the old name clashed with a name in the
+  generated code. The wire name is still `ServiceError`. The browser
+  package, the dashboard, and their tests now use `ServiceErrorType`,
+  `toServiceErrorTypeCbor`, and `fromServiceErrorTypeCbor`. `./tools.sh gen`
+  prints a warning for each renamed rule. We keep the CSIL name, because a
+  rename in the contract changes the generated names in each language.
+
+**Cost to change:** cheap.
+
+## L204. csilgen 0.3.3 and LinkKeys v0.16.11
+
+**Phase:** after 0.4.1
+**Decision:** on 2026-11-25:
+
+- The csilgen pin moved from 0.3.1 to 0.3.3 (`73ba5ac`). The transports did
+  not change. The generated Rust, Go, and TypeScript needed no handwritten
+  change.
+- The three LinkKeys crates moved from v0.16.7 (`3227a58`) to v0.16.11
+  (`e7cfb3d`).
+  - `Rp/sign-request` has no `application_id`. The RP server takes the
+    application from the calling account, which must be an application
+    account. `APPLICATION_ID` stays as the ID that DEPLOYMENT.md tells an
+    operator to give that account.
+  - The `Rp` operations answer `RpError` as a typed reply. `TcpRpCaller`
+    decodes it and gives its code and message to the log.
+  - LinkKeys timestamps are `time::OffsetDateTime`, not RFC 3339 text.
+    `check_assertion` compares the times directly. The test case for an
+    unreadable time is gone, because such a time cannot decode.
+  - A stored local-RP identity bundle of an earlier release does not decode.
+    `resign_stored_identity` takes the two private keys out of the bundle and
+    signs a new descriptor with them.
+
+**Why sign the identity again.** A new identity has a new fingerprint, and
+each domain approved the old fingerprint. LinkKeys reads no older format
+("re-sign, do not accept old formats"). The keys are this installation's, so a
+new signature with them is not a trust change. The original creation time is
+lost; the new descriptor runs ten years from the upgrade.
+
+**Cost to change:** cheap.

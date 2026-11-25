@@ -31,7 +31,7 @@ class SwitchableHost implements Router {
     if (this.refuseWith !== undefined) {
       return {
         variant: "ServiceError",
-        payload: ingest.toServiceErrorCbor(this.refuseWith as never),
+        payload: ingest.toServiceErrorTypeCbor(this.refuseWith as never),
       };
     }
     const decoded = ingest.fromCaptureRequestCbor(payload);

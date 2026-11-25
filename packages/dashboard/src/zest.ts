@@ -19,6 +19,7 @@ import { CheckBox } from "@catalystcommunity/controls/src/check.js";
 import { ComboBox } from "@catalystcommunity/controls/src/combo.js";
 import { TextField } from "@catalystcommunity/controls/src/text.js";
 import { TableView } from "@catalystcommunity/data-views/src/table-view.js";
+import { DateTimePicker } from "@catalystcommunity/date-time-picker";
 
 export function defineDashboardElements(): void {
   defineElements({
@@ -30,5 +31,6 @@ export function defineDashboardElements(): void {
     "status-bar": StatusBar,
     "status-pane": StatusPane,
     "table-view": TableView,
+    "date-time-picker": DateTimePicker,
   });
 }

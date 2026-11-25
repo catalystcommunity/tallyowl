@@ -2462,6 +2462,66 @@ impl Catalog {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Preferences of one person
+//
+// One record for each subject. The key holds the subject as hexadecimal,
+// because a subject is text that a person or a domain chose, and a solidus in
+// it must not make a second level of the key.
+// ---------------------------------------------------------------------------
+
+const PREFERENCES_PREFIX: &str = "identity/preferences/";
+
+/// How one person wants the dashboard to show data. Display only: no stored
+/// fact and no query uses it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreferencesRecord {
+    /// `browser`, `utc`, or `zone`.
+    pub time_display: String,
+    pub time_zone: Option<String>,
+    pub updated_at: i64,
+}
+
+fn preferences_key(subject: &str) -> String {
+    format!("{PREFERENCES_PREFIX}{}", hex(subject.as_bytes()))
+}
+
+impl Catalog {
+    /// Replace the preferences of one subject.
+    pub fn put_preferences(
+        &self,
+        subject: &str,
+        preferences: &PreferencesRecord,
+    ) -> Result<(), CatalogError> {
+        let mut map = MapBuilder::new()
+            .put("time_display", Value::text(&preferences.time_display))
+            .put("updated", Value::integer(preferences.updated_at));
+        if let Some(zone) = &preferences.time_zone {
+            map = map.put("time_zone", Value::text(zone));
+        }
+        self.write_durable(&[(preferences_key(subject), cbor::encode(&map.build()))])
+    }
+
+    /// The preferences of one subject, or nothing when they never set them.
+    pub fn preferences(&self, subject: &str) -> Result<Option<PreferencesRecord>, CatalogError> {
+        let Some(bytes) = self.read(&preferences_key(subject))? else {
+            return Ok(None);
+        };
+        let value = decode(&bytes)?;
+        Ok(Some(PreferencesRecord {
+            time_display: text(&value, "time_display"),
+            time_zone: value
+                .field("time_zone")
+                .and_then(Value::as_text)
+                .map(str::to_owned),
+            updated_at: value
+                .field("updated")
+                .and_then(Value::as_integer)
+                .unwrap_or(0),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tenancy_tests {
     use super::*;
@@ -2487,6 +2547,28 @@ mod tenancy_tests {
             at,
             ..NotificationRecord::default()
         }
+    }
+
+    #[test]
+    fn each_person_reads_only_their_own_preferences() {
+        let catalog = catalog("preferences");
+        assert_eq!(catalog.preferences("ada@id.example").unwrap(), None);
+        let berlin = PreferencesRecord {
+            time_display: "zone".into(),
+            time_zone: Some("Europe/Berlin".into()),
+            updated_at: 7,
+        };
+        catalog.put_preferences("ada@id.example", &berlin).unwrap();
+        // A subject with a solidus is one key, not a prefix of another.
+        let utc = PreferencesRecord {
+            time_display: "utc".into(),
+            time_zone: None,
+            updated_at: 8,
+        };
+        catalog.put_preferences("ada@id.example/x", &utc).unwrap();
+        assert_eq!(catalog.preferences("ada@id.example").unwrap(), Some(berlin));
+        assert_eq!(catalog.preferences("ada@id.example/x").unwrap(), Some(utc));
+        assert_eq!(catalog.preferences("grace@id.example").unwrap(), None);
     }
 
     #[test]

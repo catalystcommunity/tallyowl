@@ -1,6 +1,6 @@
 //! Generated types from CSIL specification
 
-#![allow(non_camel_case_types, clippy::large_enum_variant)]
+#![allow(clippy::large_enum_variant)]
 
 /// Exact base-10 decimal carried on the wire as a CBOR tag-4 decimal fraction:
 /// the two-element array `[exponent, mantissa]`, value = mantissa * 10^exponent.
@@ -70,7 +70,10 @@ impl CsilDecimal {
     /// value lands in the decade `[10^(w-1), 10^w)` for `w = digits + exponent`, so
     /// differing weights settle the order outright and equal weights reduce to a
     /// trailing-zero-padded digit-string compare.
-    fn cmp_magnitude(mut ma: u128, mut ea: i64, mut mb: u128, mut eb: i64) -> std::cmp::Ordering {
+    fn cmp_magnitude(mut ma: u128, ea: i64, mut mb: u128, eb: i64) -> std::cmp::Ordering {
+        // The weights are summed in i128 so an exponent near `i64::MAX` from a
+        // payload cannot overflow.
+        let (mut ea, mut eb) = (i128::from(ea), i128::from(eb));
         while ma.is_multiple_of(10) {
             ma /= 10;
             ea += 1;
@@ -81,8 +84,8 @@ impl CsilDecimal {
         }
         let digits_a = ma.to_string();
         let digits_b = mb.to_string();
-        let weight_a = digits_a.len() as i64 + ea;
-        let weight_b = digits_b.len() as i64 + eb;
+        let weight_a = digits_a.len() as i128 + ea;
+        let weight_b = digits_b.len() as i128 + eb;
         if weight_a != weight_b {
             return weight_a.cmp(&weight_b);
         }
@@ -112,22 +115,22 @@ impl CsilDecimal {
     }
 
     /// Canonical decimal string for the exact value: `(-2, 12345)` renders as
-    /// `123.45`. Round-trips through `from_str` by value.
+    /// `123.45`. Round-trips through `from_str` by value. An exponent outside
+    /// -1000..=1000 renders as `<mantissa>e<exponent>` (the Go target uses the
+    /// same rule), because a payload can carry an exponent near `i64::MAX` and
+    /// padding it out with zeros would exhaust memory.
     pub fn as_str(&self) -> String {
         let digits = self.mantissa.unsigned_abs().to_string();
-        let body = if self.exponent >= 0 {
-            let mut out = digits;
-            out.push_str(&"0".repeat(self.exponent as usize));
-            out
+        let scale = usize::try_from(self.exponent.unsigned_abs()).unwrap_or(usize::MAX);
+        let body = if !(-1000..=1000).contains(&self.exponent) {
+            format!("{digits}e{}", self.exponent)
+        } else if self.exponent >= 0 {
+            format!("{digits}{}", "0".repeat(scale))
+        } else if scale < digits.len() {
+            let (whole, fraction) = digits.split_at(digits.len() - scale);
+            format!("{whole}.{fraction}")
         } else {
-            let scale = (-self.exponent) as usize;
-            if digits.len() > scale {
-                let point = digits.len() - scale;
-                format!("{}.{}", &digits[..point], &digits[point..])
-            } else {
-                let pad = "0".repeat(scale - digits.len());
-                format!("0.{pad}{digits}")
-            }
+            format!("0.{}{digits}", "0".repeat(scale - digits.len()))
         };
         if self.mantissa < 0 {
             format!("-{body}")
@@ -136,12 +139,21 @@ impl CsilDecimal {
         }
     }
 
-    /// Parse a decimal string into the exact `(exponent, mantissa)` pair.
+    /// Parse a decimal string (`123.45`, or `12345e-2`) into the exact
+    /// `(exponent, mantissa)` pair.
     pub fn from_str(s: &str) -> Result<Self, String> {
         let t = s.trim();
         let (negative, rest) = match t.strip_prefix('-') {
             Some(r) => (true, r),
             None => (false, t.strip_prefix('+').unwrap_or(t)),
+        };
+        let (rest, power) = match rest.split_once(['e', 'E']) {
+            Some((m, e)) => (
+                m,
+                e.parse::<i64>()
+                    .map_err(|_| format!("invalid decimal: {s}"))?,
+            ),
+            None => (rest, 0),
         };
         let (int_part, frac_part) = match rest.split_once('.') {
             Some((i, f)) => (i, f),
@@ -160,10 +172,11 @@ impl CsilDecimal {
             .parse()
             .map_err(|e| format!("decimal out of range: {e}"))?;
         let mantissa = if negative { -magnitude } else { magnitude };
-        Ok(Self {
-            exponent: -(frac_part.len() as i64),
-            mantissa,
-        })
+        let exponent = i64::try_from(frac_part.len())
+            .ok()
+            .and_then(|n| power.checked_sub(n))
+            .ok_or_else(|| format!("decimal out of range: {s}"))?;
+        Ok(Self { exponent, mantissa })
     }
 }
 
@@ -210,7 +223,7 @@ pub type Generation = u64;
 pub type Epoch = u64;
 
 /// GroupKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GroupKind {
     GlobalDirectory,
     CellController,
@@ -240,7 +253,7 @@ impl GroupRef {
 }
 
 /// MemberRole variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemberRole {
     Voter,
     Learner,
@@ -273,7 +286,7 @@ impl GroupMember {
 }
 
 /// ConsensusKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConsensusKind {
     AppendEntries,
     Vote,
@@ -532,7 +545,7 @@ impl SegmentTransfer {
 }
 
 /// PartialKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PartialKind {
     Count,
     Trend,
@@ -676,7 +689,7 @@ impl MissingRange {
 }
 
 /// SlowCause variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SlowCause {
     StorageErrors,
     StorageSaturated,
@@ -707,7 +720,7 @@ pub struct NodeHealthReport {
 }
 
 /// NodeState variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeState {
     Healthy,
     Slow,
@@ -748,7 +761,7 @@ impl NodeCondition {
 }
 
 /// TabletState variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TabletState {
     Active,
     Splitting,
@@ -1200,7 +1213,7 @@ pub type Timestamp = i64;
 pub type DurationMs = i64;
 
 /// TypedValueKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypedValueKind {
     Null,
     Bool,
@@ -1225,7 +1238,7 @@ pub struct TypedValue {
 }
 
 /// PropertyOrigin variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PropertyOrigin {
     Client,
     Driver,
@@ -1259,7 +1272,7 @@ impl Property {
 pub type PropertyList = Vec<Property>;
 
 /// MeasurementKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MeasurementKind {
     Float,
     Decimal,
@@ -1305,7 +1318,7 @@ impl Measurement {
 pub type MeasurementList = Vec<Measurement>;
 
 /// ConsentState variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConsentState {
     Granted,
     Denied,
@@ -1336,7 +1349,7 @@ impl Consent {
 }
 
 /// TelemetryKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TelemetryKind {
     Event,
     PageView,
@@ -1456,7 +1469,7 @@ impl Envelope {
 }
 
 /// ErrorCode variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     InvalidArgument,
     Unauthenticated,

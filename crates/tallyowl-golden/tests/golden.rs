@@ -147,8 +147,8 @@ fn the_three_packages_encode_one_envelope_identically() {
     };
 
     assert_eq!(
-        tallyowl_collector_api::codec::encode_envelope(&collector),
-        tallyowl_ingest_api::codec::encode_envelope(&ingest),
+        tallyowl_collector_api::codec::encode_envelope(&collector).unwrap(),
+        tallyowl_ingest_api::codec::encode_envelope(&ingest).unwrap(),
     );
 }
 
@@ -162,7 +162,7 @@ fn every_vector_decodes_back_to_the_value_it_came_from() {
             let decoded = cc::decode_typed_value(&vector.bytes)
                 .unwrap_or_else(|e| panic!("`{}` did not decode: {e}", vector.name));
             assert_eq!(
-                cc::encode_typed_value(&decoded),
+                cc::encode_typed_value(&decoded).unwrap(),
                 vector.bytes,
                 "`{}` did not encode back to itself",
                 vector.name

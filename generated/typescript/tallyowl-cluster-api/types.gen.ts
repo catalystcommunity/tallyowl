@@ -2,6 +2,11 @@
 // Source: <csil spec>
 // Target: typescript-typesonly
 
+export interface ServiceError {
+  code: number;
+  message: string;
+}
+
 /**
  * An exact base-10 decimal, carried on the wire as a CBOR tag-4 decimal
  * fraction `[exponent, mantissa]` (value = `mantissa * 10 ** exponent`).
@@ -15,10 +20,13 @@ export class CsilDecimal {
   /** CBOR semantic tag for a decimal fraction. */
   static readonly CBOR_TAG = 4;
 
-  constructor(
-    readonly exponent: number,
-    readonly mantissa: bigint,
-  ) {}
+  readonly exponent: number;
+  readonly mantissa: bigint;
+
+  constructor(exponent: number, mantissa: bigint) {
+    this.exponent = exponent;
+    this.mantissa = mantissa;
+  }
 
   /** Reconstruct from the CBOR tag-4 payload `[exponent, mantissa]`. */
   static fromTag4(payload: readonly [number | bigint, number | bigint]): CsilDecimal {
@@ -113,6 +121,11 @@ export type Generation = number;
  */
 export type Epoch = number;
 
+export const GroupKind = {
+  GLOBAL_DIRECTORY: "global-directory",
+  CELL_CONTROLLER: "cell-controller",
+  TABLET: "tablet",
+} as const;
 export type GroupKind = "global-directory" | "cell-controller" | "tablet";
 
 /**
@@ -124,6 +137,10 @@ export interface GroupRef {
   name?: string;
 }
 
+export const MemberRole = {
+  VOTER: "voter",
+  LEARNER: "learner",
+} as const;
 export type MemberRole = "voter" | "learner";
 
 /**
@@ -137,6 +154,12 @@ export interface GroupMember {
   domain?: DomainName;
 }
 
+export const ConsensusKind = {
+  APPEND_ENTRIES: "append-entries",
+  VOTE: "vote",
+  INSTALL_SNAPSHOT: "install-snapshot",
+  PROPOSAL: "proposal",
+} as const;
 /**
  * One consensus message for one group.
  * 
@@ -241,6 +264,13 @@ export interface SegmentTransfer {
   wholeDigest?: Uint8Array;
 }
 
+export const PartialKind = {
+  COUNT: "count",
+  TREND: "trend",
+  ROWS: "rows",
+  LOOKUP: "lookup",
+  AGGREGATE: "aggregate",
+} as const;
 export type PartialKind = "count" | "trend" | "rows" | "lookup" | "aggregate";
 
 export interface PartialQueryRequest {
@@ -291,6 +321,16 @@ export interface MissingRange {
   rangeEnd: Timestamp;
 }
 
+export const SlowCause = {
+  STORAGE_ERRORS: "storage-errors",
+  STORAGE_SATURATED: "storage-saturated",
+  STORAGE_SLOW: "storage-slow",
+  WRITE_VOLUME: "write-volume",
+  COMPACTION_PRESSURE: "compaction-pressure",
+  MEMORY_PRESSURE: "memory-pressure",
+  NETWORK_LATENCY: "network-latency",
+  UNKNOWN: "unknown",
+} as const;
 /**
  * The most specific cause the node could establish. `unknown` is a valid
  * answer and is reported as one: a guessed cause sends an operator down a
@@ -320,6 +360,13 @@ export interface NodeHealthReport {
   freeBytes: number;
 }
 
+export const NodeState = {
+  HEALTHY: "healthy",
+  SLOW: "slow",
+  UNREACHABLE: "unreachable",
+  READ_ONLY: "read-only",
+  DRAINING: "draining",
+} as const;
 export type NodeState = "healthy" | "slow" | "unreachable" | "read-only" | "draining";
 
 /**
@@ -340,6 +387,14 @@ export interface NodeCondition {
   actionTaken?: string;
 }
 
+export const TabletState = {
+  ACTIVE: "active",
+  SPLITTING: "splitting",
+  MERGING: "merging",
+  MOVING: "moving",
+  DRAINING: "draining",
+  RETIRED: "retired",
+} as const;
 export type TabletState = "active" | "splitting" | "merging" | "moving" | "draining" | "retired";
 
 /**
@@ -572,6 +627,16 @@ export type Timestamp = number;
 
 export type DurationMs = number;
 
+export const TypedValueKind = {
+  NULL: "null",
+  BOOL: "bool",
+  INT: "int",
+  UINT: "uint",
+  FLOAT: "float",
+  DECIMAL: "decimal",
+  TEXT: "text",
+  BYTES: "bytes",
+} as const;
 export type TypedValueKind = "null" | "bool" | "int" | "uint" | "float" | "decimal" | "text" | "bytes";
 
 /**
@@ -590,6 +655,11 @@ export interface TypedValue {
   bytesValue?: Uint8Array;
 }
 
+export const PropertyOrigin = {
+  CLIENT: "client",
+  DRIVER: "driver",
+  COLLECTOR: "collector",
+} as const;
 /**
  * Where a property came from. An operator can trust a `collector` origin,
  * because the collector stamps it from its own configuration and refuses a
@@ -605,6 +675,11 @@ export interface Property {
 
 export type PropertyList = Property[];
 
+export const MeasurementKind = {
+  FLOAT: "float",
+  DECIMAL: "decimal",
+  INT: "int",
+} as const;
 /**
  * A measure is a number, so its kinds are the three numeric ones. It carries
  * its own discriminant for the same reason `TypedValue` does.
@@ -626,6 +701,11 @@ export interface Measurement {
 
 export type MeasurementList = Measurement[];
 
+export const ConsentState = {
+  GRANTED: "granted",
+  DENIED: "denied",
+  ABSENT: "absent",
+} as const;
 export type ConsentState = "granted" | "denied" | "absent";
 
 export interface Consent {
@@ -634,6 +714,24 @@ export interface Consent {
   policyVersion?: string;
 }
 
+export const TelemetryKind = {
+  EVENT: "event",
+  PAGE_VIEW: "page-view",
+  SESSION_START: "session-start",
+  SESSION_END: "session-end",
+  SESSION_HEARTBEAT: "session-heartbeat",
+  INTERACTION: "interaction",
+  FEATURE_EXPOSURE: "feature-exposure",
+  IDENTIFY: "identify",
+  ALIAS: "alias",
+  GROUP: "group",
+  CONVERSION: "conversion",
+  ERROR: "error",
+  SPAN: "span",
+  METRIC_POINT: "metric-point",
+  CAMPAIGN_TOUCH: "campaign-touch",
+  CAMPAIGN_COST: "campaign-cost",
+} as const;
 export type TelemetryKind = "event" | "page-view" | "session-start" | "session-end" | "session-heartbeat" | "interaction" | "feature-exposure" | "identify" | "alias" | "group" | "conversion" | "error" | "span" | "metric-point" | "campaign-touch" | "campaign-cost";
 
 export interface Envelope {
@@ -662,9 +760,23 @@ export interface Envelope {
   measurements?: MeasurementList;
 }
 
+export const ErrorCode = {
+  INVALID_ARGUMENT: "invalid-argument",
+  UNAUTHENTICATED: "unauthenticated",
+  PERMISSION_DENIED: "permission-denied",
+  NOT_FOUND: "not-found",
+  ALREADY_EXISTS: "already-exists",
+  RESOURCE_EXHAUSTED: "resource-exhausted",
+  FAILED_PRECONDITION: "failed-precondition",
+  UNAVAILABLE: "unavailable",
+  SCHEMA_UNSUPPORTED: "schema-unsupported",
+  BUDGET_EXCEEDED: "budget-exceeded",
+  INCOMPLETE_RESULT: "incomplete-result",
+  INTERNAL: "internal",
+} as const;
 export type ErrorCode = "invalid-argument" | "unauthenticated" | "permission-denied" | "not-found" | "already-exists" | "resource-exhausted" | "failed-precondition" | "unavailable" | "schema-unsupported" | "budget-exceeded" | "incomplete-result" | "internal";
 
-export interface ServiceError {
+export interface ServiceErrorType {
   code: ErrorCode;
   message: string;
   retryable: boolean;

@@ -71,7 +71,7 @@ tallyowl-cluster-api = { path = "generated/rust/tallyowl-cluster-api", version =
 # The CSIL transport family reference implementation, from the csilgen project.
 # Pinned by revision, because csilgen does not yet publish releases for it.
 # See docs/CI-CD.md section 2.
-csilgen-transport = { git = "https://github.com/catalystcommunity/csilgen", rev = "baec1dad191c4ccd522772b5172ee12ba5bf3f6c" }
+csilgen-transport = { git = "https://github.com/catalystcommunity/csilgen", rev = "73ba5ac55f74608c73da6320693efc8e2b7239ca" }
 
 # The LinkKeys relying-party SDK. LinkKeys owns human authentication and
 # TallyOwl owns the resulting session and authorization; see D7.
@@ -81,13 +81,13 @@ csilgen-transport = { git = "https://github.com/catalystcommunity/csilgen", rev 
 # the checkout, so a Git dependency reaches it exactly as it reaches
 # `csilgen-transport`, which is the same shape. Pinned by revision for the same
 # reason: LinkKeys does not publish it.
-linkkeys-local-rp = { git = "https://github.com/catalystcommunity/linkkeys", rev = "3227a58c78a795a876b86258793375df291d3dcd" }
+linkkeys-local-rp = { git = "https://github.com/catalystcommunity/linkkeys", rev = "e7cfb3d61d89d324d60cc16f4ca82ba6d34be86e" }
 # The domain-backed relying party, which D7 makes the default, has no packaged
 # Rust SDK. The head calls the RP server itself with the protocol types of
 # `liblinkkeys` and the pinned TLS configuration of `linkkeys-rpc-client`. Both
 # are in the same checkout at the same revision as the SDK above.
-liblinkkeys = { git = "https://github.com/catalystcommunity/linkkeys", rev = "3227a58c78a795a876b86258793375df291d3dcd" }
-linkkeys-rpc-client = { git = "https://github.com/catalystcommunity/linkkeys", rev = "3227a58c78a795a876b86258793375df291d3dcd" }
+liblinkkeys = { git = "https://github.com/catalystcommunity/linkkeys", rev = "e7cfb3d61d89d324d60cc16f4ca82ba6d34be86e" }
+linkkeys-rpc-client = { git = "https://github.com/catalystcommunity/linkkeys", rev = "e7cfb3d61d89d324d60cc16f4ca82ba6d34be86e" }
 # The browser address of a domain-backed sign-in carries a username hint.
 url = "2"
 # The SDK speaks in `DateTime<Utc>`, so the head does too at that boundary.
@@ -144,6 +144,9 @@ x509-parser = "0.16"
 # boundary where a time is not milliseconds since the epoch; CONVENTIONS.md
 # holds everywhere else.
 time = { version = "0.3", default-features = false, features = ["std"] }
+# The same versions LinkKeys uses. Only `tallyowl-head` needs them directly.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 
 # Consensus, per D15 and D27. openraft 0.9 was measured against election,
 # partition, rejoin, membership change, snapshot, large batches, and the

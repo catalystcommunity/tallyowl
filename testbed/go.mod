@@ -6,7 +6,7 @@ require (
 	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api v0.4.1
 	github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-ingest-api v0.4.1
 	github.com/CatalystCommunity/tallyowl/packages/driver-go v0.4.1
-	github.com/catalystcommunity/csilgen/transports/go v0.0.0-20260926220402-baec1dad191c
+	github.com/catalystcommunity/csilgen/transports/go v0.0.0-20261125171933-73ba5ac55f74
 )
 
 replace github.com/CatalystCommunity/tallyowl/generated/go/tallyowl-collector-api => ../generated/go/tallyowl-collector-api

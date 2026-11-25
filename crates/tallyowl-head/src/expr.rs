@@ -348,7 +348,7 @@ fn build(node: &ExpressionNode, depth: u32, max_depth: u32) -> Result<Node, Tall
             Ok(Node::Field(Field {
                 name: field.name.clone(),
                 value_type: field.value_type.clone(),
-                origin: field.origin.clone(),
+                origin: field.origin,
             }))
         }
         ExpressionKind::Compare => {
@@ -357,7 +357,7 @@ fn build(node: &ExpressionNode, depth: u32, max_depth: u32) -> Result<Node, Tall
                 .as_ref()
                 .ok_or_else(|| missing("a comparison"))?;
             Ok(Node::Compare(
-                compare.compare.clone(),
+                compare.compare,
                 Box::new(child(&compare.left)?),
                 Box::new(child(&compare.right)?),
             ))
@@ -430,7 +430,7 @@ fn build(node: &ExpressionNode, depth: u32, max_depth: u32) -> Result<Node, Tall
                 .iter()
                 .map(|operand| child(operand))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Node::Logical(logical.logical.clone(), operands))
+            Ok(Node::Logical(logical.logical, operands))
         }
         ExpressionKind::Arith => {
             let arith: &ArithExpr = node
@@ -438,7 +438,7 @@ fn build(node: &ExpressionNode, depth: u32, max_depth: u32) -> Result<Node, Tall
                 .as_ref()
                 .ok_or_else(|| missing("an arithmetic"))?;
             Ok(Node::Arith(
-                arith.arith.clone(),
+                arith.arith,
                 Box::new(child(&arith.left)?),
                 Box::new(child(&arith.right)?),
             ))

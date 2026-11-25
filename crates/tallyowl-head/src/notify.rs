@@ -348,7 +348,11 @@ pub struct CsilCallback {
 
 impl CsilCallback {
     /// The request a receiver gets, signed at `signed_at`.
-    pub fn request(&self, notification: &Notification, signed_at: i64) -> Vec<u8> {
+    pub fn request(
+        &self,
+        notification: &Notification,
+        signed_at: i64,
+    ) -> Result<Vec<u8>, tallyowl_collector_api::CsilCborError> {
         use tallyowl_collector_api::codec::encode_alert_notify_request;
         use tallyowl_collector_api::types::AlertNotifyRequest;
         let body = notification.body();
@@ -475,7 +479,19 @@ impl Channel for CsilCallback {
         }
         // Each attempt signs again, so a retry carries a fresh time and is not
         // refused as a replay.
-        let request = self.request(notification, tallyowl_obs::time::now_ms());
+        let request = match self.request(notification, tallyowl_obs::time::now_ms()) {
+            Ok(request) => request,
+            // No retry encodes it better, so this attempt is the last one.
+            Err(e) => {
+                return Attempt::failed(
+                    format!(
+                        "The callback to `{}` could not be encoded: {e}",
+                        self.address
+                    ),
+                    false,
+                );
+            }
+        };
         self.sender.deliver(&self.address, &request, self.timeout)
     }
 }
@@ -772,6 +788,7 @@ mod tests {
         );
         let request: String = callback
             .request(&notification, 1_790_000_000_123)
+            .unwrap()
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();

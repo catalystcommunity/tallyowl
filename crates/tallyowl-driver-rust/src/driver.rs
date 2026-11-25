@@ -698,6 +698,10 @@ impl Driver {
 
     /// The encoded size of a set of items. A caller sizing its own limits uses
     /// this rather than guessing.
+    ///
+    /// Items that the encoder refuses have the size `usize::MAX`, so they are
+    /// over every limit. The ingest contract has no field that the encoder can
+    /// refuse, so this does not occur.
     pub fn encoded_size(items: &[TelemetryItem]) -> usize {
         encode_batch(&Batch {
             batch_id: vec![0; 16],
@@ -706,7 +710,7 @@ impl Driver {
             sealed_at: 0,
             compression: None,
         })
-        .len()
+        .map_or(usize::MAX, |encoded| encoded.len())
     }
 
     /// The time this driver reads. A span guard measures with it.
@@ -791,7 +795,13 @@ impl Inner {
             ));
         }
 
-        let size = encode_telemetry_item(&item).len();
+        let size = match encode_telemetry_item(&item) {
+            Ok(encoded) => encoded.len(),
+            Err(e) => {
+                self.counters.refused.fetch_add(1, Ordering::SeqCst);
+                return Err(TallyOwlError::unencodable("The event", e));
+            }
+        };
         if size + FRAME_ALLOWANCE > self.settings.max_frame_bytes {
             self.counters.refused.fetch_add(1, Ordering::SeqCst);
             return Err(TallyOwlError::over_limit(
@@ -995,7 +1005,12 @@ impl Inner {
 
         let batch = Pending {
             batch_id,
-            encoded: encode_submit_batch_request(&request),
+            // `prepare` encoded each item before it went into the buffer, and
+            // the rest of the request is identifiers and integers. So the
+            // encoder cannot refuse this, and the items are already off the
+            // buffer's account.
+            encoded: encode_submit_batch_request(&request)
+                .expect("a batch of items that each encoded has no value that encode can refuse"),
             items: item_count,
             bytes,
             attempts: 0,

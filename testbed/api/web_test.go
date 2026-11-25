@@ -78,13 +78,13 @@ func (f *fakeCollector) handle(request *transport.RpcRequest) transport.HandlerO
 		f.auth = append(f.auth, *request.Auth)
 	}
 	f.mu.Unlock()
-	return transport.Reply("SubmitBatchResponse", collector.EncodeSubmitBatchResponse(
+	return transport.Reply("SubmitBatchResponse", mustEncode(collector.EncodeSubmitBatchResponse(
 		collector.SubmitBatchResponse{
 			BatchId:       decoded.Batch.BatchId,
 			Accepted:      uint64(len(decoded.Batch.Items)),
 			DurableCopies: 1,
 			QueuedAt:      collector.Timestamp(time.Now().UnixMilli()),
-		}))
+		})))
 }
 
 func (f *fakeCollector) received() []collector.TelemetryItem {
@@ -95,7 +95,7 @@ func (f *fakeCollector) received() []collector.TelemetryItem {
 	return out
 }
 
-/// One seedstore: a backend with a credential, and its web surface.
+// / One seedstore: a backend with a credential, and its web surface.
 func seedstore(t *testing.T) (*Backend, *Web, string, *fakeCollector) {
 	t.Helper()
 	fake := startCollector(t)
@@ -112,7 +112,7 @@ func seedstore(t *testing.T) (*Backend, *Web, string, *fakeCollector) {
 	return backend, web, "http://" + address, fake
 }
 
-/// One browser event, encoded the way the browser package encodes it.
+// / One browser event, encoded the way the browser package encodes it.
 func captureRequest(name, session string) []byte {
 	occurred := ingest.Timestamp(time.Now().UnixMilli())
 	sessionID := ingest.SessionId(session)
@@ -128,7 +128,7 @@ func captureRequest(name, session string) []byte {
 		Event: &ingest.EventPayload{Name: name},
 	}
 	item.Envelope.EventId[15] = 1
-	return ingest.EncodeCaptureRequest(ingest.CaptureRequest{Items: []ingest.TelemetryItem{item}})
+	return mustEncode(ingest.EncodeCaptureRequest(ingest.CaptureRequest{Items: []ingest.TelemetryItem{item}}))
 }
 
 func TestAnUnloadFlushReachesTheCollectorThroughTheApplication(t *testing.T) {
@@ -257,4 +257,14 @@ func TestAnAssetPathCannotEscapeTheBundleDirectory(t *testing.T) {
 			t.Fatalf("%s escaped the bundle directory", attempt)
 		}
 	}
+}
+
+// mustEncode returns the bytes of a generated encoder. From csilgen 0.3.0 an
+// encoder also returns an error. The values here are built in code and have no
+// field that the encoder refuses, so an error is a defect and stops the run.
+func mustEncode(encoded []byte, err error) []byte {
+	if err != nil {
+		panic(err)
+	}
+	return encoded
 }

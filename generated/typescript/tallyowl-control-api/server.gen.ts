@@ -2,7 +2,9 @@
 // Source: <csil spec>
 // Target: typescript-server
 
-import type { AlertInstance, AlertInstanceList, AlertListRequest, AlertRule, AlertRuleList, ApiKeyList, AttributionSettings, BeginLoginRequest, BeginLoginResponse, CompiledPolicy, CompleteLoginRequest, CompleteLoginResponse, CreateRoleTokenRequest, CreateRoleTokenResponse, DeleteAlertRuleRequest, DeletionRequest, DeletionResponse, Empty, EnrollNodeRequest, EnrollNodeResponse, ListRequest, NodeList, NotificationDeliveryList, PolicyDocument, PolicyRequest, ProjectList, QueryRequest, QueryResponse, RenewNodeCertificateRequest, ResolveRequest, RevokeRoleTokenRequest, RoleTokenList, RunWorkflowRequest, RunWorkflowResponse, SavedAnalysis, SavedAnalysisList, SavedDashboard, SavedDashboardList, SavedRequest, ServiceError, SilenceRequest, WorkflowList, WorkspaceList } from "./types.gen.ts";
+import type { AlertInstance, AlertInstanceList, AlertListRequest, AlertRule, AlertRuleList, ApiKeyList, AttributionSettings, BeginLoginRequest, BeginLoginResponse, CompiledPolicy, CompleteLoginRequest, CompleteLoginResponse, CreateRoleTokenRequest, CreateRoleTokenResponse, DeleteAlertRuleRequest, DeletionRequest, DeletionResponse, Empty, EnrollNodeRequest, EnrollNodeResponse, ListRequest, NodeList, NotificationDeliveryList, PolicyDocument, PolicyRequest, ProjectList, QueryRequest, QueryResponse, RenewNodeCertificateRequest, ResolveRequest, RevokeRoleTokenRequest, RoleTokenList, RunWorkflowRequest, RunWorkflowResponse, SavedAnalysis, SavedAnalysisList, SavedDashboard, SavedDashboardList, SavedRequest, ServiceError, SilenceRequest, UserPreferences, WorkflowList, WorkspaceList } from "./types.gen.ts";
+
+import { type RpcReply, encodeTallyOwlControlRunQueryReply, encodeTallyOwlControlListWorkspacesReply, encodeTallyOwlControlListProjectsReply, encodeTallyOwlControlListApiKeysReply, encodeTallyOwlControlPutAlertRuleReply, encodeTallyOwlControlListAlertRulesReply, encodeTallyOwlControlListAlertInstancesReply, encodeTallyOwlControlRequestDeletionReply, encodeTallyOwlControlGetPolicyReply, encodeTallyOwlControlBeginLoginReply, encodeTallyOwlControlCompleteLoginReply, encodeTallyOwlControlCreateRoleTokenReply, encodeTallyOwlControlListRoleTokensReply, encodeTallyOwlControlRevokeRoleTokenReply, encodeTallyOwlControlEnrollNodeReply, encodeTallyOwlControlRenewNodeCertificateReply, encodeTallyOwlControlListNodesReply, encodeTallyOwlControlPutPolicyReply, encodeTallyOwlControlPutAnalysisReply, encodeTallyOwlControlListAnalysesReply, encodeTallyOwlControlDeleteAnalysisReply, encodeTallyOwlControlPutDashboardReply, encodeTallyOwlControlListDashboardsReply, encodeTallyOwlControlPutAttributionSettingsReply, encodeTallyOwlControlGetAttributionSettingsReply, encodeTallyOwlControlDeleteDashboardReply, encodeTallyOwlControlDeleteAlertRuleReply, encodeTallyOwlControlSilenceAlertReply, encodeTallyOwlControlResolveAlertReply, encodeTallyOwlControlListWorkflowsReply, encodeTallyOwlControlRunWorkflowReply, encodeTallyOwlControlListNotificationsReply, encodeTallyOwlControlGetUserPreferencesReply, encodeTallyOwlControlPutUserPreferencesReply } from "./codec.gen.ts";
 
 // The consumer-defined context carries auth, request id, etc. It is opaque to
 // generated code; the adapter defines its shape.
@@ -154,6 +156,16 @@ export interface TallyOwlControlHandlers {
    * Every notification attempt, delivered or not.
    */
   listNotifications(req: AlertListRequest, ctx: RequestContext): Promise<NotificationDeliveryList>;
+  /**
+   * Read the preferences of the signed-in person. A person who has never
+   * set them gets the defaults: the time of the browser.
+   */
+  getUserPreferences(req: Empty, ctx: RequestContext): Promise<UserPreferences>;
+  /**
+   * Replace the preferences of the signed-in person. Each person can do
+   * this, with or without a role in a workspace.
+   */
+  putUserPreferences(req: UserPreferences, ctx: RequestContext): Promise<UserPreferences>;
 }
 
 export const TallyOwlControlWireIds = {
@@ -191,6 +203,8 @@ export const TallyOwlControlWireIds = {
     listWorkflows: 29,
     runWorkflow: 30,
     listNotifications: 31,
+    getUserPreferences: 32,
+    putUserPreferences: 33,
   },
 } as const;
 
@@ -210,169 +224,145 @@ export async function dispatch(
   method: string,
   reqBytes: Uint8Array,
   ctx: RequestContext,
-): Promise<Uint8Array> {
+): Promise<Uint8Array | RpcReply> {
   switch (service) {
     case "TallyOwlControl": {
       switch (method) {
         case "run-query": {
           const req = codec.decode<QueryRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.runQuery(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRunQueryReply(() => handlers.tallyOwlControl.runQuery(req, ctx));
         }
         case "list-workspaces": {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listWorkspaces(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListWorkspacesReply(() => handlers.tallyOwlControl.listWorkspaces(req, ctx));
         }
         case "list-projects": {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listProjects(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListProjectsReply(() => handlers.tallyOwlControl.listProjects(req, ctx));
         }
         case "list-api-keys": {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listApiKeys(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListApiKeysReply(() => handlers.tallyOwlControl.listApiKeys(req, ctx));
         }
         case "put-alert-rule": {
           const req = codec.decode<AlertRule>(reqBytes);
-          const res = await handlers.tallyOwlControl.putAlertRule(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutAlertRuleReply(() => handlers.tallyOwlControl.putAlertRule(req, ctx));
         }
         case "list-alert-rules": {
           const req = codec.decode<AlertListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listAlertRules(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListAlertRulesReply(() => handlers.tallyOwlControl.listAlertRules(req, ctx));
         }
         case "list-alert-instances": {
           const req = codec.decode<AlertListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listAlertInstances(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListAlertInstancesReply(() => handlers.tallyOwlControl.listAlertInstances(req, ctx));
         }
         case "request-deletion": {
           const req = codec.decode<DeletionRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.requestDeletion(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRequestDeletionReply(() => handlers.tallyOwlControl.requestDeletion(req, ctx));
         }
         case "get-policy": {
           const req = codec.decode<PolicyRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.getPolicy(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlGetPolicyReply(() => handlers.tallyOwlControl.getPolicy(req, ctx));
         }
         case "begin-login": {
           const req = codec.decode<BeginLoginRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.beginLogin(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlBeginLoginReply(() => handlers.tallyOwlControl.beginLogin(req, ctx));
         }
         case "complete-login": {
           const req = codec.decode<CompleteLoginRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.completeLogin(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlCompleteLoginReply(() => handlers.tallyOwlControl.completeLogin(req, ctx));
         }
         case "create-role-token": {
           const req = codec.decode<CreateRoleTokenRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.createRoleToken(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlCreateRoleTokenReply(() => handlers.tallyOwlControl.createRoleToken(req, ctx));
         }
         case "list-role-tokens": {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listRoleTokens(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListRoleTokensReply(() => handlers.tallyOwlControl.listRoleTokens(req, ctx));
         }
         case "revoke-role-token": {
           const req = codec.decode<RevokeRoleTokenRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.revokeRoleToken(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRevokeRoleTokenReply(() => handlers.tallyOwlControl.revokeRoleToken(req, ctx));
         }
         case "enroll-node": {
           const req = codec.decode<EnrollNodeRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.enrollNode(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlEnrollNodeReply(() => handlers.tallyOwlControl.enrollNode(req, ctx));
         }
         case "renew-node-certificate": {
           const req = codec.decode<RenewNodeCertificateRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.renewNodeCertificate(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRenewNodeCertificateReply(() => handlers.tallyOwlControl.renewNodeCertificate(req, ctx));
         }
         case "list-nodes": {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listNodes(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListNodesReply(() => handlers.tallyOwlControl.listNodes(req, ctx));
         }
         case "put-policy": {
           const req = codec.decode<PolicyDocument>(reqBytes);
-          const res = await handlers.tallyOwlControl.putPolicy(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutPolicyReply(() => handlers.tallyOwlControl.putPolicy(req, ctx));
         }
         case "put-analysis": {
           const req = codec.decode<SavedAnalysis>(reqBytes);
-          const res = await handlers.tallyOwlControl.putAnalysis(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutAnalysisReply(() => handlers.tallyOwlControl.putAnalysis(req, ctx));
         }
         case "list-analyses": {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listAnalyses(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListAnalysesReply(() => handlers.tallyOwlControl.listAnalyses(req, ctx));
         }
         case "delete-analysis": {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.deleteAnalysis(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlDeleteAnalysisReply(() => handlers.tallyOwlControl.deleteAnalysis(req, ctx));
         }
         case "put-dashboard": {
           const req = codec.decode<SavedDashboard>(reqBytes);
-          const res = await handlers.tallyOwlControl.putDashboard(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutDashboardReply(() => handlers.tallyOwlControl.putDashboard(req, ctx));
         }
         case "list-dashboards": {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listDashboards(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListDashboardsReply(() => handlers.tallyOwlControl.listDashboards(req, ctx));
         }
         case "put-attribution-settings": {
           const req = codec.decode<AttributionSettings>(reqBytes);
-          const res = await handlers.tallyOwlControl.putAttributionSettings(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutAttributionSettingsReply(() => handlers.tallyOwlControl.putAttributionSettings(req, ctx));
         }
         case "get-attribution-settings": {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.getAttributionSettings(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlGetAttributionSettingsReply(() => handlers.tallyOwlControl.getAttributionSettings(req, ctx));
         }
         case "delete-dashboard": {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.deleteDashboard(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlDeleteDashboardReply(() => handlers.tallyOwlControl.deleteDashboard(req, ctx));
         }
         case "delete-alert-rule": {
           const req = codec.decode<DeleteAlertRuleRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.deleteAlertRule(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlDeleteAlertRuleReply(() => handlers.tallyOwlControl.deleteAlertRule(req, ctx));
         }
         case "silence-alert": {
           const req = codec.decode<SilenceRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.silenceAlert(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlSilenceAlertReply(() => handlers.tallyOwlControl.silenceAlert(req, ctx));
         }
         case "resolve-alert": {
           const req = codec.decode<ResolveRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.resolveAlert(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlResolveAlertReply(() => handlers.tallyOwlControl.resolveAlert(req, ctx));
         }
         case "list-workflows": {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listWorkflows(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListWorkflowsReply(() => handlers.tallyOwlControl.listWorkflows(req, ctx));
         }
         case "run-workflow": {
           const req = codec.decode<RunWorkflowRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.runWorkflow(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRunWorkflowReply(() => handlers.tallyOwlControl.runWorkflow(req, ctx));
         }
         case "list-notifications": {
           const req = codec.decode<AlertListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listNotifications(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListNotificationsReply(() => handlers.tallyOwlControl.listNotifications(req, ctx));
+        }
+        case "get-user-preferences": {
+          const req = codec.decode<Empty>(reqBytes);
+          return encodeTallyOwlControlGetUserPreferencesReply(() => handlers.tallyOwlControl.getUserPreferences(req, ctx));
+        }
+        case "put-user-preferences": {
+          const req = codec.decode<UserPreferences>(reqBytes);
+          return encodeTallyOwlControlPutUserPreferencesReply(() => handlers.tallyOwlControl.putUserPreferences(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown method ${service}.${method}` } satisfies ServiceError;
@@ -397,169 +387,145 @@ export async function dispatchCompact(
   method: number,
   reqBytes: Uint8Array,
   ctx: RequestContext,
-): Promise<Uint8Array> {
+): Promise<Uint8Array | RpcReply> {
   switch (service) {
     case 3: {
       switch (method) {
         case 0: {
           const req = codec.decode<QueryRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.runQuery(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRunQueryReply(() => handlers.tallyOwlControl.runQuery(req, ctx));
         }
         case 1: {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listWorkspaces(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListWorkspacesReply(() => handlers.tallyOwlControl.listWorkspaces(req, ctx));
         }
         case 2: {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listProjects(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListProjectsReply(() => handlers.tallyOwlControl.listProjects(req, ctx));
         }
         case 3: {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listApiKeys(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListApiKeysReply(() => handlers.tallyOwlControl.listApiKeys(req, ctx));
         }
         case 4: {
           const req = codec.decode<AlertRule>(reqBytes);
-          const res = await handlers.tallyOwlControl.putAlertRule(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutAlertRuleReply(() => handlers.tallyOwlControl.putAlertRule(req, ctx));
         }
         case 5: {
           const req = codec.decode<AlertListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listAlertRules(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListAlertRulesReply(() => handlers.tallyOwlControl.listAlertRules(req, ctx));
         }
         case 6: {
           const req = codec.decode<AlertListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listAlertInstances(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListAlertInstancesReply(() => handlers.tallyOwlControl.listAlertInstances(req, ctx));
         }
         case 7: {
           const req = codec.decode<DeletionRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.requestDeletion(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRequestDeletionReply(() => handlers.tallyOwlControl.requestDeletion(req, ctx));
         }
         case 8: {
           const req = codec.decode<PolicyRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.getPolicy(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlGetPolicyReply(() => handlers.tallyOwlControl.getPolicy(req, ctx));
         }
         case 9: {
           const req = codec.decode<BeginLoginRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.beginLogin(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlBeginLoginReply(() => handlers.tallyOwlControl.beginLogin(req, ctx));
         }
         case 10: {
           const req = codec.decode<CompleteLoginRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.completeLogin(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlCompleteLoginReply(() => handlers.tallyOwlControl.completeLogin(req, ctx));
         }
         case 11: {
           const req = codec.decode<CreateRoleTokenRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.createRoleToken(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlCreateRoleTokenReply(() => handlers.tallyOwlControl.createRoleToken(req, ctx));
         }
         case 12: {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listRoleTokens(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListRoleTokensReply(() => handlers.tallyOwlControl.listRoleTokens(req, ctx));
         }
         case 13: {
           const req = codec.decode<RevokeRoleTokenRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.revokeRoleToken(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRevokeRoleTokenReply(() => handlers.tallyOwlControl.revokeRoleToken(req, ctx));
         }
         case 14: {
           const req = codec.decode<EnrollNodeRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.enrollNode(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlEnrollNodeReply(() => handlers.tallyOwlControl.enrollNode(req, ctx));
         }
         case 15: {
           const req = codec.decode<RenewNodeCertificateRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.renewNodeCertificate(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRenewNodeCertificateReply(() => handlers.tallyOwlControl.renewNodeCertificate(req, ctx));
         }
         case 16: {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listNodes(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListNodesReply(() => handlers.tallyOwlControl.listNodes(req, ctx));
         }
         case 17: {
           const req = codec.decode<PolicyDocument>(reqBytes);
-          const res = await handlers.tallyOwlControl.putPolicy(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutPolicyReply(() => handlers.tallyOwlControl.putPolicy(req, ctx));
         }
         case 18: {
           const req = codec.decode<SavedAnalysis>(reqBytes);
-          const res = await handlers.tallyOwlControl.putAnalysis(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutAnalysisReply(() => handlers.tallyOwlControl.putAnalysis(req, ctx));
         }
         case 19: {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listAnalyses(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListAnalysesReply(() => handlers.tallyOwlControl.listAnalyses(req, ctx));
         }
         case 20: {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.deleteAnalysis(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlDeleteAnalysisReply(() => handlers.tallyOwlControl.deleteAnalysis(req, ctx));
         }
         case 21: {
           const req = codec.decode<SavedDashboard>(reqBytes);
-          const res = await handlers.tallyOwlControl.putDashboard(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutDashboardReply(() => handlers.tallyOwlControl.putDashboard(req, ctx));
         }
         case 22: {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listDashboards(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListDashboardsReply(() => handlers.tallyOwlControl.listDashboards(req, ctx));
         }
         case 23: {
           const req = codec.decode<AttributionSettings>(reqBytes);
-          const res = await handlers.tallyOwlControl.putAttributionSettings(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlPutAttributionSettingsReply(() => handlers.tallyOwlControl.putAttributionSettings(req, ctx));
         }
         case 24: {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.getAttributionSettings(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlGetAttributionSettingsReply(() => handlers.tallyOwlControl.getAttributionSettings(req, ctx));
         }
         case 25: {
           const req = codec.decode<SavedRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.deleteDashboard(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlDeleteDashboardReply(() => handlers.tallyOwlControl.deleteDashboard(req, ctx));
         }
         case 26: {
           const req = codec.decode<DeleteAlertRuleRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.deleteAlertRule(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlDeleteAlertRuleReply(() => handlers.tallyOwlControl.deleteAlertRule(req, ctx));
         }
         case 27: {
           const req = codec.decode<SilenceRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.silenceAlert(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlSilenceAlertReply(() => handlers.tallyOwlControl.silenceAlert(req, ctx));
         }
         case 28: {
           const req = codec.decode<ResolveRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.resolveAlert(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlResolveAlertReply(() => handlers.tallyOwlControl.resolveAlert(req, ctx));
         }
         case 29: {
           const req = codec.decode<ListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listWorkflows(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListWorkflowsReply(() => handlers.tallyOwlControl.listWorkflows(req, ctx));
         }
         case 30: {
           const req = codec.decode<RunWorkflowRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.runWorkflow(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlRunWorkflowReply(() => handlers.tallyOwlControl.runWorkflow(req, ctx));
         }
         case 31: {
           const req = codec.decode<AlertListRequest>(reqBytes);
-          const res = await handlers.tallyOwlControl.listNotifications(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlControlListNotificationsReply(() => handlers.tallyOwlControl.listNotifications(req, ctx));
+        }
+        case 32: {
+          const req = codec.decode<Empty>(reqBytes);
+          return encodeTallyOwlControlGetUserPreferencesReply(() => handlers.tallyOwlControl.getUserPreferences(req, ctx));
+        }
+        case 33: {
+          const req = codec.decode<UserPreferences>(reqBytes);
+          return encodeTallyOwlControlPutUserPreferencesReply(() => handlers.tallyOwlControl.putUserPreferences(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown ordinal ${service}.${method}` } satisfies ServiceError;

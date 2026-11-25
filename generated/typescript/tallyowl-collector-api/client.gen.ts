@@ -3,111 +3,138 @@
 // Target: typescript-client
 
 import type { AlertNotifyRequest, AlertNotifyResponse, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, CollectorHealth, CommitBatchRequest, CommitBatchResponse, FetchPolicyRequest, FetchPolicyResponse, HealthRequest, PolicyVersionRequest, PolicyVersionResponse, ResolveKeyRequest, ResolveKeyResponse, SubmitBatchRequest, SubmitBatchResponse } from "./types.gen.ts";
-import { fromAlertNotifyResponseCbor, fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromCollectorHealthCbor, fromCommitBatchResponseCbor, fromFetchPolicyResponseCbor, fromPolicyVersionResponseCbor, fromResolveKeyResponseCbor, fromSubmitBatchResponseCbor, toAlertNotifyRequestCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, toCommitBatchRequestCbor, toFetchPolicyRequestCbor, toHealthRequestCbor, toPolicyVersionRequestCbor, toResolveKeyRequestCbor, toSubmitBatchRequestCbor } from "./codec.gen.ts";
+import { fromAlertNotifyResponseCbor, fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromCollectorHealthCbor, fromCommitBatchResponseCbor, fromFetchPolicyResponseCbor, fromPolicyVersionResponseCbor, fromResolveKeyResponseCbor, fromSubmitBatchResponseCbor, resolveRpcReply, toAlertNotifyRequestCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, toCommitBatchRequestCbor, toFetchPolicyRequestCbor, toHealthRequestCbor, toPolicyVersionRequestCbor, toResolveKeyRequestCbor, toSubmitBatchRequestCbor } from "./codec.gen.ts";
 
 export interface ServiceTransport {
   call(service: string, op: string, req: Uint8Array): Uint8Array;
+  /**
+   * Perform an operation that declares more than one reply arm. Return the
+   * CSIL-RPC response `variant` (the CSIL name of the arm) with its payload
+   * bytes; the client decodes the arm that the variant names.
+   */
+  callReply(service: string, op: string, req: Uint8Array): { readonly variant?: string | null; readonly payload: Uint8Array };
 }
 
 export class TallyOwlAlertReceiverClient {
-  constructor(private readonly t: ServiceTransport) {}
+  private readonly t: ServiceTransport;
+
+  constructor(t: ServiceTransport) {
+    this.t = t;
+  }
 
   /**
    * Take one signed alert notification.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   notify(req: AlertNotifyRequest): AlertNotifyResponse {
-    const csilResp = this.t.call("TallyOwlAlertReceiver", "notify", toAlertNotifyRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlAlertReceiver", "notify", toAlertNotifyRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlAlertReceiver", "notify", csilReply.variant, csilReply.payload);
     return fromAlertNotifyResponseCbor(csilResp);
   }
 }
 
 export class TallyOwlCollectorClient {
-  constructor(private readonly t: ServiceTransport) {}
+  private readonly t: ServiceTransport;
+
+  constructor(t: ServiceTransport) {
+    this.t = t;
+  }
 
   /**
    * An app driver submits a batch. The response means durable acceptance.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   submitBatch(req: SubmitBatchRequest): SubmitBatchResponse {
-    const csilResp = this.t.call("TallyOwlCollector", "submit-batch", toSubmitBatchRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCollector", "submit-batch", toSubmitBatchRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCollector", "submit-batch", csilReply.variant, csilReply.payload);
     return fromSubmitBatchResponseCbor(csilResp);
   }
 
   /**
    * A forwarder submits a batch to the head for final storage.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   commitBatch(req: CommitBatchRequest): CommitBatchResponse {
-    const csilResp = this.t.call("TallyOwlCollector", "commit-batch", toCommitBatchRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCollector", "commit-batch", toCommitBatchRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCollector", "commit-batch", csilReply.variant, csilReply.payload);
     return fromCommitBatchResponseCbor(csilResp);
   }
 
   /**
    * Fetch the compiled collection policy.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   fetchPolicy(req: FetchPolicyRequest): FetchPolicyResponse {
-    const csilResp = this.t.call("TallyOwlCollector", "fetch-policy", toFetchPolicyRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCollector", "fetch-policy", toFetchPolicyRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCollector", "fetch-policy", csilReply.variant, csilReply.payload);
     return fromFetchPolicyResponseCbor(csilResp);
   }
 
   /**
    * Report collector health for readiness and for operators.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   health(req: HealthRequest): CollectorHealth {
-    const csilResp = this.t.call("TallyOwlCollector", "health", toHealthRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCollector", "health", toHealthRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCollector", "health", csilReply.variant, csilReply.payload);
     return fromCollectorHealthCbor(csilResp);
   }
 
   /**
    * Resolve a source credential to its tenancy. The head answers this from
    * the control catalog. A collector never stores a key.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   resolveKey(req: ResolveKeyRequest): ResolveKeyResponse {
-    const csilResp = this.t.call("TallyOwlCollector", "resolve-key", toResolveKeyRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlCollector", "resolve-key", toResolveKeyRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlCollector", "resolve-key", csilReply.variant, csilReply.payload);
     return fromResolveKeyResponseCbor(csilResp);
   }
 }
 
 export class TallyOwlIngestClient {
-  constructor(private readonly t: ServiceTransport) {}
+  private readonly t: ServiceTransport;
+
+  constructor(t: ServiceTransport) {
+    this.t = t;
+  }
 
   /**
    * Accept telemetry on the application's existing connection. Best effort.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   capture(req: CaptureRequest): CaptureResponse {
-    const csilResp = this.t.call("TallyOwlIngest", "capture", toCaptureRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlIngest", "capture", toCaptureRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlIngest", "capture", csilReply.variant, csilReply.payload);
     return fromCaptureResponseCbor(csilResp);
   }
 
   /**
    * Accept telemetry and wait for the collector durability boundary.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   captureCritical(req: CaptureCriticalRequest): CaptureCriticalResponse {
-    const csilResp = this.t.call("TallyOwlIngest", "capture-critical", toCaptureCriticalRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlIngest", "capture-critical", toCaptureCriticalRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlIngest", "capture-critical", csilReply.variant, csilReply.payload);
     return fromCaptureCriticalResponseCbor(csilResp);
   }
 
   /**
    * Report the collection policy that the client must apply.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   policyVersion(req: PolicyVersionRequest): PolicyVersionResponse {
-    const csilResp = this.t.call("TallyOwlIngest", "policy-version", toPolicyVersionRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlIngest", "policy-version", toPolicyVersionRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlIngest", "policy-version", csilReply.variant, csilReply.payload);
     return fromPolicyVersionResponseCbor(csilResp);
   }
 }

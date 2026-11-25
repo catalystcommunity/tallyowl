@@ -923,7 +923,8 @@ impl GroupRegistry {
             .call(
                 REPLICATION_SERVICE,
                 DELIVER_CONSENSUS,
-                encode_consensus_message(&message),
+                encode_consensus_message(&message)
+                    .map_err(|e| TallyOwlError::unencodable("A proposal", e))?,
             )
             .map_err(|e| {
                 // A broken connection is the ordinary case when the leader

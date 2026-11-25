@@ -41,7 +41,7 @@ class FakeCollector {
       return {
         kind: "reply",
         variant: "ServiceError",
-        payload: ingest.toServiceErrorCbor(this.failWith as never),
+        payload: ingest.toServiceErrorTypeCbor(this.failWith as never),
       };
     }
     if (request.op === "capture") {

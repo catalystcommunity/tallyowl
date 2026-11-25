@@ -3,7 +3,7 @@
 // Target: typescript-codec
 
 import { CsilDecimal } from "./types.gen.ts";
-import type { AbsenceCondition, AggregateNode, AlertInstance, AlertInstanceList, AlertListRequest, AlertOutcome, AlertRule, AlertRuleList, AlertState, ApiKeyList, ApiKeySummary, ArithExpr, ArithOp, AttributionModel, AttributionQuery, AttributionSettings, BeginLoginRequest, BeginLoginResponse, CampaignLinking, CampaignSummaryQuery, CompareExpr, CompareOp, CompiledPolicy, CompleteLoginRequest, CompleteLoginResponse, Consent, ConsentState, Consistency, ConvertExpr, CorrelationBasis, CreateRoleTokenRequest, CreateRoleTokenResponse, DashboardPanel, Dataset, DeleteAlertRuleRequest, DeletionRequest, DeletionResponse, DeletionTarget, Dimension, DurationMs, Empty, EnrollNodeRequest, EnrollNodeResponse, Envelope, ErrorCode, EventId, Exactness, ExpressionKind, ExpressionNode, ExpressionRef, FieldRef, FilterNode, FunnelQuery, FunnelStep, IdentityResolution, Interval, JoinNode, LimitNode, ListRequest, LogicalExpr, LogicalOp, Measure, MeasureKind, Measurement, MeasurementKind, MeasurementList, Membership, MissingRange, NodeCapabilities, NodeList, NodeRole, NodeSummary, NotificationDelivery, NotificationDeliveryList, NotificationTarget, NullExpr, PathQuery, PolicyDocument, PolicyRequest, PolicyScope, Project, ProjectId, ProjectList, ProjectNode, Property, PropertyList, PropertyOrigin, QueryBudget, QueryForm, QueryNodeBox, QueryNodeKind, QueryNodeRef, QueryRequest, QueryResponse, RenewNodeCertificateRequest, ResolveRequest, ResultMetadata, ResultRow, RetentionClass, RetentionQuery, RevokeRoleTokenRequest, RoleTokenList, RoleTokenPolicy, RoleTokenSummary, RunWorkflowRequest, RunWorkflowResponse, SavedAnalysis, SavedAnalysisList, SavedDashboard, SavedDashboardList, SavedRequest, ScanNode, ServiceError, SessionId, SetExpr, SilenceRequest, SortKey, SortNode, SourceId, SpanId, TelemetryKind, TextExpr, ThresholdCondition, TimeBasis, TimeExpr, TimeRange, TimelineQuery, Timestamp, TraceId, TraceQuery, TypedValue, TypedValueKind, UnionNode, WorkflowKind, WorkflowList, WorkflowStatus, Workspace, WorkspaceId, WorkspaceList } from "./types.gen.ts";
+import type { AbsenceCondition, AggregateNode, AlertInstance, AlertInstanceList, AlertListRequest, AlertOutcome, AlertRule, AlertRuleList, AlertState, ApiKeyList, ApiKeySummary, ArithExpr, ArithOp, AttributionModel, AttributionQuery, AttributionSettings, BeginLoginRequest, BeginLoginResponse, CampaignLinking, CampaignSummaryQuery, CompareExpr, CompareOp, CompiledPolicy, CompleteLoginRequest, CompleteLoginResponse, Consent, ConsentState, Consistency, ConvertExpr, CorrelationBasis, CreateRoleTokenRequest, CreateRoleTokenResponse, DashboardPanel, Dataset, DeleteAlertRuleRequest, DeletionRequest, DeletionResponse, DeletionTarget, Dimension, DurationMs, Empty, EnrollNodeRequest, EnrollNodeResponse, Envelope, ErrorCode, EventId, Exactness, ExpressionKind, ExpressionNode, ExpressionRef, FieldRef, FilterNode, FunnelQuery, FunnelStep, IdentityResolution, Interval, JoinNode, LimitNode, ListRequest, LogicalExpr, LogicalOp, Measure, MeasureKind, Measurement, MeasurementKind, MeasurementList, Membership, MissingRange, NodeCapabilities, NodeList, NodeRole, NodeSummary, NotificationDelivery, NotificationDeliveryList, NotificationTarget, NullExpr, PathQuery, PolicyDocument, PolicyRequest, PolicyScope, Project, ProjectId, ProjectList, ProjectNode, Property, PropertyList, PropertyOrigin, QueryBudget, QueryForm, QueryNodeBox, QueryNodeKind, QueryNodeRef, QueryRequest, QueryResponse, RenewNodeCertificateRequest, ResolveRequest, ResultMetadata, ResultRow, RetentionClass, RetentionQuery, RevokeRoleTokenRequest, RoleTokenList, RoleTokenPolicy, RoleTokenSummary, RunWorkflowRequest, RunWorkflowResponse, SavedAnalysis, SavedAnalysisList, SavedDashboard, SavedDashboardList, SavedRequest, ScanNode, ServiceErrorType, SessionId, SetExpr, SilenceRequest, SortKey, SortNode, SourceId, SpanId, TelemetryKind, TextExpr, ThresholdCondition, TimeBasis, TimeDisplay, TimeExpr, TimeRange, TimelineQuery, Timestamp, TraceId, TraceQuery, TypedValue, TypedValueKind, UnionNode, UserPreferences, WorkflowKind, WorkflowList, WorkflowStatus, Workspace, WorkspaceId, WorkspaceList } from "./types.gen.ts";
 
 /** A CBOR semantic tag wrapping an inner value (e.g. tag 0 timestamp, tag 4 decimal). */
 export type CborTag = { readonly tag: number; readonly value: CborValue };
@@ -74,9 +74,13 @@ function encInto(v: CborValue, out: number[]): void {
     head(4, v.length, out);
     for (const x of v) encInto(x, out);
   } else if (v instanceof Map) {
-    head(5, v.size, out);
-    for (const [k, val] of v) {
-      encInto(k, out);
+    // RFC 8949 section 4.2.1: entries go in bytewise order of the encoded keys, so
+    // every peer emits the same bytes and a decoder can check the order in one pass.
+    const entries = Array.from(v, ([k, val]): [Uint8Array, CborValue] => [encodeValue(k), val]);
+    entries.sort(([a], [b]) => csilCompareBytes(a, b));
+    head(5, entries.length, out);
+    for (const [k, val] of entries) {
+      for (const b of k) out.push(b);
       encInto(val, out);
     }
   } else {
@@ -90,6 +94,34 @@ export function encodeValue(value: CborValue): Uint8Array {
   const out: number[] = [];
   encInto(value, out);
   return Uint8Array.from(out);
+}
+
+function csilCompareBytes(a: Uint8Array, b: Uint8Array): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+// A record accepts its fields in any order, so the decoder only marks a map whose
+// keys are out of canonical order; a dynamic-map reader refuses a marked map.
+const csilUnorderedMaps = new WeakSet<Map<CborValue, CborValue>>();
+
+// A key with a longer head than needed is a second byte form of the same key, so
+// the order and duplicate checks on raw bytes would miss it.
+function csilShortestHead(b: Uint8Array, at: number): boolean {
+  const major = b[at] >> 5;
+  const low = b[at] & 0x1f;
+  if (major === 7 || low < 24) return true;
+  if (low === 24) return b[at + 1] >= 24;
+  if (low === 25) return b[at + 1] !== 0;
+  if (low === 26) return b[at + 1] !== 0 || b[at + 2] !== 0;
+  return b[at + 1] !== 0 || b[at + 2] !== 0 || b[at + 3] !== 0 || b[at + 4] !== 0;
+}
+
+function csilKeyLabel(key: CborValue): string {
+  return typeof key === "string" ? JSON.stringify(key) : String(key);
 }
 
 type Cursor = { b: Uint8Array; pos: number };
@@ -133,8 +165,24 @@ function smallInt(arg: bigint): number | bigint {
   return arg <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(arg) : arg;
 }
 
+/** Widen an IEEE 754 half-precision value (RFC 8949 Appendix D) exactly to binary64. */
+function csilHalfToFloat64(half: number): number {
+  const exp = (half >> 10) & 0x1f;
+  const mant = half & 0x3ff;
+  let magnitude: number;
+  if (exp === 0) magnitude = mant * 2 ** -24;
+  else if (exp === 31) magnitude = mant === 0 ? Infinity : NaN;
+  else magnitude = (mant + 1024) * 2 ** (exp - 25);
+  return half & 0x8000 ? -magnitude : magnitude;
+}
+
 function readFloat(st: Cursor, low: number): number {
   const bits = readArg(st, low);
+  if (low === 25) {
+    const view = new DataView(new ArrayBuffer(2));
+    view.setUint16(0, Number(bits), false);
+    return csilHalfToFloat64(view.getUint16(0, false));
+  }
   if (low === 26) {
     const view = new DataView(new ArrayBuffer(4));
     view.setUint32(0, Number(bits), false);
@@ -164,7 +212,7 @@ function decInto(st: Cursor, depth: number): CborValue {
       st.pos += 1;
       return null;
     }
-    if (low === 26 || low === 27) return readFloat(st, low);
+    if (low === 25 || low === 26 || low === 27) return readFloat(st, low);
     throw new Error("malformed CBOR simple value");
   }
   const arg = readArg(st, low);
@@ -200,8 +248,21 @@ function decInto(st: Cursor, depth: number): CborValue {
       if (arg > BigInt(st.b.length - st.pos)) throw new Error("CBOR map length exceeds remaining input");
       const n = Number(arg);
       const m = new Map<CborValue, CborValue>();
+      // Raw key bytes catch a repeated byte-string key and a key encoded twice in
+      // different widths, which a JS `Map` cannot tell apart from distinct keys.
+      const seen = new Set<string>();
+      let prev: Uint8Array | null = null;
       for (let i = 0; i < n; i++) {
+        const start = st.pos;
         const k = decInto(st, depth + 1);
+        if (!csilShortestHead(st.b, start)) throw new Error("csil cbor: map key is not in shortest form");
+        const raw = st.b.subarray(start, st.pos);
+        let id = "";
+        for (const b of raw) id += String.fromCharCode(b);
+        if (seen.has(id) || m.has(k)) throw new Error(`csil cbor: duplicate key ${csilKeyLabel(k)}`);
+        seen.add(id);
+        if (prev !== null && csilCompareBytes(prev, raw) > 0) csilUnorderedMaps.add(m);
+        prev = raw;
         const val = decInto(st, depth + 1);
         m.set(k, val);
       }
@@ -267,6 +328,13 @@ export function asMap(value: CborValue): Map<CborValue, CborValue> {
   throw new Error("expected a map");
 }
 
+/** A `{ * K => V }` map: its keys must arrive in canonical order (RFC 8949 section 4.2.1). */
+export function asDynamicMap(value: CborValue): Map<CborValue, CborValue> {
+  const m = asMap(value);
+  if (csilUnorderedMaps.has(m)) throw new Error("csil cbor: map keys are not in canonical order");
+  return m;
+}
+
 /** A decoded integer may surface as `bigint` (see `decInto`'s large-value path), so a
  * numeric literal's expected `number` is compared against the `bigint`-normalized form
  * rather than failing on a type mismatch that isn't a value mismatch. */
@@ -279,6 +347,32 @@ export function asLiteral<T extends CborValue>(value: CborValue, expected: T): T
 /** Validate a decoded scalar against a literal-enum's declared vocabulary, erroring
  * on an unknown value. The caller reads through `asNumber`/`asString`/`asBool`, which
  * already normalize a decoded `bigint` to `number`, so a plain membership check suffices. */
+/** CBOR orders unsigned integer keys first, then negative keys by magnitude. */
+export function enumNumberMap(entries: [bigint, CborValue][]): Map<CborValue, CborValue> {
+  return new Map(entries.sort(([a], [b]) => {
+    if (a === b) return 0;
+    if ((a < 0n) !== (b < 0n)) return a < 0n ? 1 : -1;
+    if (a < 0n) return a > b ? -1 : 1;
+    return a < b ? -1 : 1;
+  }));
+}
+
+export function enumToNumber(label: string, entries: readonly (readonly [string, bigint])[]): bigint {
+  for (const [name, number] of entries) {
+    if (name === label) return number;
+  }
+  throw new Error("unknown enum label");
+}
+
+export function enumFromNumber(value: CborValue, entries: readonly (readonly [string, bigint])[]): string {
+  if (typeof value === "bigint" || (typeof value === "number" && Number.isSafeInteger(value))) {
+    for (const [name, number] of entries) {
+      if (BigInt(value) === number) return name;
+    }
+  }
+  throw new Error("unknown enum number");
+}
+
 export function asEnumMember<T extends number | string | boolean | null>(
   value: T,
   members: readonly T[],
@@ -323,7 +417,92 @@ function asTagged(value: CborValue, tag: number): CborValue {
 
 /** Decode a tag-0 (RFC 3339, UTC) timestamp into a `Date`. */
 export function asTimestamp(value: CborValue): Date {
-  return new Date(asString(asTagged(value, 0)));
+  return csilTsFromText(asString(asTagged(value, 0)));
+}
+
+// `Date` parsing accepts many shapes the wire contract forbids (a space for `T`, no
+// offset, leap seconds rolled over), so the grammar is checked by hand. `[0-9]` stays
+// ASCII-only, and `$` without the `m` flag matches only at the true end of input.
+const CSIL_TS_PATTERN =
+  /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(?:[Zz]|([+-])([0-9]{2}):([0-9]{2}))$/;
+
+/** Parse canonical tag-0 text strictly. `Date` holds milliseconds, so a nonzero digit
+ * past the third fraction digit is an error rather than a silent rounding. */
+export function csilTsFromText(text: string): Date {
+  const m = CSIL_TS_PATTERN.exec(text);
+  if (m === null) throw new Error(`invalid RFC 3339 timestamp ${JSON.stringify(text)}`);
+  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > monthDays[month - 1]) {
+    throw new Error(`invalid calendar date in timestamp ${JSON.stringify(text)}`);
+  }
+  if (hour > 23 || minute > 59 || second > 59) {
+    throw new Error(`invalid time of day in timestamp ${JSON.stringify(text)}`);
+  }
+  const fraction = m[7] ?? "";
+  if (/[1-9]/.test(fraction.slice(3))) {
+    throw new Error(`timestamp ${JSON.stringify(text)} is finer than milliseconds`);
+  }
+  let offsetMinutes = 0;
+  if (m[8] !== undefined) {
+    const offsetHour = Number(m[9]);
+    const offsetMinute = Number(m[10]);
+    if (offsetHour > 23 || offsetMinute > 59) {
+      throw new Error(`invalid offset in timestamp ${JSON.stringify(text)}`);
+    }
+    offsetMinutes = (m[8] === "-" ? -1 : 1) * (offsetHour * 60 + offsetMinute);
+  }
+  // `Date.UTC` maps years 0-99 to 1900-1999, so the year is set on its own.
+  const local = new Date(0);
+  local.setUTCFullYear(year, month - 1, day);
+  local.setUTCHours(hour, minute, second, Number(fraction.padEnd(3, "0").slice(0, 3)));
+  const instant = new Date(local.getTime() - offsetMinutes * 60000);
+  const utcYear = instant.getUTCFullYear();
+  if (utcYear < 1 || utcYear > 9999) {
+    throw new Error(`timestamp ${JSON.stringify(text)} is outside years 0001-9999 in UTC`);
+  }
+  return instant;
+}
+
+const CSIL_EPOCH_FIRST = -62135596800;
+const CSIL_EPOCH_LAST = 253402300799;
+
+/** Decode tag-1 epoch seconds (`cddl_time`) into a `Date`. A `Date` holds
+ * milliseconds, so a float fraction is rounded to three digits by the shared rule. */
+export function asCddlTime(value: CborValue): Date {
+  const inner = asTagged(value, 1);
+  // An integer past 2^53 decodes as a `bigint`; every one of those is out of range.
+  if (typeof inner === "bigint") throw new Error("cddl_time is outside years 0001-9999");
+  if (typeof inner !== "number") throw new Error("cddl_time content must be a number");
+  if (!Number.isFinite(inner)) throw new Error("cddl_time must be finite");
+  if (inner < CSIL_EPOCH_FIRST - 1 || inner > CSIL_EPOCH_LAST + 1) {
+    throw new Error("cddl_time is outside years 0001-9999");
+  }
+  // An integer and a float with the same value decode to the same `number`, and the
+  // rule gives an integer a zero fraction, so one path serves both.
+  let seconds = Math.floor(inner);
+  let units = Math.floor((inner - seconds) * 1000 + 0.5);
+  if (units === 1000) {
+    seconds += 1;
+    units = 0;
+  }
+  if (seconds < CSIL_EPOCH_FIRST || seconds > CSIL_EPOCH_LAST) {
+    throw new Error("cddl_time is outside years 0001-9999");
+  }
+  return new Date(seconds * 1000 + units);
+}
+
+/** A `Date` as tag-1 content: whole seconds as an integer, else a binary64 float. */
+export function csilEpochFromDate(d: Date): number {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) throw new Error("expected a valid Date");
+  const millis = d.getTime();
+  const seconds = Math.floor(millis / 1000);
+  if (seconds < CSIL_EPOCH_FIRST || seconds > CSIL_EPOCH_LAST) {
+    throw new Error("cddl_time is outside years 0001-9999");
+  }
+  const units = millis - seconds * 1000;
+  return units === 0 ? seconds : seconds + units / 1000;
 }
 
 /** Decode a tag-4 decimal fraction into its `[exponent, mantissa]` payload. */
@@ -338,6 +517,11 @@ export function asDecimalPayload(value: CborValue): [number | bigint, number | b
 
 /** A `Date` rendered as the canonical tag-0 text: RFC 3339, UTC, `Z` offset. */
 export function csilTsToText(d: Date): string {
+  // An Invalid Date or a year outside 0001-9999 has no canonical text, and
+  // `toISOString` would write an expanded `+YYYYYY` year for the latter.
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) throw new Error("expected a valid Date");
+  const year = d.getUTCFullYear();
+  if (year < 1 || year > 9999) throw new Error("timestamp is outside years 0001-9999");
   return d.toISOString().replace(/\.000Z$/, "Z");
 }
 
@@ -358,6 +542,7 @@ export function toExpressionNodeCborValue(v: ExpressionNode): CborValue {
 }
 
 export function fromExpressionNodeCborValue(value: CborValue): ExpressionNode {
+  asMap(value);
   return {
     expression: (asEnumMember(asString(requireKey(value, "expression")), ["literal", "field", "compare", "set", "text", "null", "logical", "arith", "time", "convert"]) as "literal" | "field" | "compare" | "set" | "text" | "null" | "logical" | "arith" | "time" | "convert"),
     literal: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : fromTypedValueCborValue(csilV))(mapGet(value, "literal")),
@@ -396,6 +581,7 @@ export function toQueryNodeBoxCborValue(v: QueryNodeBox): CborValue {
 }
 
 export function fromQueryNodeBoxCborValue(value: CborValue): QueryNodeBox {
+  asMap(value);
   return {
     node: (asEnumMember(asString(requireKey(value, "node")), ["scan", "filter", "project", "aggregate", "sort", "limit", "join", "union"]) as "scan" | "filter" | "project" | "aggregate" | "sort" | "limit" | "join" | "union"),
     scan: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : fromScanNodeCborValue(csilV))(mapGet(value, "scan")),
@@ -426,6 +612,7 @@ export function toFieldRefCborValue(v: FieldRef): CborValue {
 }
 
 export function fromFieldRefCborValue(value: CborValue): FieldRef {
+  asMap(value);
   return {
     name: asString(requireKey(value, "name")),
     valueType: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "value_type")),
@@ -450,6 +637,7 @@ export function toCompareExprCborValue(v: CompareExpr): CborValue {
 }
 
 export function fromCompareExprCborValue(value: CborValue): CompareExpr {
+  asMap(value);
   return {
     compare: (asEnumMember(asString(requireKey(value, "compare")), ["eq", "ne", "lt", "le", "gt", "ge"]) as "eq" | "ne" | "lt" | "le" | "gt" | "ge"),
     left: asBytes(requireKey(value, "left")),
@@ -474,6 +662,7 @@ export function toSetExprCborValue(v: SetExpr): CborValue {
 }
 
 export function fromSetExprCborValue(value: CborValue): SetExpr {
+  asMap(value);
   return {
     setTest: (asEnumMember(asString(requireKey(value, "set_test")), ["in", "not-in"]) as "in" | "not-in"),
     left: asBytes(requireKey(value, "left")),
@@ -498,6 +687,7 @@ export function toTextExprCborValue(v: TextExpr): CborValue {
 }
 
 export function fromTextExprCborValue(value: CborValue): TextExpr {
+  asMap(value);
   return {
     textTest: (asEnumMember(asString(requireKey(value, "text_test")), ["starts-with", "ends-with", "contains"]) as "starts-with" | "ends-with" | "contains"),
     left: asBytes(requireKey(value, "left")),
@@ -521,6 +711,7 @@ export function toNullExprCborValue(v: NullExpr): CborValue {
 }
 
 export function fromNullExprCborValue(value: CborValue): NullExpr {
+  asMap(value);
   return {
     nullTest: (asEnumMember(asString(requireKey(value, "null_test")), ["is-null", "is-not-null"]) as "is-null" | "is-not-null"),
     operand: asBytes(requireKey(value, "operand")),
@@ -543,6 +734,7 @@ export function toLogicalExprCborValue(v: LogicalExpr): CborValue {
 }
 
 export function fromLogicalExprCborValue(value: CborValue): LogicalExpr {
+  asMap(value);
   return {
     logical: (asEnumMember(asString(requireKey(value, "logical")), ["and", "or", "not"]) as "and" | "or" | "not"),
     operands: asArray(requireKey(value, "operands")).map((csilE) => asBytes(csilE)),
@@ -566,6 +758,7 @@ export function toArithExprCborValue(v: ArithExpr): CborValue {
 }
 
 export function fromArithExprCborValue(value: CborValue): ArithExpr {
+  asMap(value);
   return {
     arith: (asEnumMember(asString(requireKey(value, "arith")), ["add", "sub", "mul", "div"]) as "add" | "sub" | "mul" | "div"),
     left: asBytes(requireKey(value, "left")),
@@ -592,6 +785,7 @@ export function toTimeExprCborValue(v: TimeExpr): CborValue {
 }
 
 export function fromTimeExprCborValue(value: CborValue): TimeExpr {
+  asMap(value);
   return {
     timeFn: (asEnumMember(asString(requireKey(value, "time_fn")), ["truncate", "extract", "shift"]) as "truncate" | "extract" | "shift"),
     operand: asBytes(requireKey(value, "operand")),
@@ -617,6 +811,7 @@ export function toConvertExprCborValue(v: ConvertExpr): CborValue {
 }
 
 export function fromConvertExprCborValue(value: CborValue): ConvertExpr {
+  asMap(value);
   return {
     convertTo: asString(requireKey(value, "convert_to")),
     operand: asBytes(requireKey(value, "operand")),
@@ -639,6 +834,7 @@ export function toIntervalCborValue(v: Interval): CborValue {
 }
 
 export function fromIntervalCborValue(value: CborValue): Interval {
+  asMap(value);
   return {
     fixedMs: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asNumber(csilV))(mapGet(value, "fixed_ms")),
     calendar: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : (asEnumMember(asString(csilV), ["hour", "day", "week", "month"]) as "hour" | "day" | "week" | "month"))(mapGet(value, "calendar")),
@@ -663,6 +859,7 @@ export function toTimeRangeCborValue(v: TimeRange): CborValue {
 }
 
 export function fromTimeRangeCborValue(value: CborValue): TimeRange {
+  asMap(value);
   return {
     rangeStart: asNumber(requireKey(value, "range_start")),
     rangeEnd: asNumber(requireKey(value, "range_end")),
@@ -690,6 +887,7 @@ export function toMeasureCborValue(v: Measure): CborValue {
 }
 
 export function fromMeasureCborValue(value: CborValue): Measure {
+  asMap(value);
   return {
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["count", "sum", "min", "max", "avg", "count_distinct", "count_distinct_approx", "quantile", "quantile_approx", "histogram_merge", "top_k", "top_k_approx", "rate", "increase"]) as "count" | "sum" | "min" | "max" | "avg" | "count_distinct" | "count_distinct_approx" | "quantile" | "quantile_approx" | "histogram_merge" | "top_k" | "top_k_approx" | "rate" | "increase"),
     field: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : fromFieldRefCborValue(csilV))(mapGet(value, "field")),
@@ -715,6 +913,7 @@ export function toDimensionCborValue(v: Dimension): CborValue {
 }
 
 export function fromDimensionCborValue(value: CborValue): Dimension {
+  asMap(value);
   return {
     field: fromFieldRefCborValue(requireKey(value, "field")),
     alias: asString(requireKey(value, "alias")),
@@ -737,6 +936,7 @@ export function toSortKeyCborValue(v: SortKey): CborValue {
 }
 
 export function fromSortKeyCborValue(value: CborValue): SortKey {
+  asMap(value);
   return {
     alias: asString(requireKey(value, "alias")),
     direction: (asEnumMember(asString(requireKey(value, "direction")), ["asc", "desc"]) as "asc" | "desc"),
@@ -760,6 +960,7 @@ export function toScanNodeCborValue(v: ScanNode): CborValue {
 }
 
 export function fromScanNodeCborValue(value: CborValue): ScanNode {
+  asMap(value);
   return {
     scan: (asEnumMember(asString(requireKey(value, "scan")), ["events", "error_occurrences", "error_groups", "spans", "metric_points", "identity_edges", "campaign_touches", "conversions", "campaign_costs"]) as "events" | "error_occurrences" | "error_groups" | "spans" | "metric_points" | "identity_edges" | "campaign_touches" | "conversions" | "campaign_costs"),
     projectId: asBytes(requireKey(value, "project_id")),
@@ -783,6 +984,7 @@ export function toFilterNodeCborValue(v: FilterNode): CborValue {
 }
 
 export function fromFilterNodeCborValue(value: CborValue): FilterNode {
+  asMap(value);
   return {
     filter: asBytes(requireKey(value, "filter")),
     input: asBytes(requireKey(value, "input")),
@@ -805,6 +1007,7 @@ export function toProjectNodeCborValue(v: ProjectNode): CborValue {
 }
 
 export function fromProjectNodeCborValue(value: CborValue): ProjectNode {
+  asMap(value);
   return {
     projectFields: asArray(requireKey(value, "project_fields")).map((csilE) => fromDimensionCborValue(csilE)),
     input: asBytes(requireKey(value, "input")),
@@ -829,6 +1032,7 @@ export function toAggregateNodeCborValue(v: AggregateNode): CborValue {
 }
 
 export function fromAggregateNodeCborValue(value: CborValue): AggregateNode {
+  asMap(value);
   return {
     dimensions: asArray(requireKey(value, "dimensions")).map((csilE) => fromDimensionCborValue(csilE)),
     measures: asArray(requireKey(value, "measures")).map((csilE) => fromMeasureCborValue(csilE)),
@@ -853,6 +1057,7 @@ export function toSortNodeCborValue(v: SortNode): CborValue {
 }
 
 export function fromSortNodeCborValue(value: CborValue): SortNode {
+  asMap(value);
   return {
     sort: asArray(requireKey(value, "sort")).map((csilE) => fromSortKeyCborValue(csilE)),
     input: asBytes(requireKey(value, "input")),
@@ -877,6 +1082,7 @@ export function toLimitNodeCborValue(v: LimitNode): CborValue {
 }
 
 export function fromLimitNodeCborValue(value: CborValue): LimitNode {
+  asMap(value);
   return {
     limit: asNumber(requireKey(value, "limit")),
     offset: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asNumber(csilV))(mapGet(value, "offset")),
@@ -903,6 +1109,7 @@ export function toJoinNodeCborValue(v: JoinNode): CborValue {
 }
 
 export function fromJoinNodeCborValue(value: CborValue): JoinNode {
+  asMap(value);
   return {
     joinKey: fromFieldRefCborValue(requireKey(value, "join_key")),
     maxRowsEachSide: asNumber(requireKey(value, "max_rows_each_side")),
@@ -926,6 +1133,7 @@ export function toUnionNodeCborValue(v: UnionNode): CborValue {
 }
 
 export function fromUnionNodeCborValue(value: CborValue): UnionNode {
+  asMap(value);
   return {
     union: asArray(requireKey(value, "union")).map((csilE) => asBytes(csilE)),
   };
@@ -948,6 +1156,7 @@ export function toFunnelStepCborValue(v: FunnelStep): CborValue {
 }
 
 export function fromFunnelStepCborValue(value: CborValue): FunnelStep {
+  asMap(value);
   return {
     name: asString(requireKey(value, "name")),
     match: asBytes(requireKey(value, "match")),
@@ -977,6 +1186,7 @@ export function toFunnelQueryCborValue(v: FunnelQuery): CborValue {
 }
 
 export function fromFunnelQueryCborValue(value: CborValue): FunnelQuery {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     range: fromTimeRangeCborValue(requireKey(value, "range")),
@@ -1011,6 +1221,7 @@ export function toRetentionQueryCborValue(v: RetentionQuery): CborValue {
 }
 
 export function fromRetentionQueryCborValue(value: CborValue): RetentionQuery {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     range: fromTimeRangeCborValue(requireKey(value, "range")),
@@ -1045,6 +1256,7 @@ export function toPathQueryCborValue(v: PathQuery): CborValue {
 }
 
 export function fromPathQueryCborValue(value: CborValue): PathQuery {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     range: fromTimeRangeCborValue(requireKey(value, "range")),
@@ -1073,6 +1285,7 @@ export function toTraceQueryCborValue(v: TraceQuery): CborValue {
 }
 
 export function fromTraceQueryCborValue(value: CborValue): TraceQuery {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     traceId: asBytes(requireKey(value, "trace_id")),
@@ -1101,6 +1314,7 @@ export function toTimelineQueryCborValue(v: TimelineQuery): CborValue {
 }
 
 export function fromTimelineQueryCborValue(value: CborValue): TimelineQuery {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     range: fromTimeRangeCborValue(requireKey(value, "range")),
@@ -1135,6 +1349,7 @@ export function toAttributionQueryCborValue(v: AttributionQuery): CborValue {
 }
 
 export function fromAttributionQueryCborValue(value: CborValue): AttributionQuery {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     range: fromTimeRangeCborValue(requireKey(value, "range")),
@@ -1169,6 +1384,7 @@ export function toCampaignSummaryQueryCborValue(v: CampaignSummaryQuery): CborVa
 }
 
 export function fromCampaignSummaryQueryCborValue(value: CborValue): CampaignSummaryQuery {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     range: fromTimeRangeCborValue(requireKey(value, "range")),
@@ -1199,6 +1415,7 @@ export function toQueryBudgetCborValue(v: QueryBudget): CborValue {
 }
 
 export function fromQueryBudgetCborValue(value: CborValue): QueryBudget {
+  asMap(value);
   return {
     deadlineMs: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asNumber(csilV))(mapGet(value, "deadline_ms")),
     maxScannedBytes: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asNumber(csilV))(mapGet(value, "max_scanned_bytes")),
@@ -1236,6 +1453,7 @@ export function toQueryRequestCborValue(v: QueryRequest): CborValue {
 }
 
 export function fromQueryRequestCborValue(value: CborValue): QueryRequest {
+  asMap(value);
   return {
     algebraVersion: asNumber(requireKey(value, "algebra_version")),
     consistency: (asEnumMember(asString(requireKey(value, "consistency")), ["committed", "bounded-stale"]) as "committed" | "bounded-stale"),
@@ -1273,6 +1491,7 @@ export function toExactnessCborValue(v: Exactness): CborValue {
 }
 
 export function fromExactnessCborValue(value: CborValue): Exactness {
+  asMap(value);
   return {
     alias: asString(requireKey(value, "alias")),
     exact: asBool(requireKey(value, "exact")),
@@ -1298,6 +1517,7 @@ export function toMissingRangeCborValue(v: MissingRange): CborValue {
 }
 
 export function fromMissingRangeCborValue(value: CborValue): MissingRange {
+  asMap(value);
   return {
     tabletId: asString(requireKey(value, "tablet_id")),
     rangeStart: asNumber(requireKey(value, "range_start")),
@@ -1332,6 +1552,7 @@ export function toResultMetadataCborValue(v: ResultMetadata): CborValue {
 }
 
 export function fromResultMetadataCborValue(value: CborValue): ResultMetadata {
+  asMap(value);
   return {
     algebraVersion: asNumber(requireKey(value, "algebra_version")),
     commitWatermark: asNumber(requireKey(value, "commit_watermark")),
@@ -1364,6 +1585,7 @@ export function toResultRowCborValue(v: ResultRow): CborValue {
 }
 
 export function fromResultRowCborValue(value: CborValue): ResultRow {
+  asMap(value);
   return {
     values: asArray(requireKey(value, "values")).map((csilE) => fromTypedValueCborValue(csilE)),
   };
@@ -1386,6 +1608,7 @@ export function toQueryResponseCborValue(v: QueryResponse): CborValue {
 }
 
 export function fromQueryResponseCborValue(value: CborValue): QueryResponse {
+  asMap(value);
   return {
     columns: asArray(requireKey(value, "columns")).map((csilE) => asString(csilE)),
     rows: asArray(requireKey(value, "rows")).map((csilE) => fromResultRowCborValue(csilE)),
@@ -1411,6 +1634,7 @@ export function toThresholdConditionCborValue(v: ThresholdCondition): CborValue 
 }
 
 export function fromThresholdConditionCborValue(value: CborValue): ThresholdCondition {
+  asMap(value);
   return {
     alias: asString(requireKey(value, "alias")),
     compare: (asEnumMember(asString(requireKey(value, "compare")), ["eq", "ne", "lt", "le", "gt", "ge"]) as "eq" | "ne" | "lt" | "le" | "gt" | "ge"),
@@ -1434,6 +1658,7 @@ export function toAbsenceConditionCborValue(v: AbsenceCondition): CborValue {
 }
 
 export function fromAbsenceConditionCborValue(value: CborValue): AbsenceCondition {
+  asMap(value);
   return {
     forMs: asNumber(requireKey(value, "for_ms")),
   };
@@ -1468,6 +1693,7 @@ export function toAlertRuleCborValue(v: AlertRule): CborValue {
 }
 
 export function fromAlertRuleCborValue(value: CborValue): AlertRule {
+  asMap(value);
   return {
     ruleId: asString(requireKey(value, "rule_id")),
     name: asString(requireKey(value, "name")),
@@ -1504,6 +1730,7 @@ export function toNotificationTargetCborValue(v: NotificationTarget): CborValue 
 }
 
 export function fromNotificationTargetCborValue(value: CborValue): NotificationTarget {
+  asMap(value);
   return {
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["webhook", "csil-callback"]) as "webhook" | "csil-callback"),
     url: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "url")),
@@ -1536,6 +1763,7 @@ export function toAlertInstanceCborValue(v: AlertInstance): CborValue {
 }
 
 export function fromAlertInstanceCborValue(value: CborValue): AlertInstance {
+  asMap(value);
   return {
     ruleId: asString(requireKey(value, "rule_id")),
     state: (asEnumMember(asString(requireKey(value, "state")), ["ok", "firing", "no-data", "unknown", "silenced"]) as "ok" | "firing" | "no-data" | "unknown" | "silenced"),
@@ -1569,6 +1797,7 @@ export function toSilenceRequestCborValue(v: SilenceRequest): CborValue {
 }
 
 export function fromSilenceRequestCborValue(value: CborValue): SilenceRequest {
+  asMap(value);
   return {
     ruleId: asString(requireKey(value, "rule_id")),
     projectId: asBytes(requireKey(value, "project_id")),
@@ -1594,6 +1823,7 @@ export function toResolveRequestCborValue(v: ResolveRequest): CborValue {
 }
 
 export function fromResolveRequestCborValue(value: CborValue): ResolveRequest {
+  asMap(value);
   return {
     ruleId: asString(requireKey(value, "rule_id")),
     projectId: asBytes(requireKey(value, "project_id")),
@@ -1617,6 +1847,7 @@ export function toDeleteAlertRuleRequestCborValue(v: DeleteAlertRuleRequest): Cb
 }
 
 export function fromDeleteAlertRuleRequestCborValue(value: CborValue): DeleteAlertRuleRequest {
+  asMap(value);
   return {
     ruleId: asString(requireKey(value, "rule_id")),
     projectId: asBytes(requireKey(value, "project_id")),
@@ -1645,6 +1876,7 @@ export function toNotificationDeliveryCborValue(v: NotificationDelivery): CborVa
 }
 
 export function fromNotificationDeliveryCborValue(value: CborValue): NotificationDelivery {
+  asMap(value);
   return {
     ruleId: asString(requireKey(value, "rule_id")),
     target: asString(requireKey(value, "target")),
@@ -1673,6 +1905,7 @@ export function toNotificationDeliveryListCborValue(v: NotificationDeliveryList)
 }
 
 export function fromNotificationDeliveryListCborValue(value: CborValue): NotificationDeliveryList {
+  asMap(value);
   return {
     deliveries: asArray(requireKey(value, "deliveries")).map((csilE) => fromNotificationDeliveryCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -1702,6 +1935,7 @@ export function toWorkflowStatusCborValue(v: WorkflowStatus): CborValue {
 }
 
 export function fromWorkflowStatusCborValue(value: CborValue): WorkflowStatus {
+  asMap(value);
   return {
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["alert-evaluation", "notification", "projector-rebuild", "retention", "deletion", "export"]) as "alert-evaluation" | "notification" | "projector-rebuild" | "retention" | "deletion" | "export"),
     queue: asString(requireKey(value, "queue")),
@@ -1730,6 +1964,7 @@ export function toWorkflowListCborValue(v: WorkflowList): CborValue {
 }
 
 export function fromWorkflowListCborValue(value: CborValue): WorkflowList {
+  asMap(value);
   return {
     workflows: asArray(requireKey(value, "workflows")).map((csilE) => fromWorkflowStatusCborValue(csilE)),
   };
@@ -1753,6 +1988,7 @@ export function toRunWorkflowRequestCborValue(v: RunWorkflowRequest): CborValue 
 }
 
 export function fromRunWorkflowRequestCborValue(value: CborValue): RunWorkflowRequest {
+  asMap(value);
   return {
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["alert-evaluation", "notification", "projector-rebuild", "retention", "deletion", "export"]) as "alert-evaluation" | "notification" | "projector-rebuild" | "retention" | "deletion" | "export"),
     projectId: asBytes(requireKey(value, "project_id")),
@@ -1779,6 +2015,7 @@ export function toRunWorkflowResponseCborValue(v: RunWorkflowResponse): CborValu
 }
 
 export function fromRunWorkflowResponseCborValue(value: CborValue): RunWorkflowResponse {
+  asMap(value);
   return {
     taskId: asString(requireKey(value, "task_id")),
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["alert-evaluation", "notification", "projector-rebuild", "retention", "deletion", "export"]) as "alert-evaluation" | "notification" | "projector-rebuild" | "retention" | "deletion" | "export"),
@@ -1803,6 +2040,7 @@ export function toBeginLoginRequestCborValue(v: BeginLoginRequest): CborValue {
 }
 
 export function fromBeginLoginRequestCborValue(value: CborValue): BeginLoginRequest {
+  asMap(value);
   return {
     userDomain: asString(requireKey(value, "user_domain")),
     callbackUrl: asString(requireKey(value, "callback_url")),
@@ -1826,6 +2064,7 @@ export function toBeginLoginResponseCborValue(v: BeginLoginResponse): CborValue 
 }
 
 export function fromBeginLoginResponseCborValue(value: CborValue): BeginLoginResponse {
+  asMap(value);
   return {
     redirectUrl: asString(requireKey(value, "redirect_url")),
     loginId: asString(requireKey(value, "login_id")),
@@ -1850,6 +2089,7 @@ export function toCompleteLoginRequestCborValue(v: CompleteLoginRequest): CborVa
 }
 
 export function fromCompleteLoginRequestCborValue(value: CborValue): CompleteLoginRequest {
+  asMap(value);
   return {
     loginId: asString(requireKey(value, "login_id")),
     encryptedToken: asString(requireKey(value, "encrypted_token")),
@@ -1875,6 +2115,7 @@ export function toCompleteLoginResponseCborValue(v: CompleteLoginResponse): Cbor
 }
 
 export function fromCompleteLoginResponseCborValue(value: CborValue): CompleteLoginResponse {
+  asMap(value);
   return {
     sessionToken: asString(requireKey(value, "session_token")),
     subject: asString(requireKey(value, "subject")),
@@ -1899,6 +2140,7 @@ export function toMembershipCborValue(v: Membership): CborValue {
 }
 
 export function fromMembershipCborValue(value: CborValue): Membership {
+  asMap(value);
   return {
     workspaceId: asBytes(requireKey(value, "workspace_id")),
     role: (asEnumMember(asString(requireKey(value, "role")), ["viewer", "admin", "owner"]) as "viewer" | "admin" | "owner"),
@@ -1913,6 +2155,31 @@ export function fromMembershipCbor(bytes: Uint8Array): Membership {
   return fromMembershipCborValue(decode(bytes));
 }
 
+export function toUserPreferencesCborValue(v: UserPreferences): CborValue {
+  const csilMap = new Map<CborValue, CborValue>();
+  if (v.timeZone !== undefined) csilMap.set("time_zone", v.timeZone);
+  if (v.updatedAt !== undefined) csilMap.set("updated_at", v.updatedAt);
+  csilMap.set("time_display", v.timeDisplay);
+  return csilMap;
+}
+
+export function fromUserPreferencesCborValue(value: CborValue): UserPreferences {
+  asMap(value);
+  return {
+    timeDisplay: (asEnumMember(asString(requireKey(value, "time_display")), ["browser", "utc", "zone"]) as "browser" | "utc" | "zone"),
+    timeZone: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "time_zone")),
+    updatedAt: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asNumber(csilV))(mapGet(value, "updated_at")),
+  };
+}
+
+export function toUserPreferencesCbor(v: UserPreferences): Uint8Array {
+  return encodeValue(toUserPreferencesCborValue(v));
+}
+
+export function fromUserPreferencesCbor(bytes: Uint8Array): UserPreferences {
+  return fromUserPreferencesCborValue(decode(bytes));
+}
+
 export function toProjectCborValue(v: Project): CborValue {
   const csilMap = new Map<CborValue, CborValue>();
   csilMap.set("name", v.name);
@@ -1923,6 +2190,7 @@ export function toProjectCborValue(v: Project): CborValue {
 }
 
 export function fromProjectCborValue(value: CborValue): Project {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     workspaceId: asBytes(requireKey(value, "workspace_id")),
@@ -1947,6 +2215,7 @@ export function toWorkspaceCborValue(v: Workspace): CborValue {
 }
 
 export function fromWorkspaceCborValue(value: CborValue): Workspace {
+  asMap(value);
   return {
     workspaceId: asBytes(requireKey(value, "workspace_id")),
     name: asString(requireKey(value, "name")),
@@ -1973,6 +2242,7 @@ export function toApiKeySummaryCborValue(v: ApiKeySummary): CborValue {
 }
 
 export function fromApiKeySummaryCborValue(value: CborValue): ApiKeySummary {
+  asMap(value);
   return {
     keyId: asString(requireKey(value, "key_id")),
     projectId: asBytes(requireKey(value, "project_id")),
@@ -2001,6 +2271,7 @@ export function toDeletionTargetCborValue(v: DeletionTarget): CborValue {
 }
 
 export function fromDeletionTargetCborValue(value: CborValue): DeletionTarget {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     endUserId: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "end_user_id")),
@@ -2025,6 +2296,7 @@ export function toDeletionRequestCborValue(v: DeletionRequest): CborValue {
 }
 
 export function fromDeletionRequestCborValue(value: CborValue): DeletionRequest {
+  asMap(value);
   return {
     target: fromDeletionTargetCborValue(requireKey(value, "target")),
     reason: asString(requireKey(value, "reason")),
@@ -2050,6 +2322,7 @@ export function toDeletionResponseCborValue(v: DeletionResponse): CborValue {
 }
 
 export function fromDeletionResponseCborValue(value: CborValue): DeletionResponse {
+  asMap(value);
   return {
     requestId: asString(requireKey(value, "request_id")),
     tombstoneGeneration: asNumber(requireKey(value, "tombstone_generation")),
@@ -2086,6 +2359,7 @@ export function toPolicyDocumentCborValue(v: PolicyDocument): CborValue {
 }
 
 export function fromPolicyDocumentCborValue(value: CborValue): PolicyDocument {
+  asMap(value);
   return {
     scope: (asEnumMember(asString(requireKey(value, "scope")), ["installation", "workspace", "project", "environment", "source"]) as "installation" | "workspace" | "project" | "environment" | "source"),
     scopeId: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "scope_id")),
@@ -2130,6 +2404,7 @@ export function toCompiledPolicyCborValue(v: CompiledPolicy): CborValue {
 }
 
 export function fromCompiledPolicyCborValue(value: CborValue): CompiledPolicy {
+  asMap(value);
   return {
     policyVersion: asNumber(requireKey(value, "policy_version")),
     enabledKinds: asArray(requireKey(value, "enabled_kinds")).map((csilE) => (asEnumMember(asString(csilE), ["event", "page-view", "session-start", "session-end", "session-heartbeat", "interaction", "feature-exposure", "identify", "alias", "group", "conversion", "error", "span", "metric-point", "campaign-touch", "campaign-cost"]) as "event" | "page-view" | "session-start" | "session-end" | "session-heartbeat" | "interaction" | "feature-exposure" | "identify" | "alias" | "group" | "conversion" | "error" | "span" | "metric-point" | "campaign-touch" | "campaign-cost")),
@@ -2165,6 +2440,7 @@ export function toPolicyRequestCborValue(v: PolicyRequest): CborValue {
 }
 
 export function fromPolicyRequestCborValue(value: CborValue): PolicyRequest {
+  asMap(value);
   return {
     workspaceId: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "workspace_id")),
     projectId: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "project_id")),
@@ -2197,6 +2473,7 @@ export function toAttributionSettingsCborValue(v: AttributionSettings): CborValu
 }
 
 export function fromAttributionSettingsCborValue(value: CborValue): AttributionSettings {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     positionFirstWeight: asNumber(requireKey(value, "position_first_weight")),
@@ -2234,6 +2511,7 @@ export function toSavedAnalysisCborValue(v: SavedAnalysis): CborValue {
 }
 
 export function fromSavedAnalysisCborValue(value: CborValue): SavedAnalysis {
+  asMap(value);
   return {
     analysisId: asString(requireKey(value, "analysis_id")),
     projectId: asBytes(requireKey(value, "project_id")),
@@ -2263,6 +2541,7 @@ export function toSavedAnalysisListCborValue(v: SavedAnalysisList): CborValue {
 }
 
 export function fromSavedAnalysisListCborValue(value: CborValue): SavedAnalysisList {
+  asMap(value);
   return {
     analyses: asArray(requireKey(value, "analyses")).map((csilE) => fromSavedAnalysisCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2289,6 +2568,7 @@ export function toDashboardPanelCborValue(v: DashboardPanel): CborValue {
 }
 
 export function fromDashboardPanelCborValue(value: CborValue): DashboardPanel {
+  asMap(value);
   return {
     analysisId: asString(requireKey(value, "analysis_id")),
     title: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "title")),
@@ -2319,6 +2599,7 @@ export function toSavedDashboardCborValue(v: SavedDashboard): CborValue {
 }
 
 export function fromSavedDashboardCborValue(value: CborValue): SavedDashboard {
+  asMap(value);
   return {
     dashboardId: asString(requireKey(value, "dashboard_id")),
     projectId: asBytes(requireKey(value, "project_id")),
@@ -2345,6 +2626,7 @@ export function toSavedDashboardListCborValue(v: SavedDashboardList): CborValue 
 }
 
 export function fromSavedDashboardListCborValue(value: CborValue): SavedDashboardList {
+  asMap(value);
   return {
     dashboards: asArray(requireKey(value, "dashboards")).map((csilE) => fromSavedDashboardCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2369,6 +2651,7 @@ export function toSavedRequestCborValue(v: SavedRequest): CborValue {
 }
 
 export function fromSavedRequestCborValue(value: CborValue): SavedRequest {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     id: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "id")),
@@ -2402,6 +2685,7 @@ export function toRoleTokenPolicyCborValue(v: RoleTokenPolicy): CborValue {
 }
 
 export function fromRoleTokenPolicyCborValue(value: CborValue): RoleTokenPolicy {
+  asMap(value);
   return {
     roles: asArray(requireKey(value, "roles")).map((csilE) => (asEnumMember(asString(csilE), ["collector-intake", "collector-forwarder", "compatibility-receiver", "ingest-gateway", "query-coordinator", "projector", "workflow-worker", "read-replica", "export-replica", "storage-process"]) as "collector-intake" | "collector-forwarder" | "compatibility-receiver" | "ingest-gateway" | "query-coordinator" | "projector" | "workflow-worker" | "read-replica" | "export-replica" | "storage-process")),
     cells: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asArray(csilV).map((csilE) => asString(csilE)))(mapGet(value, "cells")),
@@ -2433,6 +2717,7 @@ export function toCreateRoleTokenRequestCborValue(v: CreateRoleTokenRequest): Cb
 }
 
 export function fromCreateRoleTokenRequestCborValue(value: CborValue): CreateRoleTokenRequest {
+  asMap(value);
   return {
     label: asString(requireKey(value, "label")),
     policy: fromRoleTokenPolicyCborValue(requireKey(value, "policy")),
@@ -2457,6 +2742,7 @@ export function toCreateRoleTokenResponseCborValue(v: CreateRoleTokenResponse): 
 }
 
 export function fromCreateRoleTokenResponseCborValue(value: CborValue): CreateRoleTokenResponse {
+  asMap(value);
   return {
     tokenId: asString(requireKey(value, "token_id")),
     token: asString(requireKey(value, "token")),
@@ -2487,6 +2773,7 @@ export function toRoleTokenSummaryCborValue(v: RoleTokenSummary): CborValue {
 }
 
 export function fromRoleTokenSummaryCborValue(value: CborValue): RoleTokenSummary {
+  asMap(value);
   return {
     tokenId: asString(requireKey(value, "token_id")),
     label: asString(requireKey(value, "label")),
@@ -2515,6 +2802,7 @@ export function toRoleTokenListCborValue(v: RoleTokenList): CborValue {
 }
 
 export function fromRoleTokenListCborValue(value: CborValue): RoleTokenList {
+  asMap(value);
   return {
     tokens: asArray(requireKey(value, "tokens")).map((csilE) => fromRoleTokenSummaryCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2537,6 +2825,7 @@ export function toRevokeRoleTokenRequestCborValue(v: RevokeRoleTokenRequest): Cb
 }
 
 export function fromRevokeRoleTokenRequestCborValue(value: CborValue): RevokeRoleTokenRequest {
+  asMap(value);
   return {
     tokenId: asString(requireKey(value, "token_id")),
     cascade: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBool(csilV))(mapGet(value, "cascade")),
@@ -2563,6 +2852,7 @@ export function toNodeCapabilitiesCborValue(v: NodeCapabilities): CborValue {
 }
 
 export function fromNodeCapabilitiesCborValue(value: CborValue): NodeCapabilities {
+  asMap(value);
   return {
     softwareVersion: asString(requireKey(value, "software_version")),
     protocolVersions: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asArray(csilV).map((csilE) => asNumber(csilE)))(mapGet(value, "protocol_versions")),
@@ -2594,6 +2884,7 @@ export function toEnrollNodeRequestCborValue(v: EnrollNodeRequest): CborValue {
 }
 
 export function fromEnrollNodeRequestCborValue(value: CborValue): EnrollNodeRequest {
+  asMap(value);
   return {
     token: asString(requireKey(value, "token")),
     certificateRequest: asBytes(requireKey(value, "certificate_request")),
@@ -2629,6 +2920,7 @@ export function toEnrollNodeResponseCborValue(v: EnrollNodeResponse): CborValue 
 }
 
 export function fromEnrollNodeResponseCborValue(value: CborValue): EnrollNodeResponse {
+  asMap(value);
   return {
     nodeId: asString(requireKey(value, "node_id")),
     certificateChain: asArray(requireKey(value, "certificate_chain")).map((csilE) => asBytes(csilE)),
@@ -2659,6 +2951,7 @@ export function toRenewNodeCertificateRequestCborValue(v: RenewNodeCertificateRe
 }
 
 export function fromRenewNodeCertificateRequestCborValue(value: CborValue): RenewNodeCertificateRequest {
+  asMap(value);
   return {
     nodeId: asString(requireKey(value, "node_id")),
     certificateRequest: asBytes(requireKey(value, "certificate_request")),
@@ -2688,6 +2981,7 @@ export function toNodeSummaryCborValue(v: NodeSummary): CborValue {
 }
 
 export function fromNodeSummaryCborValue(value: CborValue): NodeSummary {
+  asMap(value);
   return {
     nodeId: asString(requireKey(value, "node_id")),
     tokenId: asString(requireKey(value, "token_id")),
@@ -2717,6 +3011,7 @@ export function toNodeListCborValue(v: NodeList): CborValue {
 }
 
 export function fromNodeListCborValue(value: CborValue): NodeList {
+  asMap(value);
   return {
     nodes: asArray(requireKey(value, "nodes")).map((csilE) => fromNodeSummaryCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2739,6 +3034,7 @@ export function toListRequestCborValue(v: ListRequest): CborValue {
 }
 
 export function fromListRequestCborValue(value: CborValue): ListRequest {
+  asMap(value);
   return {
     cursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "cursor")),
     limit: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asNumber(csilV))(mapGet(value, "limit")),
@@ -2761,6 +3057,7 @@ export function toWorkspaceListCborValue(v: WorkspaceList): CborValue {
 }
 
 export function fromWorkspaceListCborValue(value: CborValue): WorkspaceList {
+  asMap(value);
   return {
     workspaces: asArray(requireKey(value, "workspaces")).map((csilE) => fromWorkspaceCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2783,6 +3080,7 @@ export function toProjectListCborValue(v: ProjectList): CborValue {
 }
 
 export function fromProjectListCborValue(value: CborValue): ProjectList {
+  asMap(value);
   return {
     projects: asArray(requireKey(value, "projects")).map((csilE) => fromProjectCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2805,6 +3103,7 @@ export function toApiKeyListCborValue(v: ApiKeyList): CborValue {
 }
 
 export function fromApiKeyListCborValue(value: CborValue): ApiKeyList {
+  asMap(value);
   return {
     keys: asArray(requireKey(value, "keys")).map((csilE) => fromApiKeySummaryCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2828,6 +3127,7 @@ export function toAlertListRequestCborValue(v: AlertListRequest): CborValue {
 }
 
 export function fromAlertListRequestCborValue(value: CborValue): AlertListRequest {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     cursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "cursor")),
@@ -2851,6 +3151,7 @@ export function toAlertRuleListCborValue(v: AlertRuleList): CborValue {
 }
 
 export function fromAlertRuleListCborValue(value: CborValue): AlertRuleList {
+  asMap(value);
   return {
     rules: asArray(requireKey(value, "rules")).map((csilE) => fromAlertRuleCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2873,6 +3174,7 @@ export function toAlertInstanceListCborValue(v: AlertInstanceList): CborValue {
 }
 
 export function fromAlertInstanceListCborValue(value: CborValue): AlertInstanceList {
+  asMap(value);
   return {
     instances: asArray(requireKey(value, "instances")).map((csilE) => fromAlertInstanceCborValue(csilE)),
     nextCursor: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "next_cursor")),
@@ -2893,7 +3195,7 @@ export function toEmptyCborValue(v: Empty): CborValue {
 }
 
 export function fromEmptyCborValue(value: CborValue): Empty {
-  void value;
+  asMap(value);
   return {} as Empty;
 }
 
@@ -2919,6 +3221,7 @@ export function toTypedValueCborValue(v: TypedValue): CborValue {
 }
 
 export function fromTypedValueCborValue(value: CborValue): TypedValue {
+  asMap(value);
   return {
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["null", "bool", "int", "uint", "float", "decimal", "text", "bytes"]) as "null" | "bool" | "int" | "uint" | "float" | "decimal" | "text" | "bytes"),
     boolValue: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBool(csilV))(mapGet(value, "bool_value")),
@@ -2948,6 +3251,7 @@ export function toPropertyCborValue(v: Property): CborValue {
 }
 
 export function fromPropertyCborValue(value: CborValue): Property {
+  asMap(value);
   return {
     key: asString(requireKey(value, "key")),
     value: fromTypedValueCborValue(requireKey(value, "value")),
@@ -2975,6 +3279,7 @@ export function toMeasurementCborValue(v: Measurement): CborValue {
 }
 
 export function fromMeasurementCborValue(value: CborValue): Measurement {
+  asMap(value);
   return {
     key: asString(requireKey(value, "key")),
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["float", "decimal", "int"]) as "float" | "decimal" | "int"),
@@ -3002,6 +3307,7 @@ export function toConsentCborValue(v: Consent): CborValue {
 }
 
 export function fromConsentCborValue(value: CborValue): Consent {
+  asMap(value);
   return {
     marketing: (asEnumMember(asString(requireKey(value, "marketing")), ["granted", "denied", "absent"]) as "granted" | "denied" | "absent"),
     analytics: (asEnumMember(asString(requireKey(value, "analytics")), ["granted", "denied", "absent"]) as "granted" | "denied" | "absent"),
@@ -3046,6 +3352,7 @@ export function toEnvelopeCborValue(v: Envelope): CborValue {
 }
 
 export function fromEnvelopeCborValue(value: CborValue): Envelope {
+  asMap(value);
   return {
     eventId: asBytes(requireKey(value, "event_id")),
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["event", "page-view", "session-start", "session-end", "session-heartbeat", "interaction", "feature-exposure", "identify", "alias", "group", "conversion", "error", "span", "metric-point", "campaign-touch", "campaign-cost"]) as "event" | "page-view" | "session-start" | "session-end" | "session-heartbeat" | "interaction" | "feature-exposure" | "identify" | "alias" | "group" | "conversion" | "error" | "span" | "metric-point" | "campaign-touch" | "campaign-cost"),
@@ -3081,7 +3388,7 @@ export function fromEnvelopeCbor(bytes: Uint8Array): Envelope {
   return fromEnvelopeCborValue(decode(bytes));
 }
 
-export function toServiceErrorCborValue(v: ServiceError): CborValue {
+export function toServiceErrorTypeCborValue(v: ServiceErrorType): CborValue {
   const csilMap = new Map<CborValue, CborValue>();
   csilMap.set("code", v.code);
   if (v.detail !== undefined) csilMap.set("detail", v.detail.map((csilE): CborValue => toPropertyCborValue(csilE)));
@@ -3090,7 +3397,8 @@ export function toServiceErrorCborValue(v: ServiceError): CborValue {
   return csilMap;
 }
 
-export function fromServiceErrorCborValue(value: CborValue): ServiceError {
+export function fromServiceErrorTypeCborValue(value: CborValue): ServiceErrorType {
+  asMap(value);
   return {
     code: (asEnumMember(asString(requireKey(value, "code")), ["invalid-argument", "unauthenticated", "permission-denied", "not-found", "already-exists", "resource-exhausted", "failed-precondition", "unavailable", "schema-unsupported", "budget-exceeded", "incomplete-result", "internal"]) as "invalid-argument" | "unauthenticated" | "permission-denied" | "not-found" | "already-exists" | "resource-exhausted" | "failed-precondition" | "unavailable" | "schema-unsupported" | "budget-exceeded" | "incomplete-result" | "internal"),
     message: asString(requireKey(value, "message")),
@@ -3099,11 +3407,603 @@ export function fromServiceErrorCborValue(value: CborValue): ServiceError {
   };
 }
 
-export function toServiceErrorCbor(v: ServiceError): Uint8Array {
-  return encodeValue(toServiceErrorCborValue(v));
+export function toServiceErrorTypeCbor(v: ServiceErrorType): Uint8Array {
+  return encodeValue(toServiceErrorTypeCborValue(v));
 }
 
-export function fromServiceErrorCbor(bytes: Uint8Array): ServiceError {
-  return fromServiceErrorCborValue(decode(bytes));
+export function fromServiceErrorTypeCbor(bytes: Uint8Array): ServiceErrorType {
+  return fromServiceErrorTypeCborValue(decode(bytes));
 }
 
+export interface RpcReply { variant: string; payload: Uint8Array }
+
+export class ServiceErrorTypeRefusal extends Error {
+  readonly value: ServiceErrorType;
+
+  constructor(value: ServiceErrorType) {
+    super("ServiceError");
+    this.value = value;
+  }
+}
+
+export async function encodeTallyOwlControlRunQueryReply(handler: () => Promise<QueryResponse> | QueryResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "QueryResponse", payload: encodeValue(toQueryResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListWorkspacesReply(handler: () => Promise<WorkspaceList> | WorkspaceList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "WorkspaceList", payload: encodeValue(toWorkspaceListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListProjectsReply(handler: () => Promise<ProjectList> | ProjectList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ProjectList", payload: encodeValue(toProjectListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListApiKeysReply(handler: () => Promise<ApiKeyList> | ApiKeyList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ApiKeyList", payload: encodeValue(toApiKeyListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlPutAlertRuleReply(handler: () => Promise<AlertRule> | AlertRule): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "AlertRule", payload: encodeValue(toAlertRuleCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListAlertRulesReply(handler: () => Promise<AlertRuleList> | AlertRuleList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "AlertRuleList", payload: encodeValue(toAlertRuleListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListAlertInstancesReply(handler: () => Promise<AlertInstanceList> | AlertInstanceList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "AlertInstanceList", payload: encodeValue(toAlertInstanceListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlRequestDeletionReply(handler: () => Promise<DeletionResponse> | DeletionResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "DeletionResponse", payload: encodeValue(toDeletionResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlGetPolicyReply(handler: () => Promise<CompiledPolicy> | CompiledPolicy): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "CompiledPolicy", payload: encodeValue(toCompiledPolicyCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlBeginLoginReply(handler: () => Promise<BeginLoginResponse> | BeginLoginResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "BeginLoginResponse", payload: encodeValue(toBeginLoginResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlCompleteLoginReply(handler: () => Promise<CompleteLoginResponse> | CompleteLoginResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "CompleteLoginResponse", payload: encodeValue(toCompleteLoginResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlCreateRoleTokenReply(handler: () => Promise<CreateRoleTokenResponse> | CreateRoleTokenResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "CreateRoleTokenResponse", payload: encodeValue(toCreateRoleTokenResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListRoleTokensReply(handler: () => Promise<RoleTokenList> | RoleTokenList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "RoleTokenList", payload: encodeValue(toRoleTokenListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlRevokeRoleTokenReply(handler: () => Promise<Empty> | Empty): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "Empty", payload: encodeValue(toEmptyCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlEnrollNodeReply(handler: () => Promise<EnrollNodeResponse> | EnrollNodeResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "EnrollNodeResponse", payload: encodeValue(toEnrollNodeResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlRenewNodeCertificateReply(handler: () => Promise<EnrollNodeResponse> | EnrollNodeResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "EnrollNodeResponse", payload: encodeValue(toEnrollNodeResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListNodesReply(handler: () => Promise<NodeList> | NodeList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "NodeList", payload: encodeValue(toNodeListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlPutPolicyReply(handler: () => Promise<CompiledPolicy> | CompiledPolicy): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "CompiledPolicy", payload: encodeValue(toCompiledPolicyCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlPutAnalysisReply(handler: () => Promise<SavedAnalysis> | SavedAnalysis): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "SavedAnalysis", payload: encodeValue(toSavedAnalysisCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListAnalysesReply(handler: () => Promise<SavedAnalysisList> | SavedAnalysisList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "SavedAnalysisList", payload: encodeValue(toSavedAnalysisListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlDeleteAnalysisReply(handler: () => Promise<Empty> | Empty): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "Empty", payload: encodeValue(toEmptyCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlPutDashboardReply(handler: () => Promise<SavedDashboard> | SavedDashboard): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "SavedDashboard", payload: encodeValue(toSavedDashboardCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListDashboardsReply(handler: () => Promise<SavedDashboardList> | SavedDashboardList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "SavedDashboardList", payload: encodeValue(toSavedDashboardListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlPutAttributionSettingsReply(handler: () => Promise<AttributionSettings> | AttributionSettings): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "AttributionSettings", payload: encodeValue(toAttributionSettingsCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlGetAttributionSettingsReply(handler: () => Promise<AttributionSettings> | AttributionSettings): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "AttributionSettings", payload: encodeValue(toAttributionSettingsCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlDeleteDashboardReply(handler: () => Promise<Empty> | Empty): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "Empty", payload: encodeValue(toEmptyCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlDeleteAlertRuleReply(handler: () => Promise<Empty> | Empty): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "Empty", payload: encodeValue(toEmptyCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlSilenceAlertReply(handler: () => Promise<AlertInstance> | AlertInstance): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "AlertInstance", payload: encodeValue(toAlertInstanceCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlResolveAlertReply(handler: () => Promise<AlertInstance> | AlertInstance): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "AlertInstance", payload: encodeValue(toAlertInstanceCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListWorkflowsReply(handler: () => Promise<WorkflowList> | WorkflowList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "WorkflowList", payload: encodeValue(toWorkflowListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlRunWorkflowReply(handler: () => Promise<RunWorkflowResponse> | RunWorkflowResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "RunWorkflowResponse", payload: encodeValue(toRunWorkflowResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlListNotificationsReply(handler: () => Promise<NotificationDeliveryList> | NotificationDeliveryList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "NotificationDeliveryList", payload: encodeValue(toNotificationDeliveryListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlGetUserPreferencesReply(handler: () => Promise<UserPreferences> | UserPreferences): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "UserPreferences", payload: encodeValue(toUserPreferencesCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlControlPutUserPreferencesReply(handler: () => Promise<UserPreferences> | UserPreferences): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "UserPreferences", payload: encodeValue(toUserPreferencesCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export function resolveRpcReply(service: string, op: string, variant: string | null | undefined, payload: Uint8Array): Uint8Array {
+  if (service === "TallyOwlControl" && op === "run-query") {
+    switch (variant) {
+      case "QueryResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-workspaces") {
+    switch (variant) {
+      case "WorkspaceList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-projects") {
+    switch (variant) {
+      case "ProjectList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-api-keys") {
+    switch (variant) {
+      case "ApiKeyList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "put-alert-rule") {
+    switch (variant) {
+      case "AlertRule": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-alert-rules") {
+    switch (variant) {
+      case "AlertRuleList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-alert-instances") {
+    switch (variant) {
+      case "AlertInstanceList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "request-deletion") {
+    switch (variant) {
+      case "DeletionResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "get-policy") {
+    switch (variant) {
+      case "CompiledPolicy": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "begin-login") {
+    switch (variant) {
+      case "BeginLoginResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "complete-login") {
+    switch (variant) {
+      case "CompleteLoginResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "create-role-token") {
+    switch (variant) {
+      case "CreateRoleTokenResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-role-tokens") {
+    switch (variant) {
+      case "RoleTokenList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "revoke-role-token") {
+    switch (variant) {
+      case "Empty": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "enroll-node") {
+    switch (variant) {
+      case "EnrollNodeResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "renew-node-certificate") {
+    switch (variant) {
+      case "EnrollNodeResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-nodes") {
+    switch (variant) {
+      case "NodeList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "put-policy") {
+    switch (variant) {
+      case "CompiledPolicy": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "put-analysis") {
+    switch (variant) {
+      case "SavedAnalysis": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-analyses") {
+    switch (variant) {
+      case "SavedAnalysisList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "delete-analysis") {
+    switch (variant) {
+      case "Empty": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "put-dashboard") {
+    switch (variant) {
+      case "SavedDashboard": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-dashboards") {
+    switch (variant) {
+      case "SavedDashboardList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "put-attribution-settings") {
+    switch (variant) {
+      case "AttributionSettings": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "get-attribution-settings") {
+    switch (variant) {
+      case "AttributionSettings": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "delete-dashboard") {
+    switch (variant) {
+      case "Empty": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "delete-alert-rule") {
+    switch (variant) {
+      case "Empty": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "silence-alert") {
+    switch (variant) {
+      case "AlertInstance": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "resolve-alert") {
+    switch (variant) {
+      case "AlertInstance": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-workflows") {
+    switch (variant) {
+      case "WorkflowList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "run-workflow") {
+    switch (variant) {
+      case "RunWorkflowResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "list-notifications") {
+    switch (variant) {
+      case "NotificationDeliveryList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "get-user-preferences") {
+    switch (variant) {
+      case "UserPreferences": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlControl" && op === "put-user-preferences") {
+    switch (variant) {
+      case "UserPreferences": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  return payload;
+}

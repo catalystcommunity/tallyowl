@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &tallyowl_collector_api::types::ResolveKeyRequest {
                 credential: credential.clone(),
             },
-        ),
+        )?,
     )?;
     if resolved.variant.as_deref() == Some(tallyowl_rpc::SERVICE_ERROR_VARIANT) {
         return Err(
@@ -122,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         60_000,
         "events",
-    ));
+    ))?;
 
     for attempt in 0..40 {
         std::thread::sleep(Duration::from_millis(250));

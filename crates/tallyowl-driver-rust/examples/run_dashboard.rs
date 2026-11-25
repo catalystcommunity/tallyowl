@@ -30,7 +30,8 @@ fn main() {
             tallyowl_control_api::codec::encode_list_request(&ListRequest {
                 cursor: None,
                 limit: None,
-            }),
+            })
+            .expect("the request encodes"),
         )
         .expect("the head answers");
     let projects =
@@ -49,7 +50,8 @@ fn main() {
                         id: None,
                         cursor: None,
                         limit: None,
-                    }),
+                    })
+                    .expect("the request encodes"),
                 )
                 .expect("the head answers")
         };

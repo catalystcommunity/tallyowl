@@ -356,7 +356,8 @@ impl ClusterReads {
             .call(
                 REPLICATION_SERVICE,
                 "partial-aggregate",
-                encode_partial_query_request(request),
+                encode_partial_query_request(request)
+                    .map_err(|e| TallyOwlError::unencodable("A partial query", e))?,
             )
             .map_err(|e| {
                 // A broken connection is the ordinary case when a peer

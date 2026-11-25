@@ -5,30 +5,35 @@ use super::types::*;
 /// TallyOwlCollector service trait
 pub trait TallyOwlCollector {
     type Context;
+    #[allow(clippy::result_large_err)]
     /// An app driver submits a batch. The response means durable acceptance.
     fn submit_batch(
         &self,
         ctx: &Self::Context,
         input: SubmitBatchRequest,
     ) -> Result<SubmitBatchResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// A forwarder submits a batch to the head for final storage.
     fn commit_batch(
         &self,
         ctx: &Self::Context,
         input: CommitBatchRequest,
     ) -> Result<CommitBatchResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Fetch the compiled collection policy.
     fn fetch_policy(
         &self,
         ctx: &Self::Context,
         input: FetchPolicyRequest,
     ) -> Result<FetchPolicyResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Report collector health for readiness and for operators.
     fn health(
         &self,
         ctx: &Self::Context,
         input: HealthRequest,
     ) -> Result<CollectorHealth, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Resolve a source credential to its tenancy. The head answers this from
     /// the control catalog. A collector never stores a key.
     fn resolve_key(
@@ -51,18 +56,21 @@ pub mod tally_owl_collector_wire_ids {
 /// TallyOwlIngest service trait
 pub trait TallyOwlIngest {
     type Context;
+    #[allow(clippy::result_large_err)]
     /// Accept telemetry on the application's existing connection. Best effort.
     fn capture(
         &self,
         ctx: &Self::Context,
         input: CaptureRequest,
     ) -> Result<CaptureResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Accept telemetry and wait for the collector durability boundary.
     fn capture_critical(
         &self,
         ctx: &Self::Context,
         input: CaptureCriticalRequest,
     ) -> Result<CaptureCriticalResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Report the collection policy that the client must apply.
     fn policy_version(
         &self,
@@ -82,6 +90,7 @@ pub mod tally_owl_ingest_wire_ids {
 /// TallyOwlAlertReceiver service trait
 pub trait TallyOwlAlertReceiver {
     type Context;
+    #[allow(clippy::result_large_err)]
     /// Take one signed alert notification.
     fn notify(
         &self,

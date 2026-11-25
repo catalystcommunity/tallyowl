@@ -151,6 +151,13 @@ impl TallyOwlError {
         Self::new(ErrorCode::Internal, message)
     }
 
+    /// A value that a generated encoder refused. From csilgen 0.3.0 each
+    /// `encode_*` function returns a `Result`. The TallyOwl contracts have no
+    /// field that an encoder can refuse, so this is a defect, not bad input.
+    pub fn unencodable(what: impl std::fmt::Display, reason: impl std::fmt::Display) -> Self {
+        Self::internal(format!("{what} could not be encoded: {reason}"))
+    }
+
     pub fn resource_exhausted(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::ResourceExhausted, message)
     }

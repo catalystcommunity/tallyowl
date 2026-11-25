@@ -73,9 +73,14 @@ function encInto(v, out) {
             encInto(x, out);
     }
     else if (v instanceof Map) {
-        head(5, v.size, out);
-        for (const [k, val] of v) {
-            encInto(k, out);
+        // RFC 8949 section 4.2.1: entries go in bytewise order of the encoded keys, so
+        // every peer emits the same bytes and a decoder can check the order in one pass.
+        const entries = Array.from(v, ([k, val]) => [encodeValue(k), val]);
+        entries.sort(([a], [b]) => csilCompareBytes(a, b));
+        head(5, entries.length, out);
+        for (const [k, val] of entries) {
+            for (const b of k)
+                out.push(b);
             encInto(val, out);
         }
     }
@@ -89,6 +94,35 @@ export function encodeValue(value) {
     const out = [];
     encInto(value, out);
     return Uint8Array.from(out);
+}
+function csilCompareBytes(a, b) {
+    const n = Math.min(a.length, b.length);
+    for (let i = 0; i < n; i++) {
+        if (a[i] !== b[i])
+            return a[i] - b[i];
+    }
+    return a.length - b.length;
+}
+// A record accepts its fields in any order, so the decoder only marks a map whose
+// keys are out of canonical order; a dynamic-map reader refuses a marked map.
+const csilUnorderedMaps = new WeakSet();
+// A key with a longer head than needed is a second byte form of the same key, so
+// the order and duplicate checks on raw bytes would miss it.
+function csilShortestHead(b, at) {
+    const major = b[at] >> 5;
+    const low = b[at] & 0x1f;
+    if (major === 7 || low < 24)
+        return true;
+    if (low === 24)
+        return b[at + 1] >= 24;
+    if (low === 25)
+        return b[at + 1] !== 0;
+    if (low === 26)
+        return b[at + 1] !== 0 || b[at + 2] !== 0;
+    return b[at + 1] !== 0 || b[at + 2] !== 0 || b[at + 3] !== 0 || b[at + 4] !== 0;
+}
+function csilKeyLabel(key) {
+    return typeof key === "string" ? JSON.stringify(key) : String(key);
 }
 function readArg(st, low) {
     if (low < 24) {
@@ -130,8 +164,26 @@ function readArg(st, low) {
 function smallInt(arg) {
     return arg <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(arg) : arg;
 }
+/** Widen an IEEE 754 half-precision value (RFC 8949 Appendix D) exactly to binary64. */
+function csilHalfToFloat64(half) {
+    const exp = (half >> 10) & 0x1f;
+    const mant = half & 0x3ff;
+    let magnitude;
+    if (exp === 0)
+        magnitude = mant * 2 ** -24;
+    else if (exp === 31)
+        magnitude = mant === 0 ? Infinity : NaN;
+    else
+        magnitude = (mant + 1024) * 2 ** (exp - 25);
+    return half & 0x8000 ? -magnitude : magnitude;
+}
 function readFloat(st, low) {
     const bits = readArg(st, low);
+    if (low === 25) {
+        const view = new DataView(new ArrayBuffer(2));
+        view.setUint16(0, Number(bits), false);
+        return csilHalfToFloat64(view.getUint16(0, false));
+    }
     if (low === 26) {
         const view = new DataView(new ArrayBuffer(4));
         view.setUint32(0, Number(bits), false);
@@ -162,7 +214,7 @@ function decInto(st, depth) {
             st.pos += 1;
             return null;
         }
-        if (low === 26 || low === 27)
+        if (low === 25 || low === 26 || low === 27)
             return readFloat(st, low);
         throw new Error("malformed CBOR simple value");
     }
@@ -204,8 +256,25 @@ function decInto(st, depth) {
                 throw new Error("CBOR map length exceeds remaining input");
             const n = Number(arg);
             const m = new Map();
+            // Raw key bytes catch a repeated byte-string key and a key encoded twice in
+            // different widths, which a JS `Map` cannot tell apart from distinct keys.
+            const seen = new Set();
+            let prev = null;
             for (let i = 0; i < n; i++) {
+                const start = st.pos;
                 const k = decInto(st, depth + 1);
+                if (!csilShortestHead(st.b, start))
+                    throw new Error("csil cbor: map key is not in shortest form");
+                const raw = st.b.subarray(start, st.pos);
+                let id = "";
+                for (const b of raw)
+                    id += String.fromCharCode(b);
+                if (seen.has(id) || m.has(k))
+                    throw new Error(`csil cbor: duplicate key ${csilKeyLabel(k)}`);
+                seen.add(id);
+                if (prev !== null && csilCompareBytes(prev, raw) > 0)
+                    csilUnorderedMaps.add(m);
+                prev = raw;
                 const val = decInto(st, depth + 1);
                 m.set(k, val);
             }
@@ -270,6 +339,13 @@ export function asMap(value) {
         return value;
     throw new Error("expected a map");
 }
+/** A `{ * K => V }` map: its keys must arrive in canonical order (RFC 8949 section 4.2.1). */
+export function asDynamicMap(value) {
+    const m = asMap(value);
+    if (csilUnorderedMaps.has(m))
+        throw new Error("csil cbor: map keys are not in canonical order");
+    return m;
+}
 /** A decoded integer may surface as `bigint` (see `decInto`'s large-value path), so a
  * numeric literal's expected `number` is compared against the `bigint`-normalized form
  * rather than failing on a type mismatch that isn't a value mismatch. */
@@ -282,6 +358,34 @@ export function asLiteral(value, expected) {
 /** Validate a decoded scalar against a literal-enum's declared vocabulary, erroring
  * on an unknown value. The caller reads through `asNumber`/`asString`/`asBool`, which
  * already normalize a decoded `bigint` to `number`, so a plain membership check suffices. */
+/** CBOR orders unsigned integer keys first, then negative keys by magnitude. */
+export function enumNumberMap(entries) {
+    return new Map(entries.sort(([a], [b]) => {
+        if (a === b)
+            return 0;
+        if ((a < 0n) !== (b < 0n))
+            return a < 0n ? 1 : -1;
+        if (a < 0n)
+            return a > b ? -1 : 1;
+        return a < b ? -1 : 1;
+    }));
+}
+export function enumToNumber(label, entries) {
+    for (const [name, number] of entries) {
+        if (name === label)
+            return number;
+    }
+    throw new Error("unknown enum label");
+}
+export function enumFromNumber(value, entries) {
+    if (typeof value === "bigint" || (typeof value === "number" && Number.isSafeInteger(value))) {
+        for (const [name, number] of entries) {
+            if (BigInt(value) === number)
+                return name;
+        }
+    }
+    throw new Error("unknown enum number");
+}
 export function asEnumMember(value, members) {
     if (!members.includes(value)) {
         throw new Error(`unknown enum value: ${JSON.stringify(value)}`);
@@ -317,7 +421,91 @@ function asTagged(value, tag) {
 }
 /** Decode a tag-0 (RFC 3339, UTC) timestamp into a `Date`. */
 export function asTimestamp(value) {
-    return new Date(asString(asTagged(value, 0)));
+    return csilTsFromText(asString(asTagged(value, 0)));
+}
+// `Date` parsing accepts many shapes the wire contract forbids (a space for `T`, no
+// offset, leap seconds rolled over), so the grammar is checked by hand. `[0-9]` stays
+// ASCII-only, and `$` without the `m` flag matches only at the true end of input.
+const CSIL_TS_PATTERN = /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(?:[Zz]|([+-])([0-9]{2}):([0-9]{2}))$/;
+/** Parse canonical tag-0 text strictly. `Date` holds milliseconds, so a nonzero digit
+ * past the third fraction digit is an error rather than a silent rounding. */
+export function csilTsFromText(text) {
+    const m = CSIL_TS_PATTERN.exec(text);
+    if (m === null)
+        throw new Error(`invalid RFC 3339 timestamp ${JSON.stringify(text)}`);
+    const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (year < 1 || month < 1 || month > 12 || day < 1 || day > monthDays[month - 1]) {
+        throw new Error(`invalid calendar date in timestamp ${JSON.stringify(text)}`);
+    }
+    if (hour > 23 || minute > 59 || second > 59) {
+        throw new Error(`invalid time of day in timestamp ${JSON.stringify(text)}`);
+    }
+    const fraction = m[7] ?? "";
+    if (/[1-9]/.test(fraction.slice(3))) {
+        throw new Error(`timestamp ${JSON.stringify(text)} is finer than milliseconds`);
+    }
+    let offsetMinutes = 0;
+    if (m[8] !== undefined) {
+        const offsetHour = Number(m[9]);
+        const offsetMinute = Number(m[10]);
+        if (offsetHour > 23 || offsetMinute > 59) {
+            throw new Error(`invalid offset in timestamp ${JSON.stringify(text)}`);
+        }
+        offsetMinutes = (m[8] === "-" ? -1 : 1) * (offsetHour * 60 + offsetMinute);
+    }
+    // `Date.UTC` maps years 0-99 to 1900-1999, so the year is set on its own.
+    const local = new Date(0);
+    local.setUTCFullYear(year, month - 1, day);
+    local.setUTCHours(hour, minute, second, Number(fraction.padEnd(3, "0").slice(0, 3)));
+    const instant = new Date(local.getTime() - offsetMinutes * 60000);
+    const utcYear = instant.getUTCFullYear();
+    if (utcYear < 1 || utcYear > 9999) {
+        throw new Error(`timestamp ${JSON.stringify(text)} is outside years 0001-9999 in UTC`);
+    }
+    return instant;
+}
+const CSIL_EPOCH_FIRST = -62135596800;
+const CSIL_EPOCH_LAST = 253402300799;
+/** Decode tag-1 epoch seconds (`cddl_time`) into a `Date`. A `Date` holds
+ * milliseconds, so a float fraction is rounded to three digits by the shared rule. */
+export function asCddlTime(value) {
+    const inner = asTagged(value, 1);
+    // An integer past 2^53 decodes as a `bigint`; every one of those is out of range.
+    if (typeof inner === "bigint")
+        throw new Error("cddl_time is outside years 0001-9999");
+    if (typeof inner !== "number")
+        throw new Error("cddl_time content must be a number");
+    if (!Number.isFinite(inner))
+        throw new Error("cddl_time must be finite");
+    if (inner < CSIL_EPOCH_FIRST - 1 || inner > CSIL_EPOCH_LAST + 1) {
+        throw new Error("cddl_time is outside years 0001-9999");
+    }
+    // An integer and a float with the same value decode to the same `number`, and the
+    // rule gives an integer a zero fraction, so one path serves both.
+    let seconds = Math.floor(inner);
+    let units = Math.floor((inner - seconds) * 1000 + 0.5);
+    if (units === 1000) {
+        seconds += 1;
+        units = 0;
+    }
+    if (seconds < CSIL_EPOCH_FIRST || seconds > CSIL_EPOCH_LAST) {
+        throw new Error("cddl_time is outside years 0001-9999");
+    }
+    return new Date(seconds * 1000 + units);
+}
+/** A `Date` as tag-1 content: whole seconds as an integer, else a binary64 float. */
+export function csilEpochFromDate(d) {
+    if (!(d instanceof Date) || Number.isNaN(d.getTime()))
+        throw new Error("expected a valid Date");
+    const millis = d.getTime();
+    const seconds = Math.floor(millis / 1000);
+    if (seconds < CSIL_EPOCH_FIRST || seconds > CSIL_EPOCH_LAST) {
+        throw new Error("cddl_time is outside years 0001-9999");
+    }
+    const units = millis - seconds * 1000;
+    return units === 0 ? seconds : seconds + units / 1000;
 }
 /** Decode a tag-4 decimal fraction into its `[exponent, mantissa]` payload. */
 export function asDecimalPayload(value) {
@@ -331,6 +519,13 @@ export function asDecimalPayload(value) {
 }
 /** A `Date` rendered as the canonical tag-0 text: RFC 3339, UTC, `Z` offset. */
 export function csilTsToText(d) {
+    // An Invalid Date or a year outside 0001-9999 has no canonical text, and
+    // `toISOString` would write an expanded `+YYYYYY` year for the latter.
+    if (!(d instanceof Date) || Number.isNaN(d.getTime()))
+        throw new Error("expected a valid Date");
+    const year = d.getUTCFullYear();
+    if (year < 1 || year > 9999)
+        throw new Error("timestamp is outside years 0001-9999");
     return d.toISOString().replace(/\.000Z$/, "Z");
 }
 export function toEventPayloadCborValue(v) {
@@ -343,6 +538,7 @@ export function toEventPayloadCborValue(v) {
     return csilMap;
 }
 export function fromEventPayloadCborValue(value) {
+    asMap(value);
     return {
         name: asString(requireKey(value, "name")),
         route: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "route")),
@@ -367,6 +563,7 @@ export function toPageViewPayloadCborValue(v) {
     return csilMap;
 }
 export function fromPageViewPayloadCborValue(value) {
+    asMap(value);
     return {
         route: asString(requireKey(value, "route")),
         pageTitle: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "page_title")),
@@ -397,6 +594,7 @@ export function toCampaignParametersCborValue(v) {
     return csilMap;
 }
 export function fromCampaignParametersCborValue(value) {
+    asMap(value);
     return {
         source: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "source")),
         medium: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "medium")),
@@ -419,6 +617,7 @@ export function toSessionStartPayloadCborValue(v) {
     return csilMap;
 }
 export function fromSessionStartPayloadCborValue(value) {
+    asMap(value);
     return {
         entryRoute: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "entry_route")),
     };
@@ -435,6 +634,7 @@ export function toSessionEndPayloadCborValue(v) {
     return csilMap;
 }
 export function fromSessionEndPayloadCborValue(value) {
+    asMap(value);
     return {
         reason: asEnumMember(asString(requireKey(value, "reason")), ["explicit", "timeout", "maximum-lifetime"]),
     };
@@ -452,6 +652,7 @@ export function toInteractionPayloadCborValue(v) {
     return csilMap;
 }
 export function fromInteractionPayloadCborValue(value) {
+    asMap(value);
     return {
         target: asString(requireKey(value, "target")),
         action: asString(requireKey(value, "action")),
@@ -470,6 +671,7 @@ export function toFeatureExposurePayloadCborValue(v) {
     return csilMap;
 }
 export function fromFeatureExposurePayloadCborValue(value) {
+    asMap(value);
     return {
         feature: asString(requireKey(value, "feature")),
         variant: asString(requireKey(value, "variant")),
@@ -487,6 +689,7 @@ export function toIdentifyPayloadCborValue(v) {
     return csilMap;
 }
 export function fromIdentifyPayloadCborValue(value) {
+    asMap(value);
     return {
         endUserId: asString(requireKey(value, "end_user_id")),
     };
@@ -504,6 +707,7 @@ export function toAliasPayloadCborValue(v) {
     return csilMap;
 }
 export function fromAliasPayloadCborValue(value) {
+    asMap(value);
     return {
         fromId: asString(requireKey(value, "from_id")),
         toId: asString(requireKey(value, "to_id")),
@@ -523,6 +727,7 @@ export function toGroupPayloadCborValue(v) {
     return csilMap;
 }
 export function fromGroupPayloadCborValue(value) {
+    asMap(value);
     return {
         groupId: asString(requireKey(value, "group_id")),
         groupKind: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "group_kind")),
@@ -550,6 +755,7 @@ export function toConversionPayloadCborValue(v) {
     return csilMap;
 }
 export function fromConversionPayloadCborValue(value) {
+    asMap(value);
     return {
         goal: asString(requireKey(value, "goal")),
         value: ((csilV) => csilV === undefined ? undefined : CsilDecimal.fromTag4(asDecimalPayload(csilV)))(mapGet(value, "value")),
@@ -579,6 +785,7 @@ export function toStackFrameCborValue(v) {
     return csilMap;
 }
 export function fromStackFrameCborValue(value) {
+    asMap(value);
     return {
         module: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "module")),
         function: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "function")),
@@ -610,6 +817,7 @@ export function toErrorPayloadCborValue(v) {
     return csilMap;
 }
 export function fromErrorPayloadCborValue(value) {
+    asMap(value);
     return {
         errorType: asString(requireKey(value, "error_type")),
         message: asString(requireKey(value, "message")),
@@ -634,6 +842,7 @@ export function toSpanLinkCborValue(v) {
     return csilMap;
 }
 export function fromSpanLinkCborValue(value) {
+    asMap(value);
     return {
         traceId: asBytes(requireKey(value, "trace_id")),
         spanId: asBytes(requireKey(value, "span_id")),
@@ -665,6 +874,7 @@ export function toSpanPayloadCborValue(v) {
     return csilMap;
 }
 export function fromSpanPayloadCborValue(value) {
+    asMap(value);
     return {
         operation: asString(requireKey(value, "operation")),
         kind: asEnumMember(asString(requireKey(value, "kind")), ["internal", "server", "client", "producer", "consumer"]),
@@ -693,6 +903,7 @@ export function toHistogramValueCborValue(v) {
     return csilMap;
 }
 export function fromHistogramValueCborValue(value) {
+    asMap(value);
     return {
         count: asNumber(requireKey(value, "count")),
         sum: asNumber(requireKey(value, "sum")),
@@ -728,6 +939,7 @@ export function toMetricPointPayloadCborValue(v) {
     return csilMap;
 }
 export function fromMetricPointPayloadCborValue(value) {
+    asMap(value);
     return {
         metricName: asString(requireKey(value, "metric_name")),
         metricKind: asEnumMember(asString(requireKey(value, "metric_kind")), ["counter", "gauge", "histogram"]),
@@ -761,6 +973,7 @@ export function toCampaignTouchPayloadCborValue(v) {
     return csilMap;
 }
 export function fromCampaignTouchPayloadCborValue(value) {
+    asMap(value);
     return {
         campaign: fromCampaignParametersCborValue(requireKey(value, "campaign")),
         referrer: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "referrer")),
@@ -786,6 +999,7 @@ export function toCampaignCostPayloadCborValue(v) {
     return csilMap;
 }
 export function fromCampaignCostPayloadCborValue(value) {
+    asMap(value);
     return {
         campaign: asString(requireKey(value, "campaign")),
         platform: ((csilV) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "platform")),
@@ -837,6 +1051,7 @@ export function toTelemetryItemCborValue(v) {
     return csilMap;
 }
 export function fromTelemetryItemCborValue(value) {
+    asMap(value);
     return {
         envelope: fromEnvelopeCborValue(requireKey(value, "envelope")),
         event: ((csilV) => csilV === undefined ? undefined : fromEventPayloadCborValue(csilV))(mapGet(value, "event")),
@@ -868,6 +1083,7 @@ export function toCaptureRequestCborValue(v) {
     return csilMap;
 }
 export function fromCaptureRequestCborValue(value) {
+    asMap(value);
     return {
         items: asArray(requireKey(value, "items")).map((csilE) => fromTelemetryItemCborValue(csilE)),
     };
@@ -886,6 +1102,7 @@ export function toCaptureResponseCborValue(v) {
     return csilMap;
 }
 export function fromCaptureResponseCborValue(value) {
+    asMap(value);
     return {
         accepted: asNumber(requireKey(value, "accepted")),
         rejected: ((csilV) => csilV === undefined ? undefined : asArray(csilV).map((csilE) => fromRejectedItemCborValue(csilE)))(mapGet(value, "rejected")),
@@ -905,6 +1122,7 @@ export function toRejectedItemCborValue(v) {
     return csilMap;
 }
 export function fromRejectedItemCborValue(value) {
+    asMap(value);
     return {
         eventId: asBytes(requireKey(value, "event_id")),
         code: asEnumMember(asString(requireKey(value, "code")), ["invalid-argument", "unauthenticated", "permission-denied", "not-found", "already-exists", "resource-exhausted", "failed-precondition", "unavailable", "schema-unsupported", "budget-exceeded", "incomplete-result", "internal"]),
@@ -923,6 +1141,7 @@ export function toCaptureCriticalRequestCborValue(v) {
     return csilMap;
 }
 export function fromCaptureCriticalRequestCborValue(value) {
+    asMap(value);
     return {
         items: asArray(requireKey(value, "items")).map((csilE) => fromTelemetryItemCborValue(csilE)),
     };
@@ -944,6 +1163,7 @@ export function toCaptureCriticalResponseCborValue(v) {
     return csilMap;
 }
 export function fromCaptureCriticalResponseCborValue(value) {
+    asMap(value);
     return {
         accepted: asNumber(requireKey(value, "accepted")),
         durable: asBool(requireKey(value, "durable")),
@@ -962,7 +1182,7 @@ export function toPolicyVersionRequestCborValue(v) {
     return csilMap;
 }
 export function fromPolicyVersionRequestCborValue(value) {
-    void value;
+    asMap(value);
     return {};
 }
 export function toPolicyVersionRequestCbor(v) {
@@ -979,6 +1199,7 @@ export function toPolicyVersionResponseCborValue(v) {
     return csilMap;
 }
 export function fromPolicyVersionResponseCborValue(value) {
+    asMap(value);
     return {
         policyVersion: asNumber(requireKey(value, "policy_version")),
         samplingRate: asNumber(requireKey(value, "sampling_rate")),
@@ -999,6 +1220,7 @@ export function toAlertNotifyRequestCborValue(v) {
     return csilMap;
 }
 export function fromAlertNotifyRequestCborValue(value) {
+    asMap(value);
     return {
         signedAt: asNumber(requireKey(value, "signed_at")),
         signature: asString(requireKey(value, "signature")),
@@ -1016,7 +1238,7 @@ export function toAlertNotifyResponseCborValue(v) {
     return csilMap;
 }
 export function fromAlertNotifyResponseCborValue(value) {
-    void value;
+    asMap(value);
     return {};
 }
 export function toAlertNotifyResponseCbor(v) {
@@ -1045,6 +1267,7 @@ export function toTypedValueCborValue(v) {
     return csilMap;
 }
 export function fromTypedValueCborValue(value) {
+    asMap(value);
     return {
         kind: asEnumMember(asString(requireKey(value, "kind")), ["null", "bool", "int", "uint", "float", "decimal", "text", "bytes"]),
         boolValue: ((csilV) => csilV === undefined ? undefined : asBool(csilV))(mapGet(value, "bool_value")),
@@ -1070,6 +1293,7 @@ export function toPropertyCborValue(v) {
     return csilMap;
 }
 export function fromPropertyCborValue(value) {
+    asMap(value);
     return {
         key: asString(requireKey(value, "key")),
         value: fromTypedValueCborValue(requireKey(value, "value")),
@@ -1097,6 +1321,7 @@ export function toMeasurementCborValue(v) {
     return csilMap;
 }
 export function fromMeasurementCborValue(value) {
+    asMap(value);
     return {
         key: asString(requireKey(value, "key")),
         kind: asEnumMember(asString(requireKey(value, "kind")), ["float", "decimal", "int"]),
@@ -1121,6 +1346,7 @@ export function toConsentCborValue(v) {
     return csilMap;
 }
 export function fromConsentCborValue(value) {
+    asMap(value);
     return {
         marketing: asEnumMember(asString(requireKey(value, "marketing")), ["granted", "denied", "absent"]),
         analytics: asEnumMember(asString(requireKey(value, "analytics")), ["granted", "denied", "absent"]),
@@ -1177,6 +1403,7 @@ export function toEnvelopeCborValue(v) {
     return csilMap;
 }
 export function fromEnvelopeCborValue(value) {
+    asMap(value);
     return {
         eventId: asBytes(requireKey(value, "event_id")),
         kind: asEnumMember(asString(requireKey(value, "kind")), ["event", "page-view", "session-start", "session-end", "session-heartbeat", "interaction", "feature-exposure", "identify", "alias", "group", "conversion", "error", "span", "metric-point", "campaign-touch", "campaign-cost"]),
@@ -1209,7 +1436,7 @@ export function toEnvelopeCbor(v) {
 export function fromEnvelopeCbor(bytes) {
     return fromEnvelopeCborValue(decode(bytes));
 }
-export function toServiceErrorCborValue(v) {
+export function toServiceErrorTypeCborValue(v) {
     const csilMap = new Map();
     csilMap.set("code", v.code);
     if (v.detail !== undefined)
@@ -1218,7 +1445,8 @@ export function toServiceErrorCborValue(v) {
     csilMap.set("retryable", v.retryable);
     return csilMap;
 }
-export function fromServiceErrorCborValue(value) {
+export function fromServiceErrorTypeCborValue(value) {
+    asMap(value);
     return {
         code: asEnumMember(asString(requireKey(value, "code")), ["invalid-argument", "unauthenticated", "permission-denied", "not-found", "already-exists", "resource-exhausted", "failed-precondition", "unavailable", "schema-unsupported", "budget-exceeded", "incomplete-result", "internal"]),
         message: asString(requireKey(value, "message")),
@@ -1226,9 +1454,103 @@ export function fromServiceErrorCborValue(value) {
         detail: ((csilV) => csilV === undefined ? undefined : asArray(csilV).map((csilE) => fromPropertyCborValue(csilE)))(mapGet(value, "detail")),
     };
 }
-export function toServiceErrorCbor(v) {
-    return encodeValue(toServiceErrorCborValue(v));
+export function toServiceErrorTypeCbor(v) {
+    return encodeValue(toServiceErrorTypeCborValue(v));
 }
-export function fromServiceErrorCbor(bytes) {
-    return fromServiceErrorCborValue(decode(bytes));
+export function fromServiceErrorTypeCbor(bytes) {
+    return fromServiceErrorTypeCborValue(decode(bytes));
+}
+export class ServiceErrorTypeRefusal extends Error {
+    value;
+    constructor(value) {
+        super("ServiceError");
+        this.value = value;
+    }
+}
+export async function encodeTallyOwlIngestCaptureReply(handler) {
+    try {
+        const value = await handler();
+        return { variant: "CaptureResponse", payload: encodeValue(toCaptureResponseCborValue(value)) };
+    }
+    catch (error) {
+        if (error instanceof ServiceErrorTypeRefusal)
+            return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+        throw error;
+    }
+}
+export async function encodeTallyOwlIngestCaptureCriticalReply(handler) {
+    try {
+        const value = await handler();
+        return { variant: "CaptureCriticalResponse", payload: encodeValue(toCaptureCriticalResponseCborValue(value)) };
+    }
+    catch (error) {
+        if (error instanceof ServiceErrorTypeRefusal)
+            return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+        throw error;
+    }
+}
+export async function encodeTallyOwlIngestPolicyVersionReply(handler) {
+    try {
+        const value = await handler();
+        return { variant: "PolicyVersionResponse", payload: encodeValue(toPolicyVersionResponseCborValue(value)) };
+    }
+    catch (error) {
+        if (error instanceof ServiceErrorTypeRefusal)
+            return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+        throw error;
+    }
+}
+export async function encodeTallyOwlAlertReceiverNotifyReply(handler) {
+    try {
+        const value = await handler();
+        return { variant: "AlertNotifyResponse", payload: encodeValue(toAlertNotifyResponseCborValue(value)) };
+    }
+    catch (error) {
+        if (error instanceof ServiceErrorTypeRefusal)
+            return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+        throw error;
+    }
+}
+export function resolveRpcReply(service, op, variant, payload) {
+    if (service === "TallyOwlIngest" && op === "capture") {
+        switch (variant) {
+            case "CaptureResponse": return payload;
+            case "ServiceError": {
+                const tree = decode(payload);
+                throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree));
+            }
+            default: throw new Error(`invalid RPC reply variant ${variant}`);
+        }
+    }
+    if (service === "TallyOwlIngest" && op === "capture-critical") {
+        switch (variant) {
+            case "CaptureCriticalResponse": return payload;
+            case "ServiceError": {
+                const tree = decode(payload);
+                throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree));
+            }
+            default: throw new Error(`invalid RPC reply variant ${variant}`);
+        }
+    }
+    if (service === "TallyOwlIngest" && op === "policy-version") {
+        switch (variant) {
+            case "PolicyVersionResponse": return payload;
+            case "ServiceError": {
+                const tree = decode(payload);
+                throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree));
+            }
+            default: throw new Error(`invalid RPC reply variant ${variant}`);
+        }
+    }
+    if (service === "TallyOwlAlertReceiver" && op === "notify") {
+        switch (variant) {
+            case "AlertNotifyResponse": return payload;
+            case "ServiceError": {
+                const tree = decode(payload);
+                throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree));
+            }
+            default: throw new Error(`invalid RPC reply variant ${variant}`);
+        }
+    }
+    return payload;
 }

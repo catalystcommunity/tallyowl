@@ -174,7 +174,7 @@ impl ActiveSpan {
         let mut capture = Capture::span(
             &self.context,
             &self.operation,
-            self.kind.clone(),
+            self.kind,
             self.start_at,
             duration_ms,
         );

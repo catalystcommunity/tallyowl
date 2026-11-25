@@ -27,8 +27,13 @@ type Generation uint64
 // Epoch is a type alias
 type Epoch uint64
 
-// GroupKind is a type alias
 type GroupKind string
+
+const (
+	GroupKindGlobalDirectory GroupKind = "global-directory"
+	GroupKindCellController  GroupKind = "cell-controller"
+	GroupKindTablet          GroupKind = "tablet"
+)
 
 // GroupRef represents a structured data type
 type GroupRef struct {
@@ -36,8 +41,12 @@ type GroupRef struct {
 	Name *string   `json:"name,omitempty" yaml:"name,omitempty"`
 }
 
-// MemberRole is a type alias
 type MemberRole string
+
+const (
+	MemberRoleVoter   MemberRole = "voter"
+	MemberRoleLearner MemberRole = "learner"
+)
 
 // GroupMember represents a structured data type
 type GroupMember struct {
@@ -48,8 +57,14 @@ type GroupMember struct {
 	Domain  *DomainName `json:"domain,omitempty" yaml:"domain,omitempty"`
 }
 
-// ConsensusKind is a type alias
 type ConsensusKind string
+
+const (
+	ConsensusKindAppendEntries   ConsensusKind = "append-entries"
+	ConsensusKindVote            ConsensusKind = "vote"
+	ConsensusKindInstallSnapshot ConsensusKind = "install-snapshot"
+	ConsensusKindProposal        ConsensusKind = "proposal"
+)
 
 // ConsensusMessage represents a structured data type
 type ConsensusMessage struct {
@@ -127,8 +142,15 @@ type SegmentTransfer struct {
 	WholeDigest *[]byte `json:"whole_digest,omitempty" yaml:"whole_digest,omitempty"`
 }
 
-// PartialKind is a type alias
 type PartialKind string
+
+const (
+	PartialKindCount     PartialKind = "count"
+	PartialKindTrend     PartialKind = "trend"
+	PartialKindRows      PartialKind = "rows"
+	PartialKindLookup    PartialKind = "lookup"
+	PartialKindAggregate PartialKind = "aggregate"
+)
 
 // PartialQueryRequest represents a structured data type
 type PartialQueryRequest struct {
@@ -178,8 +200,18 @@ type MissingRange struct {
 	RangeEnd   Timestamp `json:"range_end" yaml:"range_end"`
 }
 
-// SlowCause is a type alias
 type SlowCause string
+
+const (
+	SlowCauseStorageErrors      SlowCause = "storage-errors"
+	SlowCauseStorageSaturated   SlowCause = "storage-saturated"
+	SlowCauseStorageSlow        SlowCause = "storage-slow"
+	SlowCauseWriteVolume        SlowCause = "write-volume"
+	SlowCauseCompactionPressure SlowCause = "compaction-pressure"
+	SlowCauseMemoryPressure     SlowCause = "memory-pressure"
+	SlowCauseNetworkLatency     SlowCause = "network-latency"
+	SlowCauseUnknown            SlowCause = "unknown"
+)
 
 // NodeHealthReport represents a structured data type
 type NodeHealthReport struct {
@@ -199,8 +231,15 @@ type NodeHealthReport struct {
 	FreeBytes               uint64     `json:"free_bytes" yaml:"free_bytes"`
 }
 
-// NodeState is a type alias
 type NodeState string
+
+const (
+	NodeStateHealthy     NodeState = "healthy"
+	NodeStateSlow        NodeState = "slow"
+	NodeStateUnreachable NodeState = "unreachable"
+	NodeStateReadOnly    NodeState = "read-only"
+	NodeStateDraining    NodeState = "draining"
+)
 
 // NodeCondition represents a structured data type
 type NodeCondition struct {
@@ -217,8 +256,16 @@ type NodeCondition struct {
 	ActionTaken                *string    `json:"action_taken,omitempty" yaml:"action_taken,omitempty"`
 }
 
-// TabletState is a type alias
 type TabletState string
+
+const (
+	TabletStateActive    TabletState = "active"
+	TabletStateSplitting TabletState = "splitting"
+	TabletStateMerging   TabletState = "merging"
+	TabletStateMoving    TabletState = "moving"
+	TabletStateDraining  TabletState = "draining"
+	TabletStateRetired   TabletState = "retired"
+)
 
 // TabletInfo represents a structured data type
 type TabletInfo struct {
@@ -456,8 +503,18 @@ type Timestamp int64
 // DurationMs is a type alias
 type DurationMs int64
 
-// TypedValueKind is a type alias
 type TypedValueKind string
+
+const (
+	TypedValueKindNull    TypedValueKind = "null"
+	TypedValueKindBool    TypedValueKind = "bool"
+	TypedValueKindInt     TypedValueKind = "int"
+	TypedValueKindUint    TypedValueKind = "uint"
+	TypedValueKindFloat   TypedValueKind = "float"
+	TypedValueKindDecimal TypedValueKind = "decimal"
+	TypedValueKindText    TypedValueKind = "text"
+	TypedValueKindBytes   TypedValueKind = "bytes"
+)
 
 // TypedValue represents a structured data type
 type TypedValue struct {
@@ -471,8 +528,13 @@ type TypedValue struct {
 	BytesValue   *[]byte        `json:"bytes_value,omitempty" yaml:"bytes_value,omitempty"`
 }
 
-// PropertyOrigin is a type alias
 type PropertyOrigin string
+
+const (
+	PropertyOriginClient    PropertyOrigin = "client"
+	PropertyOriginDriver    PropertyOrigin = "driver"
+	PropertyOriginCollector PropertyOrigin = "collector"
+)
 
 // Property represents a structured data type
 type Property struct {
@@ -484,8 +546,13 @@ type Property struct {
 // PropertyList is a type alias
 type PropertyList []Property
 
-// MeasurementKind is a type alias
 type MeasurementKind string
+
+const (
+	MeasurementKindFloat   MeasurementKind = "float"
+	MeasurementKindDecimal MeasurementKind = "decimal"
+	MeasurementKindInt     MeasurementKind = "int"
+)
 
 // Measurement represents a structured data type
 type Measurement struct {
@@ -500,8 +567,13 @@ type Measurement struct {
 // MeasurementList is a type alias
 type MeasurementList []Measurement
 
-// ConsentState is a type alias
 type ConsentState string
+
+const (
+	ConsentStateGranted ConsentState = "granted"
+	ConsentStateDenied  ConsentState = "denied"
+	ConsentStateAbsent  ConsentState = "absent"
+)
 
 // Consent represents a structured data type
 type Consent struct {
@@ -510,8 +582,26 @@ type Consent struct {
 	PolicyVersion *string      `json:"policy_version,omitempty" yaml:"policy_version,omitempty"`
 }
 
-// TelemetryKind is a type alias
 type TelemetryKind string
+
+const (
+	TelemetryKindEvent            TelemetryKind = "event"
+	TelemetryKindPageView         TelemetryKind = "page-view"
+	TelemetryKindSessionStart     TelemetryKind = "session-start"
+	TelemetryKindSessionEnd       TelemetryKind = "session-end"
+	TelemetryKindSessionHeartbeat TelemetryKind = "session-heartbeat"
+	TelemetryKindInteraction      TelemetryKind = "interaction"
+	TelemetryKindFeatureExposure  TelemetryKind = "feature-exposure"
+	TelemetryKindIdentify         TelemetryKind = "identify"
+	TelemetryKindAlias            TelemetryKind = "alias"
+	TelemetryKindGroup            TelemetryKind = "group"
+	TelemetryKindConversion       TelemetryKind = "conversion"
+	TelemetryKindError            TelemetryKind = "error"
+	TelemetryKindSpan             TelemetryKind = "span"
+	TelemetryKindMetricPoint      TelemetryKind = "metric-point"
+	TelemetryKindCampaignTouch    TelemetryKind = "campaign-touch"
+	TelemetryKindCampaignCost     TelemetryKind = "campaign-cost"
+)
 
 // Envelope represents a structured data type
 type Envelope struct {
@@ -540,8 +630,22 @@ type Envelope struct {
 	Measurements  *MeasurementList `json:"measurements,omitempty" yaml:"measurements,omitempty"`
 }
 
-// ErrorCode is a type alias
 type ErrorCode string
+
+const (
+	ErrorCodeInvalidArgument    ErrorCode = "invalid-argument"
+	ErrorCodeUnauthenticated    ErrorCode = "unauthenticated"
+	ErrorCodePermissionDenied   ErrorCode = "permission-denied"
+	ErrorCodeNotFound           ErrorCode = "not-found"
+	ErrorCodeAlreadyExists      ErrorCode = "already-exists"
+	ErrorCodeResourceExhausted  ErrorCode = "resource-exhausted"
+	ErrorCodeFailedPrecondition ErrorCode = "failed-precondition"
+	ErrorCodeUnavailable        ErrorCode = "unavailable"
+	ErrorCodeSchemaUnsupported  ErrorCode = "schema-unsupported"
+	ErrorCodeBudgetExceeded     ErrorCode = "budget-exceeded"
+	ErrorCodeIncompleteResult   ErrorCode = "incomplete-result"
+	ErrorCodeInternal           ErrorCode = "internal"
+)
 
 // ServiceError represents a structured data type
 type ServiceError struct {

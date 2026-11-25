@@ -295,7 +295,9 @@ stale lock file is a `--locked` image build that cannot run at all.
 commits since the last tag and says what the next version is, exactly as every
 other repository here releases. `./tools.sh release plan` prints what the next
 release would be and changes nothing. `./tools.sh release stamp` brings the
-tree up to date with main and writes that version into it, and `./tools.sh
+tree up to date with main and writes that version into it. It also changes the
+`## Not released yet` heading of `docs/RELEASE_NOTES.md` to the version and the
+date, so the release commit carries the notes of its own version. `./tools.sh
 release tag` commits, tags, and pushes. Both refuse unless `TALLYOWL_RELEASE=1`
 says it is the release job, so running either on a workstation prints the plan
 and stops.

@@ -288,6 +288,51 @@ class Plan(unittest.TestCase):
         self.assertIn("Only the release job tags", str(refusal.exception))
 
 
+class ReleaseNotes(unittest.TestCase):
+    """The release job names the unreleased section with its version and date."""
+
+    def notes(self, text: str) -> Path:
+        root = Path(tempfile.mkdtemp(prefix="tallyowl-notes-"))
+        self.addCleanup(shutil.rmtree, root)
+        (root / "docs").mkdir()
+        (root / release.RELEASE_NOTES).write_text(text)
+        return root
+
+    def test_the_unreleased_section_takes_the_version_and_the_date(self) -> None:
+        root = self.notes(
+            "# Release notes\n\n## Not released yet\n\n- A change.\n\n"
+            "## 0.4.0 — 2026-11-09\n\n- Older.\n"
+        )
+        self.assertTrue(release.stamp_release_notes("0.4.2", "2026-11-23", root))
+        text = (root / release.RELEASE_NOTES).read_text()
+        self.assertIn("## 0.4.2 — 2026-11-23\n\n- A change.", text)
+        self.assertNotIn("Not released yet", text)
+        self.assertIn("## 0.4.0 — 2026-11-09", text)
+
+    def test_an_old_heading_with_words_after_it_is_also_replaced(self) -> None:
+        root = self.notes("# Notes\n\n## Not released yet — changes after 0.4.0\n\n- A change.\n")
+        release.stamp_release_notes("0.4.1", "2026-11-11", root)
+        self.assertIn("## 0.4.1 — 2026-11-11\n", (root / release.RELEASE_NOTES).read_text())
+
+    def test_only_the_first_unreleased_heading_is_stamped(self) -> None:
+        root = self.notes("## Not released yet\n\n- New.\n\n## Not released yet\n\n- Stray.\n")
+        release.stamp_release_notes("1.0.0", "2026-12-01", root)
+        text = (root / release.RELEASE_NOTES).read_text()
+        self.assertEqual(text.count("## 1.0.0 — 2026-12-01"), 1)
+        self.assertEqual(text.count("## Not released yet"), 1)
+
+    def test_a_release_with_no_notes_still_gets_a_heading(self) -> None:
+        root = self.notes("# Release notes\n\nIntro.\n\n## 0.4.0 — 2026-11-09\n\n- Older.\n")
+        self.assertFalse(release.stamp_release_notes("0.4.1", "2026-11-11", root))
+        text = (root / release.RELEASE_NOTES).read_text()
+        self.assertLess(text.index("## 0.4.1 — 2026-11-11"), text.index("## 0.4.0"))
+        self.assertIn("No notes were written for this release.", text)
+
+    def test_the_repository_notes_have_an_unreleased_section_for_the_job(self) -> None:
+        text = (REPOSITORY_ROOT / release.RELEASE_NOTES).read_text()
+        self.assertIn(f"\n{release.UNRELEASED_HEADING}\n", text)
+
+
 class Binaries(unittest.TestCase):
     """The release page carries the binaries while crates.io is off (L182)."""
 

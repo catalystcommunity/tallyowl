@@ -2,6 +2,11 @@
 // Source: <csil spec>
 // Target: typescript-typesonly
 
+export interface ServiceError {
+  code: number;
+  message: string;
+}
+
 /**
  * An exact base-10 decimal, carried on the wire as a CBOR tag-4 decimal
  * fraction `[exponent, mantissa]` (value = `mantissa * 10 ** exponent`).
@@ -15,10 +20,13 @@ export class CsilDecimal {
   /** CBOR semantic tag for a decimal fraction. */
   static readonly CBOR_TAG = 4;
 
-  constructor(
-    readonly exponent: number,
-    readonly mantissa: bigint,
-  ) {}
+  readonly exponent: number;
+  readonly mantissa: bigint;
+
+  constructor(exponent: number, mantissa: bigint) {
+    this.exponent = exponent;
+    this.mantissa = mantissa;
+  }
 
   /** Reconstruct from the CBOR tag-4 payload `[exponent, mantissa]`. */
   static fromTag4(payload: readonly [number | bigint, number | bigint]): CsilDecimal {
@@ -97,6 +105,18 @@ export type ExpressionRef = Uint8Array;
  */
 export type QueryNodeRef = Uint8Array;
 
+export const ExpressionKind = {
+  LITERAL: "literal",
+  FIELD: "field",
+  COMPARE: "compare",
+  SET: "set",
+  TEXT: "text",
+  NULL: "null",
+  LOGICAL: "logical",
+  ARITH: "arith",
+  TIME: "time",
+  CONVERT: "convert",
+} as const;
 /**
  * The kind of expression an `ExpressionNode` holds.
  */
@@ -127,6 +147,16 @@ export interface ExpressionNode {
   convert?: ConvertExpr;
 }
 
+export const QueryNodeKind = {
+  SCAN: "scan",
+  FILTER: "filter",
+  PROJECT: "project",
+  AGGREGATE: "aggregate",
+  SORT: "sort",
+  LIMIT: "limit",
+  JOIN: "join",
+  UNION: "union",
+} as const;
 /**
  * The kind of node a `QueryNodeBox` holds.
  */
@@ -153,10 +183,29 @@ export interface FieldRef {
   origin?: PropertyOrigin;
 }
 
+export const CompareOp = {
+  EQ: "eq",
+  NE: "ne",
+  LT: "lt",
+  LE: "le",
+  GT: "gt",
+  GE: "ge",
+} as const;
 export type CompareOp = "eq" | "ne" | "lt" | "le" | "gt" | "ge";
 
+export const LogicalOp = {
+  AND: "and",
+  OR: "or",
+  NOT: "not",
+} as const;
 export type LogicalOp = "and" | "or" | "not";
 
+export const ArithOp = {
+  ADD: "add",
+  SUB: "sub",
+  MUL: "mul",
+  DIV: "div",
+} as const;
 export type ArithOp = "add" | "sub" | "mul" | "div";
 
 export interface CompareExpr {
@@ -206,6 +255,11 @@ export interface ConvertExpr {
   operand: ExpressionRef;
 }
 
+export const TimeBasis = {
+  OCCURRED_AT: "occurred_at",
+  RECEIVED_AT: "received_at",
+  COMMITTED_AT: "committed_at",
+} as const;
 export type TimeBasis = "occurred_at" | "received_at" | "committed_at";
 
 export interface Interval {
@@ -220,8 +274,35 @@ export interface TimeRange {
   timezone?: string;
 }
 
+export const Dataset = {
+  EVENTS: "events",
+  ERROR_OCCURRENCES: "error_occurrences",
+  ERROR_GROUPS: "error_groups",
+  SPANS: "spans",
+  METRIC_POINTS: "metric_points",
+  IDENTITY_EDGES: "identity_edges",
+  CAMPAIGN_TOUCHES: "campaign_touches",
+  CONVERSIONS: "conversions",
+  CAMPAIGN_COSTS: "campaign_costs",
+} as const;
 export type Dataset = "events" | "error_occurrences" | "error_groups" | "spans" | "metric_points" | "identity_edges" | "campaign_touches" | "conversions" | "campaign_costs";
 
+export const MeasureKind = {
+  COUNT: "count",
+  SUM: "sum",
+  MIN: "min",
+  MAX: "max",
+  AVG: "avg",
+  COUNT_DISTINCT: "count_distinct",
+  COUNT_DISTINCT_APPROX: "count_distinct_approx",
+  QUANTILE: "quantile",
+  QUANTILE_APPROX: "quantile_approx",
+  HISTOGRAM_MERGE: "histogram_merge",
+  TOP_K: "top_k",
+  TOP_K_APPROX: "top_k_approx",
+  RATE: "rate",
+  INCREASE: "increase",
+} as const;
 export type MeasureKind = "count" | "sum" | "min" | "max" | "avg" | "count_distinct" | "count_distinct_approx" | "quantile" | "quantile_approx" | "histogram_merge" | "top_k" | "top_k_approx" | "rate" | "increase";
 
 export interface Measure {
@@ -295,8 +376,17 @@ export interface UnionNode {
   union: QueryNodeRef[];
 }
 
+export const CorrelationBasis = {
+  END_USER: "end-user",
+  SESSION: "session",
+  GROUP: "group",
+} as const;
 export type CorrelationBasis = "end-user" | "session" | "group";
 
+export const IdentityResolution = {
+  EVENT_TIME: "event-time",
+  LATEST_KNOWN: "latest-known",
+} as const;
 /**
  * Which identity a question means. DATA_MODEL.md section 3.5: "Queries can use
  * event-time identity or latest-known identity."
@@ -367,6 +457,14 @@ export interface TimelineQuery {
   resolution?: IdentityResolution;
 }
 
+export const AttributionModel = {
+  FIRST_TOUCH: "first-touch",
+  LAST_TOUCH: "last-touch",
+  LAST_NON_DIRECT: "last-non-direct",
+  LINEAR: "linear",
+  POSITION: "position",
+  DECAY: "decay",
+} as const;
 /**
  * Which credit rule a question asks for. DATA_MODEL.md section 3.6 names the
  * six initial models and D40 makes their parameters configuration rather than
@@ -422,6 +520,10 @@ export interface CampaignSummaryQuery {
   resolution?: IdentityResolution;
 }
 
+export const Consistency = {
+  COMMITTED: "committed",
+  BOUNDED_STALE: "bounded-stale",
+} as const;
 export type Consistency = "committed" | "bounded-stale";
 
 export interface QueryBudget {
@@ -431,6 +533,16 @@ export interface QueryBudget {
   maxRows?: number;
 }
 
+export const QueryForm = {
+  NODE: "node",
+  FUNNEL: "funnel",
+  RETENTION: "retention",
+  PATH: "path",
+  TRACE: "trace",
+  TIMELINE: "timeline",
+  ATTRIBUTION: "attribution",
+  CAMPAIGN_SUMMARY: "campaign-summary",
+} as const;
 /**
  * Which shape of query a request carries. `node` names the general algebra;
  * the rest name a domain operator that a general aggregate cannot express.
@@ -484,6 +596,13 @@ export interface ResultMetadata {
   nextCursor?: Uint8Array;
 }
 
+export const RetentionClass = {
+  PROVISIONAL: "provisional",
+  RAW: "raw",
+  DETAILED: "detailed",
+  ROLLUP: "rollup",
+  AUDIT: "audit",
+} as const;
 export type RetentionClass = "provisional" | "raw" | "detailed" | "rollup" | "audit";
 
 export interface ResultRow {
@@ -531,8 +650,20 @@ export interface NotificationTarget {
   secretRef?: string;
 }
 
+export const AlertState = {
+  OK: "ok",
+  FIRING: "firing",
+  NO_DATA: "no-data",
+  UNKNOWN: "unknown",
+  SILENCED: "silenced",
+} as const;
 export type AlertState = "ok" | "firing" | "no-data" | "unknown" | "silenced";
 
+export const AlertOutcome = {
+  VALUE: "value",
+  NO_DATA: "no-data",
+  ERROR: "error",
+} as const;
 /**
  * What one evaluation produced. ALERTS.md section 3.
  * 
@@ -602,6 +733,14 @@ export interface NotificationDeliveryList {
   nextCursor?: Uint8Array;
 }
 
+export const WorkflowKind = {
+  ALERT_EVALUATION: "alert-evaluation",
+  NOTIFICATION: "notification",
+  PROJECTOR_REBUILD: "projector-rebuild",
+  RETENTION: "retention",
+  DELETION: "deletion",
+  EXPORT: "export",
+} as const;
 export type WorkflowKind = "alert-evaluation" | "notification" | "projector-rebuild" | "retention" | "deletion" | "export";
 
 /**
@@ -670,6 +809,26 @@ export interface Membership {
   role: "viewer" | "admin" | "owner";
 }
 
+export const TimeDisplay = {
+  BROWSER: "browser",
+  UTC: "utc",
+  ZONE: "zone",
+} as const;
+/**
+ * The clock that the dashboard uses to show times.
+ * 
+ * - `browser`: the time zone of the browser that shows the page.
+ * - `utc`: UTC.
+ * - `zone`: the IANA zone in `time_zone`.
+ */
+export type TimeDisplay = "browser" | "utc" | "zone";
+
+export interface UserPreferences {
+  timeDisplay: TimeDisplay;
+  timeZone?: string;
+  updatedAt?: Timestamp;
+}
+
 export interface Project {
   projectId: ProjectId;
   workspaceId: WorkspaceId;
@@ -711,8 +870,20 @@ export interface DeletionResponse {
   identifiers?: string[];
 }
 
+export const PolicyScope = {
+  INSTALLATION: "installation",
+  WORKSPACE: "workspace",
+  PROJECT: "project",
+  ENVIRONMENT: "environment",
+  SOURCE: "source",
+} as const;
 export type PolicyScope = "installation" | "workspace" | "project" | "environment" | "source";
 
+export const CampaignLinking = {
+  LINKED: "linked",
+  UNLINKED: "unlinked",
+  NONE: "none",
+} as const;
 /**
  * How much of a campaign touch is joined to the person who made it. D30.
  * 
@@ -847,6 +1018,18 @@ export interface SavedRequest {
   limit?: number;
 }
 
+export const NodeRole = {
+  COLLECTOR_INTAKE: "collector-intake",
+  COLLECTOR_FORWARDER: "collector-forwarder",
+  COMPATIBILITY_RECEIVER: "compatibility-receiver",
+  INGEST_GATEWAY: "ingest-gateway",
+  QUERY_COORDINATOR: "query-coordinator",
+  PROJECTOR: "projector",
+  WORKFLOW_WORKER: "workflow-worker",
+  READ_REPLICA: "read-replica",
+  EXPORT_REPLICA: "export-replica",
+  STORAGE_PROCESS: "storage-process",
+} as const;
 /**
  * The roles a token may permit. NODE_IDENTITY.md section 3.
  * 
@@ -1053,6 +1236,16 @@ export type Timestamp = number;
 
 export type DurationMs = number;
 
+export const TypedValueKind = {
+  NULL: "null",
+  BOOL: "bool",
+  INT: "int",
+  UINT: "uint",
+  FLOAT: "float",
+  DECIMAL: "decimal",
+  TEXT: "text",
+  BYTES: "bytes",
+} as const;
 export type TypedValueKind = "null" | "bool" | "int" | "uint" | "float" | "decimal" | "text" | "bytes";
 
 /**
@@ -1071,6 +1264,11 @@ export interface TypedValue {
   bytesValue?: Uint8Array;
 }
 
+export const PropertyOrigin = {
+  CLIENT: "client",
+  DRIVER: "driver",
+  COLLECTOR: "collector",
+} as const;
 /**
  * Where a property came from. An operator can trust a `collector` origin,
  * because the collector stamps it from its own configuration and refuses a
@@ -1086,6 +1284,11 @@ export interface Property {
 
 export type PropertyList = Property[];
 
+export const MeasurementKind = {
+  FLOAT: "float",
+  DECIMAL: "decimal",
+  INT: "int",
+} as const;
 /**
  * A measure is a number, so its kinds are the three numeric ones. It carries
  * its own discriminant for the same reason `TypedValue` does.
@@ -1107,6 +1310,11 @@ export interface Measurement {
 
 export type MeasurementList = Measurement[];
 
+export const ConsentState = {
+  GRANTED: "granted",
+  DENIED: "denied",
+  ABSENT: "absent",
+} as const;
 export type ConsentState = "granted" | "denied" | "absent";
 
 export interface Consent {
@@ -1115,6 +1323,24 @@ export interface Consent {
   policyVersion?: string;
 }
 
+export const TelemetryKind = {
+  EVENT: "event",
+  PAGE_VIEW: "page-view",
+  SESSION_START: "session-start",
+  SESSION_END: "session-end",
+  SESSION_HEARTBEAT: "session-heartbeat",
+  INTERACTION: "interaction",
+  FEATURE_EXPOSURE: "feature-exposure",
+  IDENTIFY: "identify",
+  ALIAS: "alias",
+  GROUP: "group",
+  CONVERSION: "conversion",
+  ERROR: "error",
+  SPAN: "span",
+  METRIC_POINT: "metric-point",
+  CAMPAIGN_TOUCH: "campaign-touch",
+  CAMPAIGN_COST: "campaign-cost",
+} as const;
 export type TelemetryKind = "event" | "page-view" | "session-start" | "session-end" | "session-heartbeat" | "interaction" | "feature-exposure" | "identify" | "alias" | "group" | "conversion" | "error" | "span" | "metric-point" | "campaign-touch" | "campaign-cost";
 
 export interface Envelope {
@@ -1143,9 +1369,23 @@ export interface Envelope {
   measurements?: MeasurementList;
 }
 
+export const ErrorCode = {
+  INVALID_ARGUMENT: "invalid-argument",
+  UNAUTHENTICATED: "unauthenticated",
+  PERMISSION_DENIED: "permission-denied",
+  NOT_FOUND: "not-found",
+  ALREADY_EXISTS: "already-exists",
+  RESOURCE_EXHAUSTED: "resource-exhausted",
+  FAILED_PRECONDITION: "failed-precondition",
+  UNAVAILABLE: "unavailable",
+  SCHEMA_UNSUPPORTED: "schema-unsupported",
+  BUDGET_EXCEEDED: "budget-exceeded",
+  INCOMPLETE_RESULT: "incomplete-result",
+  INTERNAL: "internal",
+} as const;
 export type ErrorCode = "invalid-argument" | "unauthenticated" | "permission-denied" | "not-found" | "already-exists" | "resource-exhausted" | "failed-precondition" | "unavailable" | "schema-unsupported" | "budget-exceeded" | "incomplete-result" | "internal";
 
-export interface ServiceError {
+export interface ServiceErrorType {
   code: ErrorCode;
   message: string;
   retryable: boolean;
@@ -1388,6 +1628,14 @@ export function validateCompleteLoginResponse(value: CompleteLoginResponse): str
   const errors: string[] = [];
   if (value.sessionToken.length < 1 || value.sessionToken.length > 256) errors.push("sessionToken: length must be between 1 and 256");
   if (value.subject.length < 1 || value.subject.length > 320) errors.push("subject: length must be between 1 and 320");
+  return errors;
+}
+
+export function validateUserPreferences(value: UserPreferences): string[] {
+  const errors: string[] = [];
+  if (value.timeZone !== undefined) {
+    if (value.timeZone.length < 1 || value.timeZone.length > 64) errors.push("timeZone: length must be between 1 and 64");
+  }
   return errors;
 }
 

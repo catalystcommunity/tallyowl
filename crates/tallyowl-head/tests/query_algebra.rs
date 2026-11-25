@@ -91,7 +91,7 @@ fn read(response: tallyowl_control_api::types::QueryResponse) -> (Vec<String>, V
     // Through the codec, because that is the path a caller uses and a value
     // that did not survive it would be a defect nobody saw in process.
     let encoded = tallyowl_control_api::codec::encode_query_response(&response);
-    let decoded = decode_query_response(&encoded).expect("the answer decodes");
+    let decoded = decode_query_response(&encoded.unwrap()).expect("the answer decodes");
     (
         decoded.columns,
         decoded
@@ -841,7 +841,7 @@ fn a_duplicate_delivery_counts_once_through_every_operator() {
 fn a_whole_tree_survives_encoding_and_decoding() {
     let node = query::limited(&query::sorted(&counted_by_name(), "events", true), 1, None);
     let encoded = encode_query_node_box(&node);
-    let decoded = tallyowl_control_api::codec::decode_query_node_box(&encoded).unwrap();
+    let decoded = tallyowl_control_api::codec::decode_query_node_box(&encoded.unwrap()).unwrap();
     assert_eq!(decoded, node);
 }
 

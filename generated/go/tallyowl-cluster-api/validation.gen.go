@@ -9,6 +9,9 @@ import (
 
 // ValidateGroupRef validates the GroupRef struct
 func (v *GroupRef) Validate() error {
+	if v == nil {
+		return fmt.Errorf("GroupRef is nil")
+	}
 	if v.Name != nil {
 		if len((*v.Name)) < 1 {
 			return fmt.Errorf("field 'Name' must have at least 1 elements")
@@ -24,6 +27,9 @@ func (v *GroupRef) Validate() error {
 
 // ValidateGroupMember validates the GroupMember struct
 func (v *GroupMember) Validate() error {
+	if v == nil {
+		return fmt.Errorf("GroupMember is nil")
+	}
 	if len(v.Address) < 1 {
 		return fmt.Errorf("field 'Address' must have at least 1 elements")
 	}
@@ -35,6 +41,9 @@ func (v *GroupMember) Validate() error {
 
 // ValidateConsensusMessage validates the ConsensusMessage struct
 func (v *ConsensusMessage) Validate() error {
+	if v == nil {
+		return fmt.Errorf("ConsensusMessage is nil")
+	}
 	if len(v.Payload) < 1 {
 		return fmt.Errorf("field 'Payload' must have at least 1 elements")
 	}
@@ -46,6 +55,9 @@ func (v *ConsensusMessage) Validate() error {
 
 // ValidateConsensusReply validates the ConsensusReply struct
 func (v *ConsensusReply) Validate() error {
+	if v == nil {
+		return fmt.Errorf("ConsensusReply is nil")
+	}
 	if v.Payload != nil {
 		if len((*v.Payload)) < 1 {
 			return fmt.Errorf("field 'Payload' must have at least 1 elements")
@@ -71,6 +83,9 @@ func (v *ConsensusReply) Validate() error {
 
 // ValidateSnapshotChunkRequest validates the SnapshotChunkRequest struct
 func (v *SnapshotChunkRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("SnapshotChunkRequest is nil")
+	}
 	if v.SnapshotId != nil {
 		if len((*v.SnapshotId)) < 1 {
 			return fmt.Errorf("field 'SnapshotId' must have at least 1 elements")
@@ -86,6 +101,9 @@ func (v *SnapshotChunkRequest) Validate() error {
 
 // ValidateSnapshotChunk validates the SnapshotChunk struct
 func (v *SnapshotChunk) Validate() error {
+	if v == nil {
+		return fmt.Errorf("SnapshotChunk is nil")
+	}
 	if len(v.SnapshotId) < 1 {
 		return fmt.Errorf("field 'SnapshotId' must have at least 1 elements")
 	}
@@ -113,6 +131,9 @@ func (v *SnapshotChunk) Validate() error {
 
 // ValidateSegmentSummary validates the SegmentSummary struct
 func (v *SegmentSummary) Validate() error {
+	if v == nil {
+		return fmt.Errorf("SegmentSummary is nil")
+	}
 	if len(v.SegmentId) < 1 {
 		return fmt.Errorf("field 'SegmentId' must have at least 1 elements")
 	}
@@ -130,6 +151,9 @@ func (v *SegmentSummary) Validate() error {
 
 // ValidateSegmentTransferRequest validates the SegmentTransferRequest struct
 func (v *SegmentTransferRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("SegmentTransferRequest is nil")
+	}
 	if len(v.SegmentId) < 1 {
 		return fmt.Errorf("field 'SegmentId' must have at least 1 elements")
 	}
@@ -141,6 +165,9 @@ func (v *SegmentTransferRequest) Validate() error {
 
 // ValidateSegmentTransfer validates the SegmentTransfer struct
 func (v *SegmentTransfer) Validate() error {
+	if v == nil {
+		return fmt.Errorf("SegmentTransfer is nil")
+	}
 	if len(v.SegmentId) < 1 {
 		return fmt.Errorf("field 'SegmentId' must have at least 1 elements")
 	}
@@ -168,6 +195,9 @@ func (v *SegmentTransfer) Validate() error {
 
 // ValidatePartialQueryRequest validates the PartialQueryRequest struct
 func (v *PartialQueryRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("PartialQueryRequest is nil")
+	}
 	if len(v.Basis) < 1 {
 		return fmt.Errorf("field 'Basis' must have at least 1 elements")
 	}
@@ -219,6 +249,9 @@ func (v *PartialQueryRequest) Validate() error {
 
 // ValidatePartialQueryResponse validates the PartialQueryResponse struct
 func (v *PartialQueryResponse) Validate() error {
+	if v == nil {
+		return fmt.Errorf("PartialQueryResponse is nil")
+	}
 	if v.AggregateState != nil {
 		if len((*v.AggregateState)) < 1 {
 			return fmt.Errorf("field 'AggregateState' must have at least 1 elements")
@@ -234,6 +267,9 @@ func (v *PartialQueryResponse) Validate() error {
 
 // ValidateMissingRange validates the MissingRange struct
 func (v *MissingRange) Validate() error {
+	if v == nil {
+		return fmt.Errorf("MissingRange is nil")
+	}
 	if len(v.TabletId) < 1 {
 		return fmt.Errorf("field 'TabletId' must have at least 1 elements")
 	}
@@ -245,6 +281,9 @@ func (v *MissingRange) Validate() error {
 
 // ValidateNodeCondition validates the NodeCondition struct
 func (v *NodeCondition) Validate() error {
+	if v == nil {
+		return fmt.Errorf("NodeCondition is nil")
+	}
 	if v.ActionTaken != nil {
 		if len((*v.ActionTaken)) < 1 {
 			return fmt.Errorf("field 'ActionTaken' must have at least 1 elements")
@@ -260,6 +299,9 @@ func (v *NodeCondition) Validate() error {
 
 // ValidateTabletInfo validates the TabletInfo struct
 func (v *TabletInfo) Validate() error {
+	if v == nil {
+		return fmt.Errorf("TabletInfo is nil")
+	}
 	if len(v.ReceiptPolicy) < 1 {
 		return fmt.Errorf("field 'ReceiptPolicy' must have at least 1 elements")
 	}
@@ -271,6 +313,9 @@ func (v *TabletInfo) Validate() error {
 
 // ValidateChangeReplicaRequest validates the ChangeReplicaRequest struct
 func (v *ChangeReplicaRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("ChangeReplicaRequest is nil")
+	}
 	if len(v.Address) < 1 {
 		return fmt.Errorf("field 'Address' must have at least 1 elements")
 	}
@@ -282,6 +327,9 @@ func (v *ChangeReplicaRequest) Validate() error {
 
 // ValidateSetReceiptPolicyRequest validates the SetReceiptPolicyRequest struct
 func (v *SetReceiptPolicyRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("SetReceiptPolicyRequest is nil")
+	}
 	if len(v.Policy) < 1 {
 		return fmt.Errorf("field 'Policy' must have at least 1 elements")
 	}
@@ -293,6 +341,9 @@ func (v *SetReceiptPolicyRequest) Validate() error {
 
 // ValidateUnsafeRecoverRequest validates the UnsafeRecoverRequest struct
 func (v *UnsafeRecoverRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("UnsafeRecoverRequest is nil")
+	}
 	if len(v.Reason) < 1 {
 		return fmt.Errorf("field 'Reason' must have at least 1 elements")
 	}
@@ -304,6 +355,9 @@ func (v *UnsafeRecoverRequest) Validate() error {
 
 // ValidateUnsafeRecoverResponse validates the UnsafeRecoverResponse struct
 func (v *UnsafeRecoverResponse) Validate() error {
+	if v == nil {
+		return fmt.Errorf("UnsafeRecoverResponse is nil")
+	}
 	if len(v.AuditId) < 1 {
 		return fmt.Errorf("field 'AuditId' must have at least 1 elements")
 	}
@@ -315,6 +369,9 @@ func (v *UnsafeRecoverResponse) Validate() error {
 
 // ValidateClearDegradedRequest validates the ClearDegradedRequest struct
 func (v *ClearDegradedRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("ClearDegradedRequest is nil")
+	}
 	if len(v.AcceptedBy) < 1 {
 		return fmt.Errorf("field 'AcceptedBy' must have at least 1 elements")
 	}
@@ -332,6 +389,9 @@ func (v *ClearDegradedRequest) Validate() error {
 
 // ValidateClusterSnapshotResponse validates the ClusterSnapshotResponse struct
 func (v *ClusterSnapshotResponse) Validate() error {
+	if v == nil {
+		return fmt.Errorf("ClusterSnapshotResponse is nil")
+	}
 	if len(v.SnapshotId) < 1 {
 		return fmt.Errorf("field 'SnapshotId' must have at least 1 elements")
 	}
@@ -349,6 +409,9 @@ func (v *ClusterSnapshotResponse) Validate() error {
 
 // ValidateRestoreRequest validates the RestoreRequest struct
 func (v *RestoreRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("RestoreRequest is nil")
+	}
 	if len(v.SnapshotId) < 1 {
 		return fmt.Errorf("field 'SnapshotId' must have at least 1 elements")
 	}
@@ -360,6 +423,9 @@ func (v *RestoreRequest) Validate() error {
 
 // ValidateClusterAck validates the ClusterAck struct
 func (v *ClusterAck) Validate() error {
+	if v == nil {
+		return fmt.Errorf("ClusterAck is nil")
+	}
 	if v.Message != nil {
 		if len((*v.Message)) < 1 {
 			return fmt.Errorf("field 'Message' must have at least 1 elements")
@@ -375,6 +441,9 @@ func (v *ClusterAck) Validate() error {
 
 // ValidateRouteRequest validates the RouteRequest struct
 func (v *RouteRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("RouteRequest is nil")
+	}
 	if len(v.AffinityKey) < 1 {
 		return fmt.Errorf("field 'AffinityKey' must have at least 1 elements")
 	}
@@ -386,6 +455,9 @@ func (v *RouteRequest) Validate() error {
 
 // ValidateRouteResponse validates the RouteResponse struct
 func (v *RouteResponse) Validate() error {
+	if v == nil {
+		return fmt.Errorf("RouteResponse is nil")
+	}
 	if v.LeaderAddress != nil {
 		if len((*v.LeaderAddress)) < 1 {
 			return fmt.Errorf("field 'LeaderAddress' must have at least 1 elements")
@@ -407,6 +479,9 @@ func (v *RouteResponse) Validate() error {
 
 // ValidateProperty validates the Property struct
 func (v *Property) Validate() error {
+	if v == nil {
+		return fmt.Errorf("Property is nil")
+	}
 	if len(v.Key) < 1 {
 		return fmt.Errorf("field 'Key' must have at least 1 elements")
 	}
@@ -418,6 +493,9 @@ func (v *Property) Validate() error {
 
 // ValidateMeasurement validates the Measurement struct
 func (v *Measurement) Validate() error {
+	if v == nil {
+		return fmt.Errorf("Measurement is nil")
+	}
 	if len(v.Key) < 1 {
 		return fmt.Errorf("field 'Key' must have at least 1 elements")
 	}
@@ -439,6 +517,9 @@ func (v *Measurement) Validate() error {
 
 // ValidateConsent validates the Consent struct
 func (v *Consent) Validate() error {
+	if v == nil {
+		return fmt.Errorf("Consent is nil")
+	}
 	if v.PolicyVersion != nil {
 		if len((*v.PolicyVersion)) < 1 {
 			return fmt.Errorf("field 'PolicyVersion' must have at least 1 elements")
@@ -454,6 +535,9 @@ func (v *Consent) Validate() error {
 
 // ValidateEnvelope validates the Envelope struct
 func (v *Envelope) Validate() error {
+	if v == nil {
+		return fmt.Errorf("Envelope is nil")
+	}
 	if v.Release != nil {
 		if len((*v.Release)) < 1 {
 			return fmt.Errorf("field 'Release' must have at least 1 elements")

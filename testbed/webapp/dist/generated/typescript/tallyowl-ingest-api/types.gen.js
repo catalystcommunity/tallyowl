@@ -11,10 +11,10 @@
  * `new Decimal(d.toString())` / `CsilDecimal.fromString(dec.toString())`.
  */
 export class CsilDecimal {
-    exponent;
-    mantissa;
     /** CBOR semantic tag for a decimal fraction. */
     static CBOR_TAG = 4;
+    exponent;
+    mantissa;
     constructor(exponent, mantissa) {
         this.exponent = exponent;
         this.mantissa = mantissa;
@@ -81,6 +81,75 @@ export class CsilDecimal {
         return this.toString();
     }
 }
+export const SpanKind = {
+    INTERNAL: "internal",
+    SERVER: "server",
+    CLIENT: "client",
+    PRODUCER: "producer",
+    CONSUMER: "consumer",
+};
+export const MetricKind = {
+    COUNTER: "counter",
+    GAUGE: "gauge",
+    HISTOGRAM: "histogram",
+};
+export const TypedValueKind = {
+    NULL: "null",
+    BOOL: "bool",
+    INT: "int",
+    UINT: "uint",
+    FLOAT: "float",
+    DECIMAL: "decimal",
+    TEXT: "text",
+    BYTES: "bytes",
+};
+export const PropertyOrigin = {
+    CLIENT: "client",
+    DRIVER: "driver",
+    COLLECTOR: "collector",
+};
+export const MeasurementKind = {
+    FLOAT: "float",
+    DECIMAL: "decimal",
+    INT: "int",
+};
+export const ConsentState = {
+    GRANTED: "granted",
+    DENIED: "denied",
+    ABSENT: "absent",
+};
+export const TelemetryKind = {
+    EVENT: "event",
+    PAGE_VIEW: "page-view",
+    SESSION_START: "session-start",
+    SESSION_END: "session-end",
+    SESSION_HEARTBEAT: "session-heartbeat",
+    INTERACTION: "interaction",
+    FEATURE_EXPOSURE: "feature-exposure",
+    IDENTIFY: "identify",
+    ALIAS: "alias",
+    GROUP: "group",
+    CONVERSION: "conversion",
+    ERROR: "error",
+    SPAN: "span",
+    METRIC_POINT: "metric-point",
+    CAMPAIGN_TOUCH: "campaign-touch",
+    CAMPAIGN_COST: "campaign-cost",
+};
+export const ErrorCode = {
+    INVALID_ARGUMENT: "invalid-argument",
+    UNAUTHENTICATED: "unauthenticated",
+    PERMISSION_DENIED: "permission-denied",
+    NOT_FOUND: "not-found",
+    ALREADY_EXISTS: "already-exists",
+    RESOURCE_EXHAUSTED: "resource-exhausted",
+    FAILED_PRECONDITION: "failed-precondition",
+    UNAVAILABLE: "unavailable",
+    SCHEMA_UNSUPPORTED: "schema-unsupported",
+    BUDGET_EXCEEDED: "budget-exceeded",
+    INCOMPLETE_RESULT: "incomplete-result",
+    INTERNAL: "internal",
+};
 export function validateEventPayload(value) {
     const errors = [];
     if (value.name.length < 1 || value.name.length > 128)

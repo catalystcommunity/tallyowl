@@ -1470,7 +1470,8 @@ fn a_head_with_no_policy_at_all_sends_none_rather_than_one_at_version_zero() {
             payload: encode_fetch_policy_request(&FetchPolicyRequest {
                 source_id: source.source_id.to_vec(),
                 known_version: known,
-            }),
+            })
+            .unwrap(),
         };
         match head.dispatch(&request) {
             Outcome::Reply { payload, .. } => {

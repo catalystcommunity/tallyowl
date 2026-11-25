@@ -14,6 +14,7 @@
 package api
 
 import (
+	"fmt"
 	"net"
 	"sync"
 
@@ -105,8 +106,7 @@ func (b *Backend) handle(request *transport.RpcRequest) transport.HandlerOutcome
 		if failure != nil {
 			return b.serviceError("unavailable", failure.Error(), true)
 		}
-		return transport.Reply("CaptureResponse",
-			ingest.EncodeCaptureResponse(ingest.CaptureResponse{Accepted: accepted}))
+		return replyAs("CaptureResponse")(ingest.EncodeCaptureResponse(ingest.CaptureResponse{Accepted: accepted}))
 
 	case "capture-critical":
 		decoded, err := ingest.DecodeCaptureCriticalRequest(request.Payload)
@@ -117,21 +117,19 @@ func (b *Backend) handle(request *transport.RpcRequest) transport.HandlerOutcome
 		if failure != nil {
 			return b.serviceError("unavailable", failure.Error(), true)
 		}
-		return transport.Reply("CaptureCriticalResponse",
-			ingest.EncodeCaptureCriticalResponse(ingest.CaptureCriticalResponse{
-				Accepted: accepted,
-				// True only because the flush below returned, and a flush
-				// returns only after Corndogs durably accepted the batch.
-				Durable: true,
-			}))
+		return replyAs("CaptureCriticalResponse")(ingest.EncodeCaptureCriticalResponse(ingest.CaptureCriticalResponse{
+			Accepted: accepted,
+			// True only because the flush below returned, and a flush
+			// returns only after Corndogs durably accepted the batch.
+			Durable: true,
+		}))
 
 	case "policy-version":
-		return transport.Reply("PolicyVersionResponse",
-			ingest.EncodePolicyVersionResponse(ingest.PolicyVersionResponse{
-				PolicyVersion: 1,
-				SamplingRate:  1.0,
-				EnabledKinds:  []ingest.TelemetryKind{"event", "page-view", "conversion", "error"},
-			}))
+		return replyAs("PolicyVersionResponse")(ingest.EncodePolicyVersionResponse(ingest.PolicyVersionResponse{
+			PolicyVersion: 1,
+			SamplingRate:  1.0,
+			EnabledKinds:  []ingest.TelemetryKind{"event", "page-view", "conversion", "error"},
+		}))
 	}
 	return transport.Transport(transport.StatusUnknownServiceOrOp, "no such operation")
 }
@@ -171,7 +169,7 @@ func (b *Backend) forward(items []ingest.TelemetryItem, critical bool) (uint64, 
 }
 
 func (b *Backend) serviceError(code, message string, retryable bool) transport.HandlerOutcome {
-	return transport.Reply("ServiceError", ingest.EncodeServiceError(ingest.ServiceError{
+	return replyAs("ServiceError")(ingest.EncodeServiceError(ingest.ServiceError{
 		Code:      ingest.ErrorCode(code),
 		Message:   message,
 		Retryable: retryable,
@@ -229,4 +227,18 @@ func (b *Backend) Close() int {
 // KeepBrowserEventID. See DELIVERY.md section 2.
 func fromIngest(item ingest.TelemetryItem) (*tallyowl.Capture, error) {
 	return tallyowl.FromBrowser(item, tallyowl.KeepBrowserEventID())
+}
+
+// replyAs gives the reply of one variant for the result of a generated
+// encoder: `replyAs("X")(api.EncodeX(v))`. From csilgen 0.3.0 an encoder also
+// returns an error, and a reply that cannot be encoded is transport status 6
+// (internal), as the csilgen RPC conventions say.
+func replyAs(variant string) func(payload []byte, err error) transport.HandlerOutcome {
+	return func(payload []byte, err error) transport.HandlerOutcome {
+		if err != nil {
+			return transport.Transport(transport.StatusInternal,
+				fmt.Sprintf("The %s reply could not be encoded: %v", variant, err))
+		}
+		return transport.Reply(variant, payload)
+	}
 }

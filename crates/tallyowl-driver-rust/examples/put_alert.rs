@@ -61,7 +61,8 @@ fn main() {
             encode_list_request(&ListRequest {
                 cursor: None,
                 limit: None,
-            }),
+            })
+            .expect("the request encodes"),
         )
         .expect("the head answers");
     let projects = decode_project_list(&projects.payload).expect("a project list");
@@ -129,7 +130,7 @@ fn main() {
         .call(
             "TallyOwlControl",
             "put-alert-rule",
-            encode_alert_rule(&rule),
+            encode_alert_rule(&rule).expect("the request encodes"),
         )
         .expect("the head answers");
     let stored = decode_alert_rule(&stored.payload).expect("a rule");
@@ -189,7 +190,7 @@ fn write_many(client: &tallyowl_rpc::Client, project_id: &[u8], count: usize) {
             .call(
                 "TallyOwlControl",
                 "put-alert-rule",
-                encode_alert_rule(&rule),
+                encode_alert_rule(&rule).expect("the request encodes"),
             )
             .expect("the head answers");
         if (index + 1) % 100 == 0 {
@@ -209,7 +210,8 @@ fn show(client: &tallyowl_rpc::Client, project_id: &[u8]) {
                 project_id: project_id.to_vec(),
                 cursor: None,
                 limit: None,
-            }),
+            })
+            .expect("the request encodes"),
         )
         .expect("the head answers");
     let instances = decode_alert_instance_list(&instances.payload).expect("instances");
@@ -234,7 +236,8 @@ fn show(client: &tallyowl_rpc::Client, project_id: &[u8]) {
             encode_list_request(&ListRequest {
                 cursor: None,
                 limit: None,
-            }),
+            })
+            .expect("the request encodes"),
         )
         .expect("the head answers");
     let workflows = decode_workflow_list(&workflows.payload).expect("workflows");

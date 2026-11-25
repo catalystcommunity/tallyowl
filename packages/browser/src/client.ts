@@ -14,7 +14,7 @@
 import {
   fromCaptureCriticalResponseCbor,
   fromCaptureResponseCbor,
-  fromServiceErrorCbor,
+  fromServiceErrorTypeCbor,
   toCaptureCriticalRequestCbor,
   toCaptureRequestCbor,
 } from "./ingest-api.ts";
@@ -507,7 +507,7 @@ export class BrowserClient {
 
   private throwIfServiceError(reply: { variant?: string; payload: Uint8Array }): void {
     if (reply.variant !== "ServiceError") return;
-    const wire = fromServiceErrorCbor(reply.payload);
+    const wire = fromServiceErrorTypeCbor(reply.payload);
     throw new ServiceError(wire.code, wire.message, wire.retryable);
   }
 }

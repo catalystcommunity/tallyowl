@@ -267,12 +267,15 @@ fn split_by_size(items: Vec<TelemetryItem>, budget: usize) -> Vec<Vec<TelemetryI
     let mut current = Vec::new();
     let mut held = 0usize;
     for item in items {
-        let size = tallyowl_collector_api::codec::encode_telemetry_item(&item).len();
-        if !current.is_empty() && held + size > budget {
+        // An item the encoder refuses counts as over the budget, so it goes in
+        // a batch of its own, and the intake check of each item refuses it.
+        let size = tallyowl_collector_api::codec::encode_telemetry_item(&item)
+            .map_or(usize::MAX, |encoded| encoded.len());
+        if !current.is_empty() && held.saturating_add(size) > budget {
             batches.push(std::mem::take(&mut current));
             held = 0;
         }
-        held += size;
+        held = held.saturating_add(size);
         current.push(item);
     }
     if !current.is_empty() {
@@ -854,6 +857,7 @@ mod tests {
                 sealed_at: 0,
                 compression: None,
             })
+            .unwrap()
             .len()
                 > 16 * 1024,
             "the scrape must be larger than one batch for this to prove anything"
@@ -877,7 +881,9 @@ mod tests {
     #[test]
     fn every_batch_stays_inside_the_budget_and_an_oversized_item_travels_alone() {
         let items = scraped(&many_series(50), "t", 1_000);
-        let one = tallyowl_collector_api::codec::encode_telemetry_item(&items[0]).len();
+        let one = tallyowl_collector_api::codec::encode_telemetry_item(&items[0])
+            .unwrap()
+            .len();
         let batches = split_by_size(items.clone(), one * 4);
         assert_eq!(
             batches.iter().map(Vec::len).sum::<usize>(),
@@ -887,7 +893,11 @@ mod tests {
         for batch in &batches {
             let size: usize = batch
                 .iter()
-                .map(|item| tallyowl_collector_api::codec::encode_telemetry_item(item).len())
+                .map(|item| {
+                    tallyowl_collector_api::codec::encode_telemetry_item(item)
+                        .unwrap()
+                        .len()
+                })
                 .sum();
             assert!(size <= one * 4 || batch.len() == 1);
         }

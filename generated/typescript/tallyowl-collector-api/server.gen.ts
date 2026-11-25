@@ -4,6 +4,8 @@
 
 import type { AlertNotifyRequest, AlertNotifyResponse, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, CollectorHealth, CommitBatchRequest, CommitBatchResponse, FetchPolicyRequest, FetchPolicyResponse, HealthRequest, PolicyVersionRequest, PolicyVersionResponse, ResolveKeyRequest, ResolveKeyResponse, ServiceError, SubmitBatchRequest, SubmitBatchResponse } from "./types.gen.ts";
 
+import { type RpcReply, encodeTallyOwlCollectorSubmitBatchReply, encodeTallyOwlCollectorCommitBatchReply, encodeTallyOwlCollectorFetchPolicyReply, encodeTallyOwlCollectorHealthReply, encodeTallyOwlCollectorResolveKeyReply, encodeTallyOwlIngestCaptureReply, encodeTallyOwlIngestCaptureCriticalReply, encodeTallyOwlIngestPolicyVersionReply, encodeTallyOwlAlertReceiverNotifyReply } from "./codec.gen.ts";
+
 // The consumer-defined context carries auth, request id, etc. It is opaque to
 // generated code; the adapter defines its shape.
 export interface RequestContext {
@@ -106,14 +108,13 @@ export async function dispatch(
   method: string,
   reqBytes: Uint8Array,
   ctx: RequestContext,
-): Promise<Uint8Array> {
+): Promise<Uint8Array | RpcReply> {
   switch (service) {
     case "TallyOwlAlertReceiver": {
       switch (method) {
         case "notify": {
           const req = codec.decode<AlertNotifyRequest>(reqBytes);
-          const res = await handlers.tallyOwlAlertReceiver.notify(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlAlertReceiverNotifyReply(() => handlers.tallyOwlAlertReceiver.notify(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown method ${service}.${method}` } satisfies ServiceError;
@@ -123,28 +124,23 @@ export async function dispatch(
       switch (method) {
         case "submit-batch": {
           const req = codec.decode<SubmitBatchRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.submitBatch(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorSubmitBatchReply(() => handlers.tallyOwlCollector.submitBatch(req, ctx));
         }
         case "commit-batch": {
           const req = codec.decode<CommitBatchRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.commitBatch(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorCommitBatchReply(() => handlers.tallyOwlCollector.commitBatch(req, ctx));
         }
         case "fetch-policy": {
           const req = codec.decode<FetchPolicyRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.fetchPolicy(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorFetchPolicyReply(() => handlers.tallyOwlCollector.fetchPolicy(req, ctx));
         }
         case "health": {
           const req = codec.decode<HealthRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.health(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorHealthReply(() => handlers.tallyOwlCollector.health(req, ctx));
         }
         case "resolve-key": {
           const req = codec.decode<ResolveKeyRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.resolveKey(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorResolveKeyReply(() => handlers.tallyOwlCollector.resolveKey(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown method ${service}.${method}` } satisfies ServiceError;
@@ -154,18 +150,15 @@ export async function dispatch(
       switch (method) {
         case "capture": {
           const req = codec.decode<CaptureRequest>(reqBytes);
-          const res = await handlers.tallyOwlIngest.capture(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlIngestCaptureReply(() => handlers.tallyOwlIngest.capture(req, ctx));
         }
         case "capture-critical": {
           const req = codec.decode<CaptureCriticalRequest>(reqBytes);
-          const res = await handlers.tallyOwlIngest.captureCritical(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlIngestCaptureCriticalReply(() => handlers.tallyOwlIngest.captureCritical(req, ctx));
         }
         case "policy-version": {
           const req = codec.decode<PolicyVersionRequest>(reqBytes);
-          const res = await handlers.tallyOwlIngest.policyVersion(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlIngestPolicyVersionReply(() => handlers.tallyOwlIngest.policyVersion(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown method ${service}.${method}` } satisfies ServiceError;
@@ -190,14 +183,13 @@ export async function dispatchCompact(
   method: number,
   reqBytes: Uint8Array,
   ctx: RequestContext,
-): Promise<Uint8Array> {
+): Promise<Uint8Array | RpcReply> {
   switch (service) {
     case 6: {
       switch (method) {
         case 0: {
           const req = codec.decode<AlertNotifyRequest>(reqBytes);
-          const res = await handlers.tallyOwlAlertReceiver.notify(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlAlertReceiverNotifyReply(() => handlers.tallyOwlAlertReceiver.notify(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown ordinal ${service}.${method}` } satisfies ServiceError;
@@ -207,28 +199,23 @@ export async function dispatchCompact(
       switch (method) {
         case 0: {
           const req = codec.decode<SubmitBatchRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.submitBatch(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorSubmitBatchReply(() => handlers.tallyOwlCollector.submitBatch(req, ctx));
         }
         case 1: {
           const req = codec.decode<CommitBatchRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.commitBatch(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorCommitBatchReply(() => handlers.tallyOwlCollector.commitBatch(req, ctx));
         }
         case 2: {
           const req = codec.decode<FetchPolicyRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.fetchPolicy(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorFetchPolicyReply(() => handlers.tallyOwlCollector.fetchPolicy(req, ctx));
         }
         case 3: {
           const req = codec.decode<HealthRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.health(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorHealthReply(() => handlers.tallyOwlCollector.health(req, ctx));
         }
         case 4: {
           const req = codec.decode<ResolveKeyRequest>(reqBytes);
-          const res = await handlers.tallyOwlCollector.resolveKey(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlCollectorResolveKeyReply(() => handlers.tallyOwlCollector.resolveKey(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown ordinal ${service}.${method}` } satisfies ServiceError;
@@ -238,18 +225,15 @@ export async function dispatchCompact(
       switch (method) {
         case 0: {
           const req = codec.decode<CaptureRequest>(reqBytes);
-          const res = await handlers.tallyOwlIngest.capture(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlIngestCaptureReply(() => handlers.tallyOwlIngest.capture(req, ctx));
         }
         case 1: {
           const req = codec.decode<CaptureCriticalRequest>(reqBytes);
-          const res = await handlers.tallyOwlIngest.captureCritical(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlIngestCaptureCriticalReply(() => handlers.tallyOwlIngest.captureCritical(req, ctx));
         }
         case 2: {
           const req = codec.decode<PolicyVersionRequest>(reqBytes);
-          const res = await handlers.tallyOwlIngest.policyVersion(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlIngestPolicyVersionReply(() => handlers.tallyOwlIngest.policyVersion(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown ordinal ${service}.${method}` } satisfies ServiceError;

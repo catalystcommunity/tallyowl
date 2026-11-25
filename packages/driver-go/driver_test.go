@@ -89,15 +89,15 @@ func (f *fakeCollector) handle(request *transport.RpcRequest) transport.HandlerO
 	f.mu.Unlock()
 
 	if failure != nil {
-		return transport.Reply("ServiceError", collector.EncodeServiceError(*failure))
+		return transport.Reply("ServiceError", mustEncode(collector.EncodeServiceError(*failure)))
 	}
-	return transport.Reply("SubmitBatchResponse", collector.EncodeSubmitBatchResponse(
+	return transport.Reply("SubmitBatchResponse", mustEncode(collector.EncodeSubmitBatchResponse(
 		collector.SubmitBatchResponse{
 			BatchId:       decoded.Batch.BatchId,
 			Accepted:      uint64(len(decoded.Batch.Items)),
 			DurableCopies: 1,
 			QueuedAt:      collector.Timestamp(nowMs()),
-		}))
+		})))
 }
 
 // stop closes the listener and every accepted connection. Closing a listener

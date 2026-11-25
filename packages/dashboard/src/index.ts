@@ -16,8 +16,12 @@ export * as signIn from "./sign-in.ts";
 import {
   fromProjectListCbor,
   fromQueryResponseCbor,
+  fromUserPreferencesCbor,
+  toEmptyCbor,
   toListRequestCbor,
   toQueryRequestCbor,
+  toUserPreferencesCbor,
+  type UserPreferences,
 } from "./control-api.ts";
 import { eventBreakdown, eventTrend, metricNames, metricRate } from "./queries.ts";
 import {
@@ -32,6 +36,7 @@ import {
   type Storage,
 } from "./sign-in.ts";
 import { Control, ControlError, TransportFailure } from "./transport.ts";
+import * as time from "./time.ts";
 import * as view from "./view.ts";
 
 /// How the dashboard is wired to its host page. Every dependency is injected,
@@ -57,13 +62,20 @@ export interface Options {
   /// Which metric the chart draws. The dashboard asks the head which names
   /// exist and draws the first one when the host names none.
   readonly metricName?: string;
+  /// The days the charts show, as the range picker writes them
+  /// (`2026-11-01/2026-11-07`). Absent, the charts show the last 24 hours.
+  readonly days?: string;
+  /// The display preferences of the person, once the head gave them. Absent,
+  /// the page asks the head.
+  readonly preferences?: UserPreferences;
 }
-
-const HOUR_MS = 3_600_000;
 
 /// The project this tab chose last. It is a choice, not a credential, and it
 /// ends with the tab like the session does.
 const PROJECT_KEY = "tallyowl.project";
+
+/// The days the charts showed last in this tab, so that a reload keeps them.
+const DAYS_KEY = "tallyowl.days";
 
 /// Draw the dashboard once.
 export async function render(options: Options): Promise<void> {
@@ -82,9 +94,7 @@ export async function render(options: Options): Promise<void> {
   }
 
   if (control.session() === undefined) {
-    const { prompt, focus } = signInPrompt(options, options.notice);
-    root.append(prompt);
-    focusSoon(focus);
+    root.append(signInPrompt(options, options.notice));
     return;
   }
 
@@ -142,19 +152,58 @@ export async function render(options: Options): Promise<void> {
   const detail = report === undefined ? undefined : view.healthDetail(report);
   if (detail !== undefined) content.append(detail);
 
-  const rangeEnd = options.now();
+  let preferences: UserPreferences;
+  try {
+    preferences = options.preferences ?? (await preferencesOf(control));
+  } catch {
+    // `preferencesOf` throws only for a session that ended.
+    return signInAgain(options);
+  }
+  const clock = time.clockOf(preferences);
+  const now = options.now();
+  const days = options.days ?? options.storage.getItem(DAYS_KEY) ?? undefined;
+  const chart = (days === undefined ? undefined : time.chosenDays(days, now)) ?? time.lastDay(now);
+  // The head gets UTC instants and a bucket width. A day bucket is a fixed
+  // 24 hours from the epoch, which is a UTC day: TallyOwl keeps each bucket in
+  // UTC, and only the text on the page follows the clock of the person.
   const range = {
-    rangeStart: rangeEnd - 24 * HOUR_MS,
-    rangeEnd,
+    rangeStart: chart.start,
+    rangeEnd: chart.end,
     basis: "occurred_at" as const,
   };
-  const drawnRange = { start: range.rangeStart, end: range.rangeEnd, bucketMs: HOUR_MS };
+  const drawnRange: view.Range = { ...chart, clock };
+  const bucketMs = chart.bucketMs;
+  const again = { ...drawn, preferences };
+
+  const controls = view.chartControls({
+      days: chart.days,
+      clock,
+      choice: time.choiceOf(preferences),
+      zones: time.knownZones(),
+      now,
+      onDays: (chosen) => {
+        if (chosen === undefined) options.storage.removeItem(DAYS_KEY);
+        else options.storage.setItem(DAYS_KEY, chosen);
+        void render({ ...again, days: chosen });
+      },
+      onClock: (choice) => {
+        void storePreferences(control, time.preferencesFor(choice, preferences)).then(
+          (stored) => render({ ...again, preferences: stored }),
+          (cause) => {
+            if (sessionEnded(cause)) return signInAgain(options);
+            // Beside the chooser, where the person is looking.
+            controls.append(view.failure(readable(cause)));
+          },
+        );
+      },
+  });
+  content.append(controls);
   // The status bar is the last thing on the page, whatever the panels do.
-  root.append(view.statusBar(report, drawnRange, rangeEnd));
+  root.append(view.statusBar(report, drawnRange, now));
 
   try {
     const trend = fromQueryResponseCbor(
-      await control.call("run-query", toQueryRequestCbor(eventTrend(projectId, range, HOUR_MS))),
+      await control.call("run-query", toQueryRequestCbor(eventTrend(projectId, range, bucketMs))),
     );
     content.append(view.eventPanel(view.pointsFrom(trend.columns, trend.rows), drawnRange));
   } catch (cause) {
@@ -196,12 +245,12 @@ export async function render(options: Options): Promise<void> {
       const rate = fromQueryResponseCbor(
         await control.call(
           "run-query",
-          toQueryRequestCbor(metricRate(projectId, chosen, range, HOUR_MS)),
+          toQueryRequestCbor(metricRate(projectId, chosen, range, bucketMs)),
         ),
       );
       lower.append(
         view.metricPanel(available, chosen, view.ratePointsFrom(rate.columns, rate.rows), drawnRange, (name) => {
-          void render({ ...drawn, metricName: name });
+          void render({ ...again, metricName: name });
         }),
       );
     }
@@ -209,6 +258,24 @@ export async function render(options: Options): Promise<void> {
     if (sessionEnded(cause)) return signInAgain(options);
     lower.append(view.failure(readable(cause)));
   }
+}
+
+/// The display preferences of the person who is signed in.
+///
+/// A head that cannot answer gives the time of the browser. A display
+/// preference must never stop a page. A session that ended is the exception,
+/// because then nothing else on the page can answer either.
+async function preferencesOf(control: Control): Promise<UserPreferences> {
+  try {
+    return fromUserPreferencesCbor(await control.call("get-user-preferences", toEmptyCbor({})));
+  } catch (cause) {
+    if (sessionEnded(cause)) throw cause;
+    return time.BROWSER_PREFERENCES;
+  }
+}
+
+async function storePreferences(control: Control, wanted: UserPreferences): Promise<UserPreferences> {
+  return fromUserPreferencesCbor(await control.call("put-user-preferences", toUserPreferencesCbor(wanted)));
 }
 
 /// Whether the head refused the session this tab holds.
@@ -233,7 +300,7 @@ function signInAgain(options: Options): Promise<void> {
   });
 }
 
-function signInPrompt(options: Options, notice?: string): { prompt: HTMLElement; focus?: HTMLElement } {
+function signInPrompt(options: Options, notice?: string): HTMLElement {
   const card = document.createElement("div");
   card.className = "sign-in-card";
 
@@ -269,7 +336,9 @@ function signInPrompt(options: Options, notice?: string): { prompt: HTMLElement;
   if (keepOn) keep.setAttribute("checked", "");
   (keep as HTMLElement & { checked: boolean }).checked = keepOn;
   const submit = zest("push-button", { type: "submit", variant: "primary" }, "Sign in");
-  if (remembered.length > 0) submit.setAttribute("autofocus", "");
+  // A Zest control with `autofocus` takes the focus when it connects, if no
+  // other element has it.
+  (remembered.length > 0 ? submit : login).setAttribute("autofocus", "");
   form.append(login, keep, submit);
 
   form.addEventListener("submit", (event) => {
@@ -294,7 +363,7 @@ function signInPrompt(options: Options, notice?: string): { prompt: HTMLElement;
   const prompt = document.createElement("section");
   prompt.className = "sign-in";
   prompt.append(card);
-  return { prompt, focus: remembered.length > 0 ? submit : login };
+  return prompt;
 }
 
 /// The way in for an installation with no LinkKeys domain.
@@ -346,13 +415,6 @@ function zest(tag: string, attributes: Record<string, string>, text?: string): H
 /// The current value of a Zest field. It is a property, as on a native input.
 function valueOf(field: HTMLElement): string {
   return (field as HTMLElement & { value?: string }).value ?? "";
-}
-
-/// Put the focus on a control after the page shows it. Zest builds a control's
-/// inner input when it connects, so the focus waits for the next frame.
-function focusSoon(target: HTMLElement | undefined): void {
-  if (target === undefined || typeof requestAnimationFrame === "undefined") return;
-  requestAnimationFrame(() => target.focus());
 }
 
 /// One sentence a person can act on, whatever went wrong.

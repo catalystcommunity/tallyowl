@@ -5,22 +5,13 @@ package tallyowlcollectorapi
 
 import (
 	"context"
-	"fmt"
 )
 
-// ClientError is returned by a generated client call: a structured error the
-// service returned (Code/Message), or a transport-level failure (Err).
-type ClientError struct {
-	Code    int64
-	Message string
-	Err     error
-}
-
-func (e *ClientError) Error() string {
-	if e.Err != nil {
-		return "transport error: " + e.Err.Error()
-	}
-	return fmt.Sprintf("service error %d: %s", e.Code, e.Message)
+// WireReply is a status-zero CSIL-RPC reply: Variant names the declared output arm
+// that Payload encodes. A transport returns it from CallReply.
+type WireReply struct {
+	Variant *string
+	Payload []byte
 }
 
 // Transport is the caller-supplied byte carrier: it performs the call named by
@@ -28,9 +19,12 @@ func (e *ClientError) Error() string {
 // bytes, or an error. Both names are the verbatim CSIL names (service as written,
 // op in kebab-case as written), ready to go on the wire unmodified. The generated
 // client owns (de)serialization via the codec; the carrier only moves bytes, so
-// it can be HTTP, a queue, or an in-process loop.
+// it can be HTTP, a queue, or an in-process loop. CallReply serves operations
+// that declare several reply arms: it also returns the reply variant, so the
+// client can return the success arm or the declared error arm.
 type Transport interface {
 	Call(ctx context.Context, service string, op string, req []byte) ([]byte, error)
+	CallReply(ctx context.Context, service string, op string, req []byte) (WireReply, error)
 }
 
 // TallyOwlCollectorClient is a typed client for the TallyOwlCollector service. The client owns
@@ -45,47 +39,107 @@ func NewTallyOwlCollectorClient(transport Transport) *TallyOwlCollectorClient {
 
 func (c *TallyOwlCollectorClient) SubmitBatch(ctx context.Context, req SubmitBatchRequest) (SubmitBatchResponse, error) {
 	var csilZero SubmitBatchResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCollector", "submit-batch", EncodeSubmitBatchRequest(req))
+	csilReq, csilErr := EncodeSubmitBatchRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCollector", "submit-batch", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeSubmitBatchResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCollector", "submit-batch", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeSubmitBatchResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlCollectorClient) CommitBatch(ctx context.Context, req CommitBatchRequest) (CommitBatchResponse, error) {
 	var csilZero CommitBatchResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCollector", "commit-batch", EncodeCommitBatchRequest(req))
+	csilReq, csilErr := EncodeCommitBatchRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCollector", "commit-batch", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeCommitBatchResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCollector", "commit-batch", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeCommitBatchResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlCollectorClient) FetchPolicy(ctx context.Context, req FetchPolicyRequest) (FetchPolicyResponse, error) {
 	var csilZero FetchPolicyResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCollector", "fetch-policy", EncodeFetchPolicyRequest(req))
+	csilReq, csilErr := EncodeFetchPolicyRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCollector", "fetch-policy", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeFetchPolicyResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCollector", "fetch-policy", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeFetchPolicyResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlCollectorClient) Health(ctx context.Context, req HealthRequest) (CollectorHealth, error) {
 	var csilZero CollectorHealth
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCollector", "health", EncodeHealthRequest(req))
+	csilReq, csilErr := EncodeHealthRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCollector", "health", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeCollectorHealth(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCollector", "health", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeCollectorHealth(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlCollectorClient) ResolveKey(ctx context.Context, req ResolveKeyRequest) (ResolveKeyResponse, error) {
 	var csilZero ResolveKeyResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlCollector", "resolve-key", EncodeResolveKeyRequest(req))
+	csilReq, csilErr := EncodeResolveKeyRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlCollector", "resolve-key", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeResolveKeyResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlCollector", "resolve-key", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeResolveKeyResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 // TallyOwlIngestClient is a typed client for the TallyOwlIngest service. The client owns
@@ -100,29 +154,65 @@ func NewTallyOwlIngestClient(transport Transport) *TallyOwlIngestClient {
 
 func (c *TallyOwlIngestClient) Capture(ctx context.Context, req CaptureRequest) (CaptureResponse, error) {
 	var csilZero CaptureResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlIngest", "capture", EncodeCaptureRequest(req))
+	csilReq, csilErr := EncodeCaptureRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlIngest", "capture", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeCaptureResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlIngest", "capture", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeCaptureResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlIngestClient) CaptureCritical(ctx context.Context, req CaptureCriticalRequest) (CaptureCriticalResponse, error) {
 	var csilZero CaptureCriticalResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlIngest", "capture-critical", EncodeCaptureCriticalRequest(req))
+	csilReq, csilErr := EncodeCaptureCriticalRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlIngest", "capture-critical", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeCaptureCriticalResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlIngest", "capture-critical", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeCaptureCriticalResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlIngestClient) PolicyVersion(ctx context.Context, req PolicyVersionRequest) (PolicyVersionResponse, error) {
 	var csilZero PolicyVersionResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlIngest", "policy-version", EncodePolicyVersionRequest(req))
+	csilReq, csilErr := EncodePolicyVersionRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlIngest", "policy-version", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodePolicyVersionResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlIngest", "policy-version", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodePolicyVersionResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 // TallyOwlAlertReceiverClient is a typed client for the TallyOwlAlertReceiver service. The client owns
@@ -137,9 +227,21 @@ func NewTallyOwlAlertReceiverClient(transport Transport) *TallyOwlAlertReceiverC
 
 func (c *TallyOwlAlertReceiverClient) Notify(ctx context.Context, req AlertNotifyRequest) (AlertNotifyResponse, error) {
 	var csilZero AlertNotifyResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlAlertReceiver", "notify", EncodeAlertNotifyRequest(req))
+	csilReq, csilErr := EncodeAlertNotifyRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlAlertReceiver", "notify", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeAlertNotifyResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlAlertReceiver", "notify", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeAlertNotifyResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }

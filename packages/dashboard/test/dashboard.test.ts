@@ -24,8 +24,11 @@ import {
   toCompleteLoginResponseCbor,
   toProjectListCbor,
   toQueryResponseCbor,
-  toServiceErrorCbor,
+  toServiceErrorTypeCbor,
+  fromUserPreferencesCbor,
+  toUserPreferencesCbor,
   type QueryRequest,
+  type UserPreferences,
 } from "../src/control-api.ts";
 import {
   ATTRIBUTION_MODELS,
@@ -239,7 +242,7 @@ test("a rejected request and an unreachable head are different failures", async 
   const rejecting = head(() =>
     RpcResponse.ok(
       "ServiceError",
-      toServiceErrorCbor({
+      toServiceErrorTypeCbor({
         code: "permission-denied",
         message: "You cannot read that project.",
         retryable: false,
@@ -713,7 +716,7 @@ test("a session that ended is forgotten and the sign-in comes back", async () =>
   const { fetch } = head(() =>
     RpcResponse.ok(
       "ServiceError",
-      toServiceErrorCbor({
+      toServiceErrorTypeCbor({
         code: "unauthenticated",
         message: "This credential is not valid. Ask the person who runs TallyOwl for a new one.",
         retryable: false,
@@ -892,6 +895,7 @@ test("a login name a person asked to keep fills the sign-in next time", async ()
     })[];
   const [login, keep] = fields(first.root);
   assert.equal(login.value, "");
+  assert.equal(login.getAttribute("autofocus"), "", "the empty login field does not have the focus");
   assert.equal(keep.checked, true, "remembering is on by default");
   login.value = "  alice@example.com ";
   all(first.root).find((element) => element.tagName === "form")!.fire("submit");
@@ -909,4 +913,109 @@ test("a login name a person asked to keep fills the sign-in next time", async ()
   keepAgain.checked = false;
   all(second.root).find((element) => element.tagName === "form")!.fire("submit");
   assert.equal(signIn.rememberedLoginName(memory), "");
+});
+
+// ---------------------------------------------------------------------------
+// The clock of the person, and the days they choose
+// ---------------------------------------------------------------------------
+
+/// A head with one project that keeps the preferences a person stores.
+function preferringHead(start: UserPreferences) {
+  let held = start;
+  const served = head((op, payload) => {
+    if (op === "get-user-preferences") return RpcResponse.ok("UserPreferences", toUserPreferencesCbor(held));
+    if (op === "put-user-preferences") {
+      held = { ...fromUserPreferencesCbor(payload), updatedAt: 1 };
+      return RpcResponse.ok("UserPreferences", toUserPreferencesCbor(held));
+    }
+    return twoProjects(op);
+  });
+  return { ...served, held: () => held };
+}
+
+/// The scan of the first trend query a page sent: its range and bucket width.
+function firstTrend(seen: Seen[]): { start: number; end: number; bucketMs: number | undefined } {
+  const call = seen.find((one) => one.op === "run-query")!;
+  const box = fromQueryNodeBoxCbor(fromQueryRequestCbor(call.payload).node!);
+  const aggregate = box.aggregate!;
+  const scan = fromQueryNodeBoxCbor(aggregate.input).scan!;
+  return { start: scan.range.rangeStart, end: scan.range.rangeEnd, bucketMs: aggregate.interval?.fixedMs };
+}
+
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 4; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("the clock a person chose is stored on their account, and each time on the page follows it", async () => {
+  const head = preferringHead({ timeDisplay: "zone", timeZone: "Europe/Berlin" });
+  const held = storage();
+  held.setItem("tallyowl.session", "tos_ab_c");
+  const { root, options } = page(new Control({ fetch: head.fetch }), held);
+  await render(options);
+  const text = () => all(root).map((element) => element.textContent).join(" ");
+  assert.match(text(), /Times in Europe\/Berlin/);
+
+  const clock = all(root).find(
+    (element) => element.tagName === "combo-box" && element.getAttribute("name") === "clock",
+  ) as unknown as ShimElement & { value: string };
+  assert.ok(clock !== undefined, "no clock chooser");
+  assert.equal(clock.getAttribute("value"), "Europe/Berlin");
+  clock.value = "UTC";
+  clock.fire("change");
+  await settle();
+
+  assert.deepEqual(head.held().timeDisplay, "utc");
+  assert.equal(head.held().timeZone, "Europe/Berlin", "the zone stays, so the person can go back to it");
+  assert.match(text(), /Times in UTC/);
+});
+
+test("chosen days are UTC days, whatever the clock of the person is", async () => {
+  // Berlin is two hours ahead of UTC in July. "20 July" still starts at 00:00
+  // UTC on 20 July, so a person in Berlin and a person in Denver who choose the
+  // same days ask for the same instants. Three days draw by hour, and seven
+  // days by UTC day.
+  const head = preferringHead({ timeDisplay: "zone", timeZone: "Europe/Berlin" });
+  const held = storage();
+  held.setItem("tallyowl.session", "tos_ab_c");
+  const { root, options } = page(new Control({ fetch: head.fetch }), held);
+  await render({ ...options, days: "2026-07-20/2026-07-22" });
+  const hourly = firstTrend(head.seen);
+  assert.equal(hourly.start, Date.UTC(2026, 6, 20));
+  assert.equal(hourly.end, Date.UTC(2026, 6, 23));
+  assert.equal(hourly.bucketMs, 3_600_000);
+
+  head.seen.length = 0;
+  await render({ ...options, days: "2026-07-20/2026-07-26" });
+  const trend = firstTrend(head.seen);
+  assert.equal(trend.start, Date.UTC(2026, 6, 20));
+  assert.equal(trend.end, Date.UTC(2026, 6, 27));
+  assert.equal(trend.bucketMs, 86_400_000);
+
+  const picker = all(root).find((element) => element.tagName === "date-time-picker");
+  assert.equal(picker?.getAttribute("value"), "2026-07-20/2026-07-26");
+  assert.equal(picker?.getAttribute("time-zone"), "UTC", "the picker reads UTC days");
+
+  // A reload in the same tab keeps the days the person chose last.
+  held.setItem("tallyowl.days", "2026-07-20/2026-07-26");
+  head.seen.length = 0;
+  await render(page(new Control({ fetch: head.fetch }), held).options);
+  assert.equal(firstTrend(head.seen).start, Date.UTC(2026, 6, 20));
+
+  // A cleared picker goes back to the last 24 hours, by hour.
+  head.seen.length = 0;
+  (picker as unknown as { fire(kind: string, detail?: unknown): void }).fire("date-changed");
+  await settle();
+  const rolling = firstTrend(head.seen);
+  assert.equal(rolling.end - rolling.start, 86_400_000);
+  assert.equal(rolling.bucketMs, 3_600_000);
+  assert.equal(held.getItem("tallyowl.days"), null, "a cleared range is forgotten");
+});
+
+test("a head that cannot say the preferences still draws the page, in the time of the browser", async () => {
+  const { fetch } = head(twoProjects);
+  const held = storage();
+  held.setItem("tallyowl.session", "tos_ab_c");
+  const { root, options } = page(new Control({ fetch }), held);
+  await render(options);
+  assert.match(all(root).map((element) => element.textContent).join(" "), /Times in browser time/);
 });

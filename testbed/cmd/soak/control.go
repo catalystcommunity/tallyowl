@@ -39,8 +39,8 @@ func (c *ControlClient) LookupCount(projectID []byte, requestID string) (int64, 
 	})
 	predicate := compareText("request_id", requestID)
 	filter := controlapi.FilterNode{
-		Filter: controlapi.ExpressionRef(controlapi.EncodeExpressionNode(predicate)),
-		Input:  controlapi.QueryNodeRef(controlapi.EncodeQueryNodeBox(scanNode)),
+		Filter: controlapi.ExpressionRef(mustEncode(controlapi.EncodeExpressionNode(predicate))),
+		Input:  controlapi.QueryNodeRef(mustEncode(controlapi.EncodeQueryNodeBox(scanNode))),
 	}
 	filterNode := node(controlapi.QueryNodeKind("filter"), func(b *controlapi.QueryNodeBox) {
 		b.Filter = &filter
@@ -74,7 +74,7 @@ func (c *ControlClient) CountIn(projectID []byte, startMs, endMs int64) (int64, 
 			Kind:  "count",
 			Alias: "events",
 		}},
-		Input: controlapi.QueryNodeRef(controlapi.EncodeQueryNodeBox(scanNode)),
+		Input: controlapi.QueryNodeRef(mustEncode(controlapi.EncodeQueryNodeBox(scanNode))),
 	}
 	aggregateNode := node(controlapi.QueryNodeKind("aggregate"), func(b *controlapi.QueryNodeBox) {
 		b.Aggregate = &aggregate
@@ -107,7 +107,7 @@ func numeric(value controlapi.TypedValue) int64 {
 }
 
 func (c *ControlClient) run(root controlapi.QueryNodeBox) (*controlapi.QueryResponse, error) {
-	encoded := controlapi.QueryNodeRef(controlapi.EncodeQueryNodeBox(root))
+	encoded := controlapi.QueryNodeRef(mustEncode(controlapi.EncodeQueryNodeBox(root)))
 	request := controlapi.QueryRequest{
 		AlgebraVersion: 1,
 		Consistency:    "committed",
@@ -117,7 +117,7 @@ func (c *ControlClient) run(root controlapi.QueryNodeBox) (*controlapi.QueryResp
 	}
 	response, err := c.client.Call(
 		"TallyOwlControl", "run-query",
-		controlapi.EncodeQueryRequest(request), &c.session)
+		mustEncode(controlapi.EncodeQueryRequest(request)), &c.session)
 	if err != nil {
 		return nil, err
 	}
@@ -159,8 +159,8 @@ func compareText(field, value string) controlapi.ExpressionNode {
 	right := controlapi.ExpressionNode{Expression: "literal", Literal: &literalValue}
 	compare := controlapi.CompareExpr{
 		Compare: "eq",
-		Left:    controlapi.ExpressionRef(controlapi.EncodeExpressionNode(left)),
-		Right:   controlapi.ExpressionRef(controlapi.EncodeExpressionNode(right)),
+		Left:    controlapi.ExpressionRef(mustEncode(controlapi.EncodeExpressionNode(left))),
+		Right:   controlapi.ExpressionRef(mustEncode(controlapi.EncodeExpressionNode(right))),
 	}
 	return controlapi.ExpressionNode{Expression: "compare", Compare: &compare}
 }
@@ -174,7 +174,7 @@ func projectFromResolve(head, credential string) ([]byte, error) {
 	request := collectorapi.ResolveKeyRequest{Credential: credential}
 	response, err := client.Call(
 		"TallyOwlCollector", "resolve-key",
-		collectorapi.EncodeResolveKeyRequest(request), nil)
+		mustEncode(collectorapi.EncodeResolveKeyRequest(request)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -186,4 +186,14 @@ func projectFromResolve(head, credential string) ([]byte, error) {
 		return nil, err
 	}
 	return resolved.ProjectId, nil
+}
+
+// mustEncode returns the bytes of a generated encoder. From csilgen 0.3.0 an
+// encoder also returns an error. The values here are built in code and have no
+// field that the encoder refuses, so an error is a defect and stops the run.
+func mustEncode(encoded []byte, err error) []byte {
+	if err != nil {
+		panic(err)
+	}
+	return encoded
 }

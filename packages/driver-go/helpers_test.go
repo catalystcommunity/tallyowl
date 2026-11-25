@@ -125,7 +125,7 @@ func TestTheMiddlewareRecordsTheRoutePatternAndNeverThePath(t *testing.T) {
 	if fmt.Sprintf("%x", []byte(*items[0].Envelope.TraceId)) != "0af7651916cd43dd8448eb211c80319c" {
 		t.Error("the span did not continue the caller's trace")
 	}
-	encoded := string(api.EncodeTelemetryItem(items[0]))
+	encoded := string(mustEncode(api.EncodeTelemetryItem(items[0])))
 	if contains(encoded, "alice") || contains(encoded, "4111") {
 		t.Error("a path identifier or a query string reached the telemetry")
 	}
@@ -174,4 +174,14 @@ func TestATelemetryRefusalNeverReachesTheHandler(t *testing.T) {
 	if !served || driver.Stats().Refused != 1 {
 		t.Fatalf("served=%v, stats=%+v", served, driver.Stats())
 	}
+}
+
+// mustEncode returns the bytes of a generated encoder. From csilgen 0.3.0 an
+// encoder also returns an error. The values here are built in code and have no
+// field that the encoder refuses, so an error is a defect and stops the run.
+func mustEncode(encoded []byte, err error) []byte {
+	if err != nil {
+		panic(err)
+	}
+	return encoded
 }

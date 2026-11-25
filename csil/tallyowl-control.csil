@@ -732,6 +732,31 @@ Membership = {
 }
 
 ;; ---------------------------------------------------------------------------
+;; Preferences of one person
+;;
+;; One record for each signed-in subject. A person reads and writes only their
+;; own record. These preferences change only how the dashboard shows data.
+;; TallyOwl stores, queries, and sends every instant in UTC, whatever they say.
+;; ---------------------------------------------------------------------------
+
+;;; The clock that the dashboard uses to show times.
+;;;
+;;; - `browser`: the time zone of the browser that shows the page.
+;;; - `utc`: UTC.
+;;; - `zone`: the IANA zone in `time_zone`.
+TimeDisplay = "browser" / "utc" / "zone"
+
+UserPreferences = {
+    time_display: TimeDisplay,
+    ;; An IANA zone name, such as `Europe/Berlin`. It is necessary when
+    ;; `time_display` is `zone`. With another value, the dashboard keeps it so
+    ;; that a person can go back to the zone without typing it again.
+    ? time_zone: text .size (1..64),
+    ;; The head sets this. A value from the client is ignored.
+    ? updated_at: Timestamp
+}
+
+;; ---------------------------------------------------------------------------
 ;; Administration
 ;; ---------------------------------------------------------------------------
 
@@ -1268,5 +1293,15 @@ service TallyOwlControl {
 
     ;;; Every notification attempt, delivered or not.
     @wire-id(31)
-    list-notifications: AlertListRequest -> NotificationDeliveryList / ServiceError
+    list-notifications: AlertListRequest -> NotificationDeliveryList / ServiceError,
+
+    ;;; Read the preferences of the signed-in person. A person who has never
+    ;;; set them gets the defaults: the time of the browser.
+    @wire-id(32)
+    get-user-preferences: Empty -> UserPreferences / ServiceError,
+
+    ;;; Replace the preferences of the signed-in person. Each person can do
+    ;;; this, with or without a role in a workspace.
+    @wire-id(33)
+    put-user-preferences: UserPreferences -> UserPreferences / ServiceError
 }

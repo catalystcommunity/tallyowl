@@ -207,7 +207,7 @@ function built(): Map<string, Uint8Array> {
 
   out.set(
     "service-error-retryable",
-    collector.toServiceErrorCbor({
+    collector.toServiceErrorTypeCbor({
       code: "unavailable",
       message: "We could not reach the durable store.",
       retryable: true,

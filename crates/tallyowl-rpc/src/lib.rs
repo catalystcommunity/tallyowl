@@ -330,20 +330,51 @@ where
     }
 }
 
-/// Build the outcome for an application error.
-pub fn error_outcome(payload: Vec<u8>) -> HandlerOutcome {
-    HandlerOutcome::Reply {
-        variant: SERVICE_ERROR_VARIANT.to_string(),
-        payload,
+/// The payload of a reply: bytes, or the result of a generated encoder.
+///
+/// From csilgen 0.3.0 each generated `encode_*` function returns a `Result`.
+/// A handler gives that result to [`reply`] or [`error_outcome`] as it is. If
+/// the encoder refused the value, the caller gets transport status 6
+/// (`Internal`) and the server does not stop. That is the answer that the
+/// csilgen RPC conventions give for a reply that cannot be encoded.
+pub trait ReplyPayload {
+    /// The bytes, or the reason the encoder refused the value.
+    fn into_payload(self) -> Result<Vec<u8>, String>;
+}
+
+impl ReplyPayload for Vec<u8> {
+    fn into_payload(self) -> Result<Vec<u8>, String> {
+        Ok(self)
     }
 }
 
-/// Build the outcome for a successful reply.
-pub fn reply(variant: &str, payload: Vec<u8>) -> HandlerOutcome {
-    HandlerOutcome::Reply {
-        variant: variant.to_string(),
-        payload,
+impl<E: std::fmt::Display> ReplyPayload for Result<Vec<u8>, E> {
+    fn into_payload(self) -> Result<Vec<u8>, String> {
+        self.map_err(|e| e.to_string())
     }
+}
+
+fn outcome(variant: &str, payload: impl ReplyPayload) -> HandlerOutcome {
+    match payload.into_payload() {
+        Ok(payload) => HandlerOutcome::Reply {
+            variant: variant.to_string(),
+            payload,
+        },
+        Err(reason) => HandlerOutcome::Transport(
+            Status::Internal,
+            format!("The `{variant}` reply could not be encoded: {reason}"),
+        ),
+    }
+}
+
+/// Build the outcome for an application error.
+pub fn error_outcome(payload: impl ReplyPayload) -> HandlerOutcome {
+    outcome(SERVICE_ERROR_VARIANT, payload)
+}
+
+/// Build the outcome for a successful reply.
+pub fn reply(variant: &str, payload: impl ReplyPayload) -> HandlerOutcome {
+    outcome(variant, payload)
 }
 
 /// The outcome for a request this service does not know. This is a transport
@@ -1488,6 +1519,25 @@ mod tests {
             MAX_FRAME,
         )
         .expect("serve")
+    }
+
+    #[test]
+    fn a_reply_the_encoder_refused_is_an_internal_failure_not_a_reply() {
+        let refused: Result<Vec<u8>, String> = Err("year 10000".into());
+        match reply("EchoResponse", refused) {
+            HandlerOutcome::Transport(status, message) => {
+                assert_eq!(status, Status::Internal);
+                assert!(message.contains("EchoResponse"), "{message}");
+                assert!(message.contains("year 10000"), "{message}");
+            }
+            _ => panic!("expected a transport failure"),
+        }
+        let encoded: Result<Vec<u8>, String> = Ok(vec![0xa0]);
+        assert!(matches!(
+            error_outcome(encoded),
+            HandlerOutcome::Reply { ref variant, ref payload }
+                if variant == SERVICE_ERROR_VARIANT && payload == &[0xa0]
+        ));
     }
 
     #[test]

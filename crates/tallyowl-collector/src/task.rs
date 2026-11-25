@@ -48,8 +48,16 @@ const COMPRESS_ABOVE_BYTES: usize = 1024;
 const ZSTD_LEVEL: i32 = 3;
 
 /// Build the task for one accepted batch.
-pub fn seal(batch: &Batch, source_id: &[u8], accepted_at: i64) -> DeliveryTask {
-    let encoded = tallyowl_collector_api::codec::encode_batch(batch);
+///
+/// It fails only if the generated encoder refuses the batch. The batch came
+/// from the decoder, so this is a defect, not bad input.
+pub fn seal(
+    batch: &Batch,
+    source_id: &[u8],
+    accepted_at: i64,
+) -> Result<DeliveryTask, TallyOwlError> {
+    let encoded = tallyowl_collector_api::codec::encode_batch(batch)
+        .map_err(|e| TallyOwlError::unencodable("The batch", e))?;
     let uncompressed_bytes = encoded.len() as u64;
 
     // Compress only when it helps. A payload that grew would cost the queue
@@ -63,7 +71,7 @@ pub fn seal(batch: &Batch, source_id: &[u8], accepted_at: i64) -> DeliveryTask {
         (encoded, Compression::None)
     };
 
-    DeliveryTask {
+    Ok(DeliveryTask {
         task_version: TASK_VERSION,
         batch_id: batch.batch_id.clone(),
         source_id: source_id.to_vec(),
@@ -75,11 +83,11 @@ pub fn seal(batch: &Batch, source_id: &[u8], accepted_at: i64) -> DeliveryTask {
         last_attempt_at: None,
         next_attempt_at: None,
         last_failure: None,
-    }
+    })
 }
 
-pub fn encode(task: &DeliveryTask) -> Vec<u8> {
-    encode_delivery_task(task)
+pub fn encode(task: &DeliveryTask) -> Result<Vec<u8>, TallyOwlError> {
+    encode_delivery_task(task).map_err(|e| TallyOwlError::unencodable("The delivery task", e))
 }
 
 /// Read a task from a queue payload.
@@ -232,7 +240,7 @@ mod tests {
 
     #[test]
     fn a_small_batch_travels_uncompressed() {
-        let sealed = seal(&batch(vec![item(1, "checkout-started", 0)]), &[9; 16], 1);
+        let sealed = seal(&batch(vec![item(1, "checkout-started", 0)]), &[9; 16], 1).unwrap();
         assert_eq!(sealed.compression, Compression::None);
         assert_eq!(sealed.batch.len() as u64, sealed.uncompressed_bytes);
     }
@@ -242,7 +250,7 @@ mod tests {
         // The shape a real batch has: many items, each with the same dimension
         // names and the same dimension values.
         let original = batch((0..60).map(|n| item(n, "checkout-started", 12)).collect());
-        let sealed = seal(&original, &[9; 16], 1);
+        let sealed = seal(&original, &[9; 16], 1).unwrap();
 
         assert_eq!(sealed.compression, Compression::Zstd);
         assert!(
@@ -257,15 +265,15 @@ mod tests {
     #[test]
     fn a_task_round_trips_through_the_queue_payload() {
         let original = batch((0..40).map(|n| item(n, "purchase", 8)).collect());
-        let sealed = seal(&original, &[9; 16], 1_000);
-        let read = decode(&encode(&sealed)).expect("the payload reads");
+        let sealed = seal(&original, &[9; 16], 1_000).unwrap();
+        let read = decode(&encode(&sealed).unwrap()).expect("the payload reads");
         assert_eq!(read, sealed);
         assert_eq!(open(&read, MAX).unwrap(), original);
     }
 
     #[test]
     fn a_declared_size_over_the_bound_is_refused_before_anything_is_produced() {
-        let mut sealed = seal(&batch(vec![item(1, "e", 0)]), &[9; 16], 1);
+        let mut sealed = seal(&batch(vec![item(1, "e", 0)]), &[9; 16], 1).unwrap();
         sealed.uncompressed_bytes = 64 * 1024 * 1024;
         let failure = open(&sealed, MAX).unwrap_err();
         assert_eq!(failure.code, tallyowl_obs::ErrorCode::ResourceExhausted);
@@ -277,7 +285,7 @@ mod tests {
         // The declaration is a claim. A reader that trusted it would store
         // fewer rows than arrived and say nothing.
         let original = batch((0..40).map(|n| item(n, "purchase", 8)).collect());
-        let mut sealed = seal(&original, &[9; 16], 1);
+        let mut sealed = seal(&original, &[9; 16], 1).unwrap();
         assert_eq!(sealed.compression, Compression::Zstd);
         sealed.uncompressed_bytes -= 1;
         let failure = open(&sealed, MAX).unwrap_err();
@@ -297,7 +305,7 @@ mod tests {
         // No number of attempts turns an unreadable payload into a readable
         // one, so a retry loop over it burns the queue for nothing.
         let original = batch((0..40).map(|n| item(n, "purchase", 8)).collect());
-        let mut sealed = seal(&original, &[9; 16], 1);
+        let mut sealed = seal(&original, &[9; 16], 1).unwrap();
         let middle = sealed.batch.len() / 2;
         sealed.batch[middle] ^= 0xff;
         let failure = open(&sealed, MAX).unwrap_err();
@@ -306,9 +314,9 @@ mod tests {
 
     #[test]
     fn a_task_from_a_newer_collector_is_refused_by_name() {
-        let mut sealed = seal(&batch(vec![item(1, "e", 0)]), &[9; 16], 1);
+        let mut sealed = seal(&batch(vec![item(1, "e", 0)]), &[9; 16], 1).unwrap();
         sealed.task_version = TASK_VERSION + 1;
-        let failure = decode(&encode(&sealed)).unwrap_err();
+        let failure = decode(&encode(&sealed).unwrap()).unwrap_err();
         assert_eq!(failure.code, tallyowl_obs::ErrorCode::SchemaUnsupported);
         assert!(!failure.retryable);
         assert!(failure.message.contains("Upgrade this collector"));
@@ -316,7 +324,7 @@ mod tests {
 
     #[test]
     fn an_attempt_is_counted_and_the_next_time_is_recorded() {
-        let mut sealed = seal(&batch(vec![item(1, "e", 0)]), &[9; 16], 1_000);
+        let mut sealed = seal(&batch(vec![item(1, "e", 0)]), &[9; 16], 1_000).unwrap();
         assert_eq!(sealed.attempts, 0);
         note_attempt(&mut sealed, 2_000, 5_000, "the head was unreachable");
         assert_eq!(sealed.attempts, 1);
@@ -331,11 +339,11 @@ mod tests {
 
     #[test]
     fn a_long_failure_message_is_bounded_to_what_the_contract_permits() {
-        let mut sealed = seal(&batch(vec![item(1, "e", 0)]), &[9; 16], 1);
+        let mut sealed = seal(&batch(vec![item(1, "e", 0)]), &[9; 16], 1).unwrap();
         note_attempt(&mut sealed, 1, 1, &"x".repeat(5_000));
         let held = sealed.last_failure.clone().unwrap();
         assert_eq!(held.chars().count(), 512);
         // And it still encodes, which is the point of bounding it.
-        assert!(decode(&encode(&sealed)).is_ok());
+        assert!(decode(&encode(&sealed).unwrap()).is_ok());
     }
 }

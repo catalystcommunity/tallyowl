@@ -62,7 +62,6 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, Utc};
 use liblinkkeys::generated::types::{
     IdentityAssertion, RpDecryptRequest, RpSignRequest, RpVerifyRequest,
 };
@@ -89,6 +88,7 @@ use tallyowl_obs::time::now_ms;
 use tallyowl_obs::Logger;
 use tallyowl_store::control::Role;
 use tallyowl_store::SegmentedStore;
+use time::{Duration, OffsetDateTime};
 
 use crate::linkkeys_rp::RpCaller;
 
@@ -117,10 +117,13 @@ impl Mode {
     }
 }
 
-/// The application this head names in each sign-in it asks the RP server to
-/// sign. A person's domain keeps standing consent for each application of an
-/// RP account, so a sign-in to TallyOwl does not use consent that the person
-/// gave to another application of the same account.
+/// The `application_id` to give the RP account of this head. From LinkKeys
+/// v0.16.11 the RP server names the application of the calling account in each
+/// request that it signs, and only an application account can call
+/// `Rp/sign-request`. A person's domain keeps standing consent for each
+/// application, so give the account this id
+/// (with `--application-id`, or the `Admin/set-application-id` operation) to keep the consent that people gave
+/// before.
 pub const APPLICATION_ID: &str = "tallyowl";
 
 /// What an installation configured for LinkKeys.
@@ -241,41 +244,39 @@ impl SignIn {
         // The nonce comes back inside the assertion the person's domain signs,
         // and that is what ties the assertion to this sign-in.
         let nonce = tallyowl_store::row::hex(&random_bytes::<16>());
-        let signed = rp
-            .call(
-                "sign-request",
-                encode_rp_sign_request(&RpSignRequest {
-                    callback_url: request.callback_url.clone(),
-                    nonce: nonce.clone(),
-                    // The person's domain keeps standing consent for each
-                    // application of an RP account. Without this field the
-                    // RP server uses the account's username, and refuses
-                    // the request when that name is not a valid identifier.
-                    application_id: Some(APPLICATION_ID.to_string()),
-                    // TallyOwl needs the account and its domain, which every
-                    // assertion carries. It asks for no claim, so a person is
-                    // not asked to release one.
-                    requested_claims: None,
-                    authentication_requirements: None,
-                    flow_context: None,
-                }),
-            )
-            .and_then(|reply| {
-                decode_rp_sign_response(&reply)
-                    .map_err(|e| format!("The Rp/sign-request reply did not decode: {e}"))
-            })
-            .map_err(|cause| {
-                self.count("begin-failed");
-                self.logger.warning(
-                    "The LinkKeys RP server did not sign a request.",
-                    &[("cause", &cause)],
-                );
-                TallyOwlError::unavailable(
-                    "We could not start a sign-in, because this installation's LinkKeys server did \
+        let signed = encoded(
+            "sign-request",
+            encode_rp_sign_request(&RpSignRequest {
+                callback_url: request.callback_url.clone(),
+                nonce: nonce.clone(),
+                // The RP server names the application of the calling
+                // account in the signed request. That account must be
+                // an application account (see `APPLICATION_ID`).
+                // TallyOwl needs the account and its domain, which every
+                // assertion carries. It asks for no claim, so a person is
+                // not asked to release one.
+                requested_claims: None,
+                authentication_requirements: None,
+                flow_context: None,
+            }),
+        )
+        .and_then(|payload| rp.call("sign-request", payload))
+        .and_then(|reply| {
+            decode_rp_sign_response(&reply)
+                .map_err(|e| format!("The Rp/sign-request reply did not decode: {e}"))
+        })
+        .map_err(|cause| {
+            self.count("begin-failed");
+            self.logger.warning(
+                "The LinkKeys RP server did not sign a request.",
+                &[("cause", &cause)],
+            );
+            TallyOwlError::unavailable(
+                "We could not start a sign-in, because this installation's LinkKeys server did \
                      not answer. Try again, and if it keeps happening ask the person who runs \
                      TallyOwl.",
-                )
-            })?;
+            )
+        })?;
 
         // The domain names who the person is. Its `_linkkeys_apis` record names
         // where their browser signs in, and that can be another host. A domain
@@ -325,7 +326,7 @@ impl SignIn {
             &identity,
             request.callback_url.clone(),
             typed.domain.clone(),
-            Utc::now(),
+            OffsetDateTime::now_utc(),
         ))
         .map_err(|e| {
             self.count("begin-failed");
@@ -440,34 +441,34 @@ impl SignIn {
         }
         let rp = self.rp()?;
 
-        let decrypted = rp
-            .call(
-                "decrypt-token",
-                encode_rp_decrypt_request(&RpDecryptRequest {
-                    encrypted_token: request.encrypted_token.clone(),
-                }),
-            )
-            .and_then(|reply| {
-                decode_rp_decrypt_response(&reply)
-                    .map_err(|e| format!("The Rp/decrypt-token reply did not decode: {e}"))
-            })
-            .map_err(|cause| self.refused_because("decrypt-failed", &cause))?;
+        let decrypted = encoded(
+            "decrypt-token",
+            encode_rp_decrypt_request(&RpDecryptRequest {
+                encrypted_token: request.encrypted_token.clone(),
+            }),
+        )
+        .and_then(|payload| rp.call("decrypt-token", payload))
+        .and_then(|reply| {
+            decode_rp_decrypt_response(&reply)
+                .map_err(|e| format!("The Rp/decrypt-token reply did not decode: {e}"))
+        })
+        .map_err(|cause| self.refused_because("decrypt-failed", &cause))?;
 
         // The expected domain is the one the person typed, never one read out
         // of the token. That is what pins the result to who they said they are.
-        let verified = rp
-            .call(
-                "verify-assertion",
-                encode_rp_verify_request(&RpVerifyRequest {
-                    signed_assertion: decrypted.signed_assertion,
-                    expected_domain: domain.clone(),
-                }),
-            )
-            .and_then(|reply| {
-                decode_rp_verify_response(&reply)
-                    .map_err(|e| format!("The Rp/verify-assertion reply did not decode: {e}"))
-            })
-            .map_err(|cause| self.refused_because("verification-failed", &cause))?;
+        let verified = encoded(
+            "verify-assertion",
+            encode_rp_verify_request(&RpVerifyRequest {
+                signed_assertion: decrypted.signed_assertion,
+                expected_domain: domain.clone(),
+            }),
+        )
+        .and_then(|payload| rp.call("verify-assertion", payload))
+        .and_then(|reply| {
+            decode_rp_verify_response(&reply)
+                .map_err(|e| format!("The Rp/verify-assertion reply did not decode: {e}"))
+        })
+        .map_err(|cause| self.refused_because("verification-failed", &cause))?;
         if !verified.verified {
             return Err(self.refused_because(
                 "verification-failed",
@@ -481,7 +482,7 @@ impl SignIn {
             &domain,
             &self.settings.rp_domain,
             &nonce,
-            Utc::now(),
+            OffsetDateTime::now_utc(),
         ) {
             return Err(self.refused_because(outcome, &cause));
         }
@@ -503,7 +504,7 @@ impl SignIn {
             &pending,
             &request.encrypted_token,
             &request.arrived_url,
-            Utc::now(),
+            OffsetDateTime::now_utc(),
         ))
         .map_err(|e| self.refused_because("verification-failed", &e.to_string()))?;
         Ok((verified.user_id, verified.user_domain))
@@ -529,27 +530,46 @@ impl SignIn {
             .local_rp_identity()
             .map_err(|e| TallyOwlError::internal(e.to_string()))?
         {
-            return local_rp_identity_from_bytes(&bytes).map_err(|e| {
-                TallyOwlError::internal(format!(
-                    "This installation's sign-in identity could not be read. {e}"
-                ))
-            });
+            let unreadable = match local_rp_identity_from_bytes(&bytes) {
+                Ok(identity) => return Ok(identity),
+                Err(e) => e,
+            };
+            let Some(identity) =
+                resign_stored_identity(&bytes, &self.settings.app_name, OffsetDateTime::now_utc())
+            else {
+                return Err(TallyOwlError::internal(format!(
+                    "This installation's sign-in identity could not be read. {unreadable}"
+                )));
+            };
+            self.store_identity(&identity)?;
+            self.logger.info(
+                "The sign-in identity was signed again in the current LinkKeys format. Its \
+                 fingerprint did not change.",
+                &[("fingerprint", &identity.fingerprint)],
+            );
+            return Ok(identity);
         }
 
         let identity = generate_local_rp_identity(GenerateLocalRpIdentityConfig::new(
             self.settings.app_name.clone(),
-            Utc::now(),
+            OffsetDateTime::now_utc(),
         ))
         .map_err(|e| {
             TallyOwlError::internal(format!(
                 "This installation's sign-in identity could not be made. {e}"
             ))
         })?;
+        self.store_identity(&identity)?;
+        Ok(identity)
+    }
+
+    fn store_identity(&self, identity: &LocalRpKeyMaterial) -> Result<(), TallyOwlError> {
+        let bytes = local_rp_identity_to_bytes(identity)
+            .map_err(|e| TallyOwlError::unencodable("This installation's sign-in identity", e))?;
         self.store
             .catalog()
-            .put_local_rp_identity(&local_rp_identity_to_bytes(&identity))
-            .map_err(|e| TallyOwlError::internal(e.to_string()))?;
-        Ok(identity)
+            .put_local_rp_identity(&bytes)
+            .map_err(|e| TallyOwlError::internal(e.to_string()))
     }
 
     fn check_enabled(&self) -> Result<(), TallyOwlError> {
@@ -620,7 +640,7 @@ fn check_assertion(
     domain: &str,
     rp_domain: &str,
     nonce: &str,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 ) -> Result<(), (&'static str, String)> {
     if !assertion.domain.eq_ignore_ascii_case(domain) {
         return Err((
@@ -649,23 +669,74 @@ fn check_assertion(
             "The assertion answers another sign-in.".to_string(),
         ));
     }
-    let time = |text: &str| DateTime::parse_from_rfc3339(text).map(|t| t.with_timezone(&Utc));
-    match (time(&assertion.issued_at), time(&assertion.expires_at)) {
-        (Ok(issued), Ok(expires))
-            if issued <= now + CLOCK_SKEW && expires >= now && expires >= issued =>
-        {
-            Ok(())
-        }
-        _ => Err((
-            "invalid-assertion-time",
-            format!(
-                "The assertion was issued at {} and expires at {}, and it is now {}.",
-                assertion.issued_at,
-                assertion.expires_at,
-                now.to_rfc3339()
-            ),
-        )),
+    let (issued, expires) = (assertion.issued_at, assertion.expires_at);
+    if issued <= now + CLOCK_SKEW && expires >= now && expires >= issued {
+        return Ok(());
     }
+    Err((
+        "invalid-assertion-time",
+        format!(
+            "The assertion was issued at {} and expires at {}, and it is now {}.",
+            issued.unix_timestamp(),
+            expires.unix_timestamp(),
+            now.unix_timestamp()
+        ),
+    ))
+}
+
+/// An identity bundle that an earlier LinkKeys release wrote, signed again with
+/// its own keys.
+///
+/// The bundle is `LKI1 || signing key (32) || encryption key (32) || length (4)
+/// || signed descriptor`. LinkKeys v0.16.11 encodes the times in the
+/// descriptor as integers, so a descriptor of an earlier release does not
+/// decode, and LinkKeys reads no older format. The two private keys are still
+/// this installation's. A new descriptor signed with them has the same
+/// fingerprint, which is what each domain approved. A new identity would need a
+/// new approval at every domain.
+fn resign_stored_identity(
+    bytes: &[u8],
+    app_name: &str,
+    now: OffsetDateTime,
+) -> Option<LocalRpKeyMaterial> {
+    if bytes.len() < 72 || &bytes[..4] != b"LKI1" {
+        return None;
+    }
+    let signing_private_key: [u8; 32] = bytes[4..36].try_into().ok()?;
+    let encryption_private_key: [u8; 32] = bytes[36..68].try_into().ok()?;
+    let signing_public_key = ed25519_dalek::SigningKey::from_bytes(&signing_private_key)
+        .verifying_key()
+        .to_bytes();
+    let encryption_public_key =
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(encryption_private_key))
+            .to_bytes();
+    let descriptor = liblinkkeys::local_rp::build_local_rp_descriptor(
+        app_name,
+        None,
+        &signing_public_key,
+        &encryption_public_key,
+        liblinkkeys::crypto::AeadSuite::all_supported(),
+        now,
+        now + linkkeys_local_rp::DEFAULT_LIFETIME,
+    );
+    let fingerprint = descriptor.fingerprint.clone();
+    let signed =
+        liblinkkeys::local_rp::sign_local_rp_descriptor(&descriptor, &signing_private_key).ok()?;
+    Some(LocalRpKeyMaterial {
+        signing_private_key,
+        signing_public_key,
+        encryption_private_key,
+        encryption_public_key,
+        descriptor: signed,
+        fingerprint,
+    })
+}
+
+/// The bytes of an encoded `Rp` request, or a sentence for the log. The
+/// generated LinkKeys encoders return a `Result`; these requests carry text
+/// only, so an error is a defect in the generated code.
+fn encoded<E: std::fmt::Display>(op: &str, payload: Result<Vec<u8>, E>) -> Result<Vec<u8>, String> {
+    payload.map_err(|e| format!("The Rp/{op} request could not be encoded: {e}"))
 }
 
 /// The sign-in address with the person's name on it, so their domain's page
@@ -862,8 +933,46 @@ mod tests {
         // There is no key continuity in this protocol version: a new identity
         // means re-approval at every domain, so it must not change on its own.
         assert_eq!(
-            local_rp_identity_to_bytes(&first),
-            local_rp_identity_to_bytes(&second)
+            local_rp_identity_to_bytes(&first).unwrap(),
+            local_rp_identity_to_bytes(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_identity_an_earlier_release_stored_is_signed_again_with_the_same_keys() {
+        // LinkKeys v0.16.11 does not decode a descriptor of an earlier
+        // release. A garbled descriptor stands in for one here: the keys in
+        // front of it are what the head keeps.
+        let service = sign_in("identity-resign", true, &["example.com"]);
+        let first = service.identity().unwrap();
+        let mut old = local_rp_identity_to_bytes(&first).unwrap()[..72].to_vec();
+        old[68..72].copy_from_slice(&3u32.to_be_bytes());
+        old.extend_from_slice(&[0xa1, 0x61, 0x78]);
+        assert!(local_rp_identity_from_bytes(&old).is_err());
+        service.store.catalog().put_local_rp_identity(&old).unwrap();
+
+        let again = service.identity().unwrap();
+        // The fingerprint is what each domain approved, so it must not change.
+        assert_eq!(again.fingerprint, first.fingerprint);
+        assert_eq!(again.signing_public_key, first.signing_public_key);
+        assert_eq!(again.encryption_public_key, first.encryption_public_key);
+        // The new bundle is stored and reads back as it is.
+        let stored = service
+            .store
+            .catalog()
+            .local_rp_identity()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            local_rp_identity_from_bytes(&stored).unwrap().fingerprint,
+            first.fingerprint
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_an_identity_bundle_are_not_signed_again() {
+        assert!(
+            resign_stored_identity(b"nonsense", "TallyOwl", OffsetDateTime::now_utc()).is_none()
         );
     }
 
@@ -880,7 +989,7 @@ mod tests {
                 dns: None,
                 logger: quiet(),
             };
-            local_rp_identity_to_bytes(&service.identity().unwrap())
+            local_rp_identity_to_bytes(&service.identity().unwrap()).unwrap()
         };
         let service = SignIn {
             store: Arc::new(SegmentedStore::open(&path).unwrap()),
@@ -891,7 +1000,7 @@ mod tests {
             logger: quiet(),
         };
         assert_eq!(
-            local_rp_identity_to_bytes(&service.identity().unwrap()),
+            local_rp_identity_to_bytes(&service.identity().unwrap()).unwrap(),
             first
         );
     }
@@ -964,7 +1073,9 @@ mod tests {
     // operation replies, and reads what the head sent. The pinned TLS under it
     // is `linkkeys-rpc-client`'s, and LinkKeys tests that.
 
-    use liblinkkeys::generated::types::{RpDecryptResponse, RpSignResponse, RpVerifyResponse};
+    use liblinkkeys::generated::types::{
+        ApplicationRef, RpDecryptResponse, RpSignResponse, RpVerifyResponse,
+    };
     use liblinkkeys::generated::{
         decode_rp_decrypt_request, decode_rp_sign_request, decode_rp_verify_request,
         encode_rp_decrypt_response, encode_rp_sign_response, encode_rp_verify_response,
@@ -1029,13 +1140,15 @@ mod tests {
             "sign-request",
             Ok(encode_rp_sign_response(&RpSignResponse {
                 signed_request: "SIGNED".into(),
-            })),
+            })
+            .unwrap()),
         );
         rp.reply(
             "decrypt-token",
             Ok(encode_rp_decrypt_response(&RpDecryptResponse {
                 signed_assertion: "ASSERTION".into(),
-            })),
+            })
+            .unwrap()),
         );
         let dns = FakeDns(
             records
@@ -1057,16 +1170,21 @@ mod tests {
     /// An assertion that answers the sign-in `rp` was asked to sign.
     fn answering(rp: &FakeRp) -> IdentityAssertion {
         let sent = decode_rp_sign_request(&rp.sent("sign-request")[0]).unwrap();
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         IdentityAssertion {
             user_id: "0b9f3c1e-6a4d-4b8e-9f1a-2c3d4e5f6a7b".into(),
             domain: "example.com".into(),
             audience: "home.example".into(),
             nonce: sent.nonce,
-            issued_at: (now - Duration::minutes(1)).to_rfc3339(),
-            expires_at: (now + Duration::minutes(5)).to_rfc3339(),
+            issued_at: now - Duration::minutes(1),
+            expires_at: now + Duration::minutes(5),
             authorized_claims: vec![],
             display_name: None,
+            application: ApplicationRef {
+                subject_user_id: "tallyowl".into(),
+                subject_domain: "home.example".into(),
+                application_id: APPLICATION_ID.into(),
+            },
         }
     }
 
@@ -1076,7 +1194,8 @@ mod tests {
             Ok(encode_rp_verify_response(&RpVerifyResponse {
                 assertion,
                 verified,
-            })),
+            })
+            .unwrap()),
         );
     }
 
@@ -1111,9 +1230,8 @@ mod tests {
         assert_eq!(sent.nonce.len(), 32);
         // No claim is asked for, so nobody is asked to release one.
         assert!(sent.requested_claims.is_none());
-        // The consent a person gives is for TallyOwl, whatever the RP
-        // account is called.
-        assert_eq!(sent.application_id.as_deref(), Some(APPLICATION_ID));
+        // The RP server names the application of its account. The id the
+        // documentation gives that account must be one LinkKeys accepts.
         assert!(liblinkkeys::application_keys::is_valid_identifier(
             APPLICATION_ID
         ));
@@ -1181,23 +1299,22 @@ mod tests {
     #[test]
     fn an_assertion_that_does_not_answer_this_sign_in_is_refused() {
         type Change = fn(&mut IdentityAssertion);
-        let cases: [(&str, Change); 7] = [
+        let cases: [(&str, Change); 6] = [
             ("another nonce", |a| a.nonce = "0".repeat(32)),
             ("another relying party", |a| {
                 a.audience = "attacker.example".into()
             }),
             ("another domain", |a| a.domain = "attacker.example".into()),
             ("expired", |a| {
-                a.expires_at = (Utc::now() - Duration::minutes(1)).to_rfc3339()
+                a.expires_at = OffsetDateTime::now_utc() - Duration::minutes(1)
             }),
             ("issued in the future", |a| {
-                a.issued_at = (Utc::now() + Duration::minutes(30)).to_rfc3339()
+                a.issued_at = OffsetDateTime::now_utc() + Duration::minutes(30)
             }),
             ("expires before issue", |a| {
-                a.issued_at = (Utc::now() + Duration::minutes(2)).to_rfc3339();
-                a.expires_at = (Utc::now() + Duration::minutes(1)).to_rfc3339();
+                a.issued_at = OffsetDateTime::now_utc() + Duration::minutes(2);
+                a.expires_at = OffsetDateTime::now_utc() + Duration::minutes(1);
             }),
-            ("unreadable time", |a| a.expires_at = "soon".into()),
         ];
         for (index, (case, change)) in cases.into_iter().enumerate() {
             let (service, rp) = domain_sign_in(&format!("domain-refused-{index}"), &[]);

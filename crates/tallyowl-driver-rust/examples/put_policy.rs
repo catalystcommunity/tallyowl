@@ -28,7 +28,8 @@ fn main() {
             encode_list_request(&ListRequest {
                 cursor: None,
                 limit: None,
-            }),
+            })
+            .expect("the request encodes"),
         )
         .expect("the head answers");
     let projects = decode_project_list(&projects.payload).expect("a project list");
@@ -58,7 +59,8 @@ fn main() {
                 campaign_linking: None,
                 attribution_needs_consent: None,
                 kill_switch: None,
-            }),
+            })
+            .expect("the request encodes"),
         )
         .expect("the head answers");
     let compiled = decode_compiled_policy(&response.payload).expect("a compiled policy");

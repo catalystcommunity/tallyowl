@@ -396,7 +396,7 @@ impl Meter {
             .get_mut(name)
             .expect("the family was found a moment ago");
         let bounds = family.bounds.clone();
-        let kind = family.kind.clone();
+        let kind = family.kind;
         let series = family.series.entry(labels.clone()).or_insert(SeriesState {
             start_at: at,
             updated_at: at,
@@ -543,7 +543,7 @@ impl Meter {
 
                 let payload = MetricPointPayload {
                     metric_name: name.clone(),
-                    metric_kind: family.kind.clone(),
+                    metric_kind: family.kind,
                     unit: family.unit.clone(),
                     description: family.description.clone(),
                     monotonic: family.kind == MetricKind::Counter,

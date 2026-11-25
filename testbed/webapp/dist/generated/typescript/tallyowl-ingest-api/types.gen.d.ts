@@ -1,3 +1,7 @@
+export interface ServiceError {
+    code: number;
+    message: string;
+}
 /**
  * An exact base-10 decimal, carried on the wire as a CBOR tag-4 decimal
  * fraction `[exponent, mantissa]` (value = `mantissa * 10 ** exponent`).
@@ -8,10 +12,10 @@
  * `new Decimal(d.toString())` / `CsilDecimal.fromString(dec.toString())`.
  */
 export declare class CsilDecimal {
-    readonly exponent: number;
-    readonly mantissa: bigint;
     /** CBOR semantic tag for a decimal fraction. */
     static readonly CBOR_TAG = 4;
+    readonly exponent: number;
+    readonly mantissa: bigint;
     constructor(exponent: number, mantissa: bigint);
     /** Reconstruct from the CBOR tag-4 payload `[exponent, mantissa]`. */
     static fromTag4(payload: readonly [number | bigint, number | bigint]): CsilDecimal;
@@ -127,6 +131,13 @@ export interface ErrorPayload {
     frames?: StackFrame[];
     breadcrumbs?: EventId[];
 }
+export declare const SpanKind: {
+    readonly INTERNAL: "internal";
+    readonly SERVER: "server";
+    readonly CLIENT: "client";
+    readonly PRODUCER: "producer";
+    readonly CONSUMER: "consumer";
+};
 export type SpanKind = "internal" | "server" | "client" | "producer" | "consumer";
 export interface SpanLink {
     traceId: TraceId;
@@ -144,6 +155,11 @@ export interface SpanPayload {
     errorEventId?: EventId;
     samplingReason?: string;
 }
+export declare const MetricKind: {
+    readonly COUNTER: "counter";
+    readonly GAUGE: "gauge";
+    readonly HISTOGRAM: "histogram";
+};
 export type MetricKind = "counter" | "gauge" | "histogram";
 export interface HistogramValue {
     count: number;
@@ -283,6 +299,16 @@ export type TraceId = Uint8Array;
 export type SpanId = Uint8Array;
 export type Timestamp = number;
 export type DurationMs = number;
+export declare const TypedValueKind: {
+    readonly NULL: "null";
+    readonly BOOL: "bool";
+    readonly INT: "int";
+    readonly UINT: "uint";
+    readonly FLOAT: "float";
+    readonly DECIMAL: "decimal";
+    readonly TEXT: "text";
+    readonly BYTES: "bytes";
+};
 export type TypedValueKind = "null" | "bool" | "int" | "uint" | "float" | "decimal" | "text" | "bytes";
 /**
  * One typed value. `kind` names which value field carries it. A `kind` of
@@ -299,6 +325,11 @@ export interface TypedValue {
     textValue?: string;
     bytesValue?: Uint8Array;
 }
+export declare const PropertyOrigin: {
+    readonly CLIENT: "client";
+    readonly DRIVER: "driver";
+    readonly COLLECTOR: "collector";
+};
 /**
  * Where a property came from. An operator can trust a `collector` origin,
  * because the collector stamps it from its own configuration and refuses a
@@ -311,6 +342,11 @@ export interface Property {
     origin: PropertyOrigin;
 }
 export type PropertyList = Property[];
+export declare const MeasurementKind: {
+    readonly FLOAT: "float";
+    readonly DECIMAL: "decimal";
+    readonly INT: "int";
+};
 /**
  * A measure is a number, so its kinds are the three numeric ones. It carries
  * its own discriminant for the same reason `TypedValue` does.
@@ -329,12 +365,35 @@ export interface Measurement {
     unit?: string;
 }
 export type MeasurementList = Measurement[];
+export declare const ConsentState: {
+    readonly GRANTED: "granted";
+    readonly DENIED: "denied";
+    readonly ABSENT: "absent";
+};
 export type ConsentState = "granted" | "denied" | "absent";
 export interface Consent {
     marketing: ConsentState;
     analytics: ConsentState;
     policyVersion?: string;
 }
+export declare const TelemetryKind: {
+    readonly EVENT: "event";
+    readonly PAGE_VIEW: "page-view";
+    readonly SESSION_START: "session-start";
+    readonly SESSION_END: "session-end";
+    readonly SESSION_HEARTBEAT: "session-heartbeat";
+    readonly INTERACTION: "interaction";
+    readonly FEATURE_EXPOSURE: "feature-exposure";
+    readonly IDENTIFY: "identify";
+    readonly ALIAS: "alias";
+    readonly GROUP: "group";
+    readonly CONVERSION: "conversion";
+    readonly ERROR: "error";
+    readonly SPAN: "span";
+    readonly METRIC_POINT: "metric-point";
+    readonly CAMPAIGN_TOUCH: "campaign-touch";
+    readonly CAMPAIGN_COST: "campaign-cost";
+};
 export type TelemetryKind = "event" | "page-view" | "session-start" | "session-end" | "session-heartbeat" | "interaction" | "feature-exposure" | "identify" | "alias" | "group" | "conversion" | "error" | "span" | "metric-point" | "campaign-touch" | "campaign-cost";
 export interface Envelope {
     eventId: EventId;
@@ -361,8 +420,22 @@ export interface Envelope {
     properties: PropertyList;
     measurements?: MeasurementList;
 }
+export declare const ErrorCode: {
+    readonly INVALID_ARGUMENT: "invalid-argument";
+    readonly UNAUTHENTICATED: "unauthenticated";
+    readonly PERMISSION_DENIED: "permission-denied";
+    readonly NOT_FOUND: "not-found";
+    readonly ALREADY_EXISTS: "already-exists";
+    readonly RESOURCE_EXHAUSTED: "resource-exhausted";
+    readonly FAILED_PRECONDITION: "failed-precondition";
+    readonly UNAVAILABLE: "unavailable";
+    readonly SCHEMA_UNSUPPORTED: "schema-unsupported";
+    readonly BUDGET_EXCEEDED: "budget-exceeded";
+    readonly INCOMPLETE_RESULT: "incomplete-result";
+    readonly INTERNAL: "internal";
+};
 export type ErrorCode = "invalid-argument" | "unauthenticated" | "permission-denied" | "not-found" | "already-exists" | "resource-exhausted" | "failed-precondition" | "unavailable" | "schema-unsupported" | "budget-exceeded" | "incomplete-result" | "internal";
-export interface ServiceError {
+export interface ServiceErrorType {
     code: ErrorCode;
     message: string;
     retryable: boolean;

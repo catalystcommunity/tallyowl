@@ -370,12 +370,9 @@ def _platform_target() -> tuple[str, str]:
 #: A download with no entry is still installed, and `_download` prints its
 #: digest so that the entry is one paste. Never write a digest here that did
 #: not come from a download somebody checked.
-#: Each value was measured from two separate downloads over TLS that agreed.
-#: The release publishes no checksum file, so this is trust on first use: it
-#: proves that a later download is the file that was checked, not that the
-#: first one was genuine. A platform that is missing here is not measured yet,
-#: and its download prints the digest to add.
-_CSILGEN_RELEASE = "https://github.com/catalystcommunity/csilgen/releases/download/csilgen/v0.2.9"
+#: A platform that is missing here is not measured yet, and its download prints
+#: the digest to add.
+_CSILGEN_RELEASE = "https://github.com/catalystcommunity/csilgen/releases/download/csilgen/v0.3.3"
 PINNED_SHA256: dict[str, str] = {
     # kind and kubectl publish a SHA-256 file beside each binary, and these
     # values are copied from those files, not measured here.
@@ -392,12 +389,19 @@ PINNED_SHA256: dict[str, str] = {
     # checksum file of its own.
     "https://github.com/catalystcommunity/corndogs/releases/download/helm_chart%2Fv0.6.0/corndogs-0.6.0.tgz":
         "150d20e0a45c8eed2fa1fd09f340ef3cdf1b6ceb8ab5dca32ff2df4da4fe8ec4",
-    f"{_CSILGEN_RELEASE}/csilgen-0.2.9-x86_64-unknown-linux-gnu.tar.gz":
-        "9977d7f4dd9b2ccffc395d4ec968e18517b75821c96d67f349842028b8e81bf9",
-    f"{_CSILGEN_RELEASE}/csilgen-generators-0.2.9.tar.gz":
-        "34b892b1c84147a2da00e5b25381bc2c277b3b060651cc309d7caa31e9b0af0d",
-    f"{_CSILGEN_RELEASE}/csilgen-transport-typescript-0.2.9.tar.gz":
-        "1ca0e88405f3b4cb0ee2ab57caaf91f44ca3847c4f7505d34705d5c46567ecc9",
+    # The csilgen values are the digests GitHub records for each release asset
+    # (`gh release view csilgen/v0.3.3 --json assets`). `_download` checks the
+    # file against them.
+    f"{_CSILGEN_RELEASE}/csilgen-0.3.3-x86_64-unknown-linux-gnu.tar.gz":
+        "df3680f788e7b504814495eb3dcfb180ccc3a1991a6871f8c60dc9044c48cb67",
+    f"{_CSILGEN_RELEASE}/csilgen-0.3.3-aarch64-unknown-linux-gnu.tar.gz":
+        "89937c0093a58466d041e973d3f3710ced2e4e8227c0c20a86b179a4b21727f6",
+    f"{_CSILGEN_RELEASE}/csilgen-0.3.3-aarch64-apple-darwin.tar.gz":
+        "0df997b8133cd1984b0fd0c1bfaad6470f2bb22a83750faafca8a3e2b1ac7be6",
+    f"{_CSILGEN_RELEASE}/csilgen-generators-0.3.3.tar.gz":
+        "1b65c460d980c9caf20868bd86e9cf3fd8cc6e091925d43b35ea67ecf0cdb799",
+    f"{_CSILGEN_RELEASE}/csilgen-transport-typescript-0.3.3.tar.gz":
+        "d4dfdf79c6506a1df1052007338d8d3006ffe056b48892305f8ecb1a4fe1dc59",
 }
 
 #: What a person does when a fetch fails. csilgen has its own, because the
@@ -818,7 +822,7 @@ def fetch_docker_cli(force: bool = False) -> Path:
 #: The csilgen release this repository generates with. A release rather than
 #: "latest": generated output is checked in, so the generator is a pin like any
 #: other dependency, and a new one is a deliberate change with a diff to read.
-CSILGEN_VERSION = "0.2.9"
+CSILGEN_VERSION = "0.3.3"
 
 #: csilgen tags the combined release with this prefix.
 CSILGEN_TAG = f"csilgen/v{CSILGEN_VERSION}"
@@ -1044,7 +1048,7 @@ GENERATOR_TARGETS = ("rust", "go", "typescript")
 #: **Fetched when it is there, built when it is not.** "Not there" is a 404. A
 #: failure of any other kind stops the run, because a build from the checkout
 #: is a different generator from the published one.
-GENERATOR_VERSION = "0.2.9"
+GENERATOR_VERSION = "0.3.3"
 
 #: One directory for each pin, so a new pin never overwrites the old one in
 #: place, and "is the pin installed" is "does its directory hold `.complete`".

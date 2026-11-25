@@ -5,22 +5,13 @@ package tallyowlcontrolapi
 
 import (
 	"context"
-	"fmt"
 )
 
-// ClientError is returned by a generated client call: a structured error the
-// service returned (Code/Message), or a transport-level failure (Err).
-type ClientError struct {
-	Code    int64
-	Message string
-	Err     error
-}
-
-func (e *ClientError) Error() string {
-	if e.Err != nil {
-		return "transport error: " + e.Err.Error()
-	}
-	return fmt.Sprintf("service error %d: %s", e.Code, e.Message)
+// WireReply is a status-zero CSIL-RPC reply: Variant names the declared output arm
+// that Payload encodes. A transport returns it from CallReply.
+type WireReply struct {
+	Variant *string
+	Payload []byte
 }
 
 // Transport is the caller-supplied byte carrier: it performs the call named by
@@ -28,9 +19,12 @@ func (e *ClientError) Error() string {
 // bytes, or an error. Both names are the verbatim CSIL names (service as written,
 // op in kebab-case as written), ready to go on the wire unmodified. The generated
 // client owns (de)serialization via the codec; the carrier only moves bytes, so
-// it can be HTTP, a queue, or an in-process loop.
+// it can be HTTP, a queue, or an in-process loop. CallReply serves operations
+// that declare several reply arms: it also returns the reply variant, so the
+// client can return the success arm or the declared error arm.
 type Transport interface {
 	Call(ctx context.Context, service string, op string, req []byte) ([]byte, error)
+	CallReply(ctx context.Context, service string, op string, req []byte) (WireReply, error)
 }
 
 // TallyOwlControlClient is a typed client for the TallyOwlControl service. The client owns
@@ -45,288 +39,714 @@ func NewTallyOwlControlClient(transport Transport) *TallyOwlControlClient {
 
 func (c *TallyOwlControlClient) RunQuery(ctx context.Context, req QueryRequest) (QueryResponse, error) {
 	var csilZero QueryResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "run-query", EncodeQueryRequest(req))
+	csilReq, csilErr := EncodeQueryRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "run-query", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeQueryResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "run-query", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeQueryResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListWorkspaces(ctx context.Context, req ListRequest) (WorkspaceList, error) {
 	var csilZero WorkspaceList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-workspaces", EncodeListRequest(req))
+	csilReq, csilErr := EncodeListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-workspaces", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeWorkspaceList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-workspaces", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeWorkspaceList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListProjects(ctx context.Context, req ListRequest) (ProjectList, error) {
 	var csilZero ProjectList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-projects", EncodeListRequest(req))
+	csilReq, csilErr := EncodeListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-projects", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeProjectList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-projects", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeProjectList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListApiKeys(ctx context.Context, req ListRequest) (ApiKeyList, error) {
 	var csilZero ApiKeyList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-api-keys", EncodeListRequest(req))
+	csilReq, csilErr := EncodeListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-api-keys", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeApiKeyList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-api-keys", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeApiKeyList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) PutAlertRule(ctx context.Context, req AlertRule) (AlertRule, error) {
 	var csilZero AlertRule
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "put-alert-rule", EncodeAlertRule(req))
+	csilReq, csilErr := EncodeAlertRule(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "put-alert-rule", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeAlertRule(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "put-alert-rule", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeAlertRule(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListAlertRules(ctx context.Context, req AlertListRequest) (AlertRuleList, error) {
 	var csilZero AlertRuleList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-alert-rules", EncodeAlertListRequest(req))
+	csilReq, csilErr := EncodeAlertListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-alert-rules", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeAlertRuleList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-alert-rules", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeAlertRuleList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListAlertInstances(ctx context.Context, req AlertListRequest) (AlertInstanceList, error) {
 	var csilZero AlertInstanceList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-alert-instances", EncodeAlertListRequest(req))
+	csilReq, csilErr := EncodeAlertListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-alert-instances", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeAlertInstanceList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-alert-instances", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeAlertInstanceList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) RequestDeletion(ctx context.Context, req DeletionRequest) (DeletionResponse, error) {
 	var csilZero DeletionResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "request-deletion", EncodeDeletionRequest(req))
+	csilReq, csilErr := EncodeDeletionRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "request-deletion", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeDeletionResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "request-deletion", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeDeletionResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) GetPolicy(ctx context.Context, req PolicyRequest) (CompiledPolicy, error) {
 	var csilZero CompiledPolicy
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "get-policy", EncodePolicyRequest(req))
+	csilReq, csilErr := EncodePolicyRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "get-policy", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeCompiledPolicy(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "get-policy", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeCompiledPolicy(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) BeginLogin(ctx context.Context, req BeginLoginRequest) (BeginLoginResponse, error) {
 	var csilZero BeginLoginResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "begin-login", EncodeBeginLoginRequest(req))
+	csilReq, csilErr := EncodeBeginLoginRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "begin-login", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeBeginLoginResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "begin-login", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeBeginLoginResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) CompleteLogin(ctx context.Context, req CompleteLoginRequest) (CompleteLoginResponse, error) {
 	var csilZero CompleteLoginResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "complete-login", EncodeCompleteLoginRequest(req))
+	csilReq, csilErr := EncodeCompleteLoginRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "complete-login", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeCompleteLoginResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "complete-login", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeCompleteLoginResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) CreateRoleToken(ctx context.Context, req CreateRoleTokenRequest) (CreateRoleTokenResponse, error) {
 	var csilZero CreateRoleTokenResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "create-role-token", EncodeCreateRoleTokenRequest(req))
+	csilReq, csilErr := EncodeCreateRoleTokenRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "create-role-token", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeCreateRoleTokenResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "create-role-token", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeCreateRoleTokenResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListRoleTokens(ctx context.Context, req ListRequest) (RoleTokenList, error) {
 	var csilZero RoleTokenList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-role-tokens", EncodeListRequest(req))
+	csilReq, csilErr := EncodeListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-role-tokens", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeRoleTokenList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-role-tokens", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeRoleTokenList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) RevokeRoleToken(ctx context.Context, req RevokeRoleTokenRequest) (Empty, error) {
 	var csilZero Empty
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "revoke-role-token", EncodeRevokeRoleTokenRequest(req))
+	csilReq, csilErr := EncodeRevokeRoleTokenRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "revoke-role-token", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeEmpty(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "revoke-role-token", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeEmpty(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) EnrollNode(ctx context.Context, req EnrollNodeRequest) (EnrollNodeResponse, error) {
 	var csilZero EnrollNodeResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "enroll-node", EncodeEnrollNodeRequest(req))
+	csilReq, csilErr := EncodeEnrollNodeRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "enroll-node", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeEnrollNodeResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "enroll-node", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeEnrollNodeResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) RenewNodeCertificate(ctx context.Context, req RenewNodeCertificateRequest) (EnrollNodeResponse, error) {
 	var csilZero EnrollNodeResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "renew-node-certificate", EncodeRenewNodeCertificateRequest(req))
+	csilReq, csilErr := EncodeRenewNodeCertificateRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "renew-node-certificate", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeEnrollNodeResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "renew-node-certificate", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeEnrollNodeResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListNodes(ctx context.Context, req ListRequest) (NodeList, error) {
 	var csilZero NodeList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-nodes", EncodeListRequest(req))
+	csilReq, csilErr := EncodeListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-nodes", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeNodeList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-nodes", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeNodeList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) PutPolicy(ctx context.Context, req PolicyDocument) (CompiledPolicy, error) {
 	var csilZero CompiledPolicy
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "put-policy", EncodePolicyDocument(req))
+	csilReq, csilErr := EncodePolicyDocument(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "put-policy", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeCompiledPolicy(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "put-policy", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeCompiledPolicy(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) PutAnalysis(ctx context.Context, req SavedAnalysis) (SavedAnalysis, error) {
 	var csilZero SavedAnalysis
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "put-analysis", EncodeSavedAnalysis(req))
+	csilReq, csilErr := EncodeSavedAnalysis(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "put-analysis", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeSavedAnalysis(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "put-analysis", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeSavedAnalysis(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListAnalyses(ctx context.Context, req SavedRequest) (SavedAnalysisList, error) {
 	var csilZero SavedAnalysisList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-analyses", EncodeSavedRequest(req))
+	csilReq, csilErr := EncodeSavedRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-analyses", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeSavedAnalysisList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-analyses", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeSavedAnalysisList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) DeleteAnalysis(ctx context.Context, req SavedRequest) (Empty, error) {
 	var csilZero Empty
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "delete-analysis", EncodeSavedRequest(req))
+	csilReq, csilErr := EncodeSavedRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "delete-analysis", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeEmpty(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "delete-analysis", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeEmpty(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) PutDashboard(ctx context.Context, req SavedDashboard) (SavedDashboard, error) {
 	var csilZero SavedDashboard
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "put-dashboard", EncodeSavedDashboard(req))
+	csilReq, csilErr := EncodeSavedDashboard(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "put-dashboard", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeSavedDashboard(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "put-dashboard", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeSavedDashboard(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListDashboards(ctx context.Context, req SavedRequest) (SavedDashboardList, error) {
 	var csilZero SavedDashboardList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-dashboards", EncodeSavedRequest(req))
+	csilReq, csilErr := EncodeSavedRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-dashboards", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeSavedDashboardList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-dashboards", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeSavedDashboardList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) PutAttributionSettings(ctx context.Context, req AttributionSettings) (AttributionSettings, error) {
 	var csilZero AttributionSettings
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "put-attribution-settings", EncodeAttributionSettings(req))
+	csilReq, csilErr := EncodeAttributionSettings(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "put-attribution-settings", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeAttributionSettings(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "put-attribution-settings", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeAttributionSettings(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) GetAttributionSettings(ctx context.Context, req SavedRequest) (AttributionSettings, error) {
 	var csilZero AttributionSettings
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "get-attribution-settings", EncodeSavedRequest(req))
+	csilReq, csilErr := EncodeSavedRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "get-attribution-settings", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeAttributionSettings(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "get-attribution-settings", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeAttributionSettings(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) DeleteDashboard(ctx context.Context, req SavedRequest) (Empty, error) {
 	var csilZero Empty
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "delete-dashboard", EncodeSavedRequest(req))
+	csilReq, csilErr := EncodeSavedRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "delete-dashboard", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeEmpty(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "delete-dashboard", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeEmpty(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) DeleteAlertRule(ctx context.Context, req DeleteAlertRuleRequest) (Empty, error) {
 	var csilZero Empty
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "delete-alert-rule", EncodeDeleteAlertRuleRequest(req))
+	csilReq, csilErr := EncodeDeleteAlertRuleRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "delete-alert-rule", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeEmpty(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "delete-alert-rule", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeEmpty(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) SilenceAlert(ctx context.Context, req SilenceRequest) (AlertInstance, error) {
 	var csilZero AlertInstance
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "silence-alert", EncodeSilenceRequest(req))
+	csilReq, csilErr := EncodeSilenceRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "silence-alert", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeAlertInstance(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "silence-alert", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeAlertInstance(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ResolveAlert(ctx context.Context, req ResolveRequest) (AlertInstance, error) {
 	var csilZero AlertInstance
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "resolve-alert", EncodeResolveRequest(req))
+	csilReq, csilErr := EncodeResolveRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "resolve-alert", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeAlertInstance(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "resolve-alert", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeAlertInstance(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListWorkflows(ctx context.Context, req ListRequest) (WorkflowList, error) {
 	var csilZero WorkflowList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-workflows", EncodeListRequest(req))
+	csilReq, csilErr := EncodeListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-workflows", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeWorkflowList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-workflows", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeWorkflowList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) RunWorkflow(ctx context.Context, req RunWorkflowRequest) (RunWorkflowResponse, error) {
 	var csilZero RunWorkflowResponse
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "run-workflow", EncodeRunWorkflowRequest(req))
+	csilReq, csilErr := EncodeRunWorkflowRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "run-workflow", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeRunWorkflowResponse(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "run-workflow", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeRunWorkflowResponse(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }
 
 func (c *TallyOwlControlClient) ListNotifications(ctx context.Context, req AlertListRequest) (NotificationDeliveryList, error) {
 	var csilZero NotificationDeliveryList
-	csilResp, csilErr := c.transport.Call(ctx, "TallyOwlControl", "list-notifications", EncodeAlertListRequest(req))
+	csilReq, csilErr := EncodeAlertListRequest(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "list-notifications", csilReq)
 	if csilErr != nil {
 		return csilZero, csilErr
 	}
-	return DecodeNotificationDeliveryList(csilResp)
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "list-notifications", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeNotificationDeliveryList(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
+}
+
+func (c *TallyOwlControlClient) GetUserPreferences(ctx context.Context, req Empty) (UserPreferences, error) {
+	var csilZero UserPreferences
+	csilReq, csilErr := EncodeEmpty(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "get-user-preferences", csilReq)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "get-user-preferences", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeUserPreferences(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
+}
+
+func (c *TallyOwlControlClient) PutUserPreferences(ctx context.Context, req UserPreferences) (UserPreferences, error) {
+	var csilZero UserPreferences
+	csilReq, csilErr := EncodeUserPreferences(req)
+	if csilErr != nil {
+		return csilZero, &RPCEncodeError{csilErr}
+	}
+	csilReply, csilErr := c.transport.CallReply(ctx, "TallyOwlControl", "put-user-preferences", csilReq)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	csilResp, csilErr := ResolveRPCReply("TallyOwlControl", "put-user-preferences", csilReply.Variant, csilReply.Payload)
+	if csilErr != nil {
+		return csilZero, csilErr
+	}
+	value, err := DecodeUserPreferences(csilResp)
+	if err != nil {
+		return csilZero, &RPCDecodeError{err}
+	}
+	return value, nil
 }

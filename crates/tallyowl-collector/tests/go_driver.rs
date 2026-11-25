@@ -474,7 +474,7 @@ fn a_query_returns_what_the_go_driver_sent() {
                     .token,
             );
     let response = client
-        .call("TallyOwlControl", "run-query", request)
+        .call("TallyOwlControl", "run-query", request.unwrap())
         .expect("the query runs");
     let decoded = decode_query_response(&response.payload).expect("the answer decodes");
 

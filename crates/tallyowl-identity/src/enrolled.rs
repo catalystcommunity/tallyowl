@@ -223,7 +223,7 @@ impl Enrolled {
             _ => self.issuer.enroll(EnrollNodeRequest {
                 token: self.template.token.clone().unwrap_or_default(),
                 certificate_request,
-                requested_role: self.template.role.clone(),
+                requested_role: self.template.role,
                 cell: self.template.cell.clone(),
                 region: self.template.region.clone(),
                 node_id: None,

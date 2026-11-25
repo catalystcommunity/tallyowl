@@ -70,7 +70,10 @@ impl CsilDecimal {
     /// value lands in the decade `[10^(w-1), 10^w)` for `w = digits + exponent`, so
     /// differing weights settle the order outright and equal weights reduce to a
     /// trailing-zero-padded digit-string compare.
-    fn cmp_magnitude(mut ma: u128, mut ea: i64, mut mb: u128, mut eb: i64) -> std::cmp::Ordering {
+    fn cmp_magnitude(mut ma: u128, ea: i64, mut mb: u128, eb: i64) -> std::cmp::Ordering {
+        // The weights are summed in i128 so an exponent near `i64::MAX` from a
+        // payload cannot overflow.
+        let (mut ea, mut eb) = (i128::from(ea), i128::from(eb));
         while ma.is_multiple_of(10) {
             ma /= 10;
             ea += 1;
@@ -81,8 +84,8 @@ impl CsilDecimal {
         }
         let digits_a = ma.to_string();
         let digits_b = mb.to_string();
-        let weight_a = digits_a.len() as i64 + ea;
-        let weight_b = digits_b.len() as i64 + eb;
+        let weight_a = digits_a.len() as i128 + ea;
+        let weight_b = digits_b.len() as i128 + eb;
         if weight_a != weight_b {
             return weight_a.cmp(&weight_b);
         }
@@ -112,22 +115,22 @@ impl CsilDecimal {
     }
 
     /// Canonical decimal string for the exact value: `(-2, 12345)` renders as
-    /// `123.45`. Round-trips through `from_str` by value.
+    /// `123.45`. Round-trips through `from_str` by value. An exponent outside
+    /// -1000..=1000 renders as `<mantissa>e<exponent>` (the Go target uses the
+    /// same rule), because a payload can carry an exponent near `i64::MAX` and
+    /// padding it out with zeros would exhaust memory.
     pub fn as_str(&self) -> String {
         let digits = self.mantissa.unsigned_abs().to_string();
-        let body = if self.exponent >= 0 {
-            let mut out = digits;
-            out.push_str(&"0".repeat(self.exponent as usize));
-            out
+        let scale = usize::try_from(self.exponent.unsigned_abs()).unwrap_or(usize::MAX);
+        let body = if !(-1000..=1000).contains(&self.exponent) {
+            format!("{digits}e{}", self.exponent)
+        } else if self.exponent >= 0 {
+            format!("{digits}{}", "0".repeat(scale))
+        } else if scale < digits.len() {
+            let (whole, fraction) = digits.split_at(digits.len() - scale);
+            format!("{whole}.{fraction}")
         } else {
-            let scale = (-self.exponent) as usize;
-            if digits.len() > scale {
-                let point = digits.len() - scale;
-                format!("{}.{}", &digits[..point], &digits[point..])
-            } else {
-                let pad = "0".repeat(scale - digits.len());
-                format!("0.{pad}{digits}")
-            }
+            format!("0.{}{digits}", "0".repeat(scale - digits.len()))
         };
         if self.mantissa < 0 {
             format!("-{body}")
@@ -136,12 +139,21 @@ impl CsilDecimal {
         }
     }
 
-    /// Parse a decimal string into the exact `(exponent, mantissa)` pair.
+    /// Parse a decimal string (`123.45`, or `12345e-2`) into the exact
+    /// `(exponent, mantissa)` pair.
     pub fn from_str(s: &str) -> Result<Self, String> {
         let t = s.trim();
         let (negative, rest) = match t.strip_prefix('-') {
             Some(r) => (true, r),
             None => (false, t.strip_prefix('+').unwrap_or(t)),
+        };
+        let (rest, power) = match rest.split_once(['e', 'E']) {
+            Some((m, e)) => (
+                m,
+                e.parse::<i64>()
+                    .map_err(|_| format!("invalid decimal: {s}"))?,
+            ),
+            None => (rest, 0),
         };
         let (int_part, frac_part) = match rest.split_once('.') {
             Some((i, f)) => (i, f),
@@ -160,10 +172,11 @@ impl CsilDecimal {
             .parse()
             .map_err(|e| format!("decimal out of range: {e}"))?;
         let mantissa = if negative { -magnitude } else { magnitude };
-        Ok(Self {
-            exponent: -(frac_part.len() as i64),
-            mantissa,
-        })
+        let exponent = i64::try_from(frac_part.len())
+            .ok()
+            .and_then(|n| power.checked_sub(n))
+            .ok_or_else(|| format!("decimal out of range: {s}"))?;
+        Ok(Self { exponent, mantissa })
     }
 }
 
@@ -198,7 +211,7 @@ pub type ExpressionRef = Vec<u8>;
 pub type QueryNodeRef = Vec<u8>;
 
 /// ExpressionKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExpressionKind {
     Literal,
     Field,
@@ -228,7 +241,7 @@ pub struct ExpressionNode {
 }
 
 /// QueryNodeKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueryNodeKind {
     Scan,
     Filter,
@@ -287,7 +300,7 @@ impl FieldRef {
 }
 
 /// CompareOp variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompareOp {
     Eq,
     Ne,
@@ -298,7 +311,7 @@ pub enum CompareOp {
 }
 
 /// LogicalOp variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LogicalOp {
     And,
     Or,
@@ -306,7 +319,7 @@ pub enum LogicalOp {
 }
 
 /// ArithOp variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArithOp {
     Add,
     Sub,
@@ -420,7 +433,7 @@ impl ConvertExpr {
 }
 
 /// TimeBasis variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimeBasis {
     OccurredAt,
     ReceivedAt,
@@ -458,7 +471,7 @@ impl TimeRange {
 }
 
 /// Dataset variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Dataset {
     Events,
     ErrorOccurrences,
@@ -472,7 +485,7 @@ pub enum Dataset {
 }
 
 /// MeasureKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MeasureKind {
     Count,
     Sum,
@@ -617,7 +630,7 @@ pub struct UnionNode {
 }
 
 /// CorrelationBasis variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CorrelationBasis {
     EndUser,
     Session,
@@ -625,7 +638,7 @@ pub enum CorrelationBasis {
 }
 
 /// IdentityResolution variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IdentityResolution {
     EventTime,
     LatestKnown,
@@ -726,7 +739,7 @@ impl TimelineQuery {
 }
 
 /// AttributionModel variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttributionModel {
     FirstTouch,
     LastTouch,
@@ -795,7 +808,7 @@ impl CampaignSummaryQuery {
 }
 
 /// Consistency variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Consistency {
     Committed,
     BoundedStale,
@@ -810,7 +823,7 @@ pub struct QueryBudget {
 }
 
 /// QueryForm variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueryForm {
     Node,
     Funnel,
@@ -917,7 +930,7 @@ pub struct ResultMetadata {
 }
 
 /// RetentionClass variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetentionClass {
     Provisional,
     Raw,
@@ -1074,7 +1087,7 @@ impl NotificationTarget {
 }
 
 /// AlertState variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlertState {
     Ok,
     Firing,
@@ -1084,7 +1097,7 @@ pub enum AlertState {
 }
 
 /// AlertOutcome variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlertOutcome {
     Value,
     NoData,
@@ -1277,7 +1290,7 @@ pub struct NotificationDeliveryList {
 }
 
 /// WorkflowKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WorkflowKind {
     AlertEvaluation,
     Notification,
@@ -1541,6 +1554,37 @@ pub struct Membership {
     pub role: Membership_role,
 }
 
+/// TimeDisplay variants
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimeDisplay {
+    Browser,
+    Utc,
+    Zone,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserPreferences {
+    pub time_display: TimeDisplay,
+    /// constraint: size in 1..=64
+    pub time_zone: Option<String>,
+    pub updated_at: Option<Timestamp>,
+}
+
+impl UserPreferences {
+    /// Validate this value against the constraints declared in the CSIL spec.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(v) = &self.time_zone {
+            if v.is_empty() || v.len() > 64usize {
+                return Err(ValidationError {
+                    field: "time_zone".to_string(),
+                    message: "length must be in 1..=64".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Project {
     pub project_id: ProjectId,
@@ -1699,7 +1743,7 @@ impl DeletionResponse {
 }
 
 /// PolicyScope variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PolicyScope {
     Installation,
     Workspace,
@@ -1709,7 +1753,7 @@ pub enum PolicyScope {
 }
 
 /// CampaignLinking variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CampaignLinking {
     Linked,
     Unlinked,
@@ -1998,7 +2042,7 @@ impl SavedRequest {
 }
 
 /// NodeRole variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeRole {
     CollectorIntake,
     CollectorForwarder,
@@ -2478,7 +2522,7 @@ pub type Timestamp = i64;
 pub type DurationMs = i64;
 
 /// TypedValueKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypedValueKind {
     Null,
     Bool,
@@ -2503,7 +2547,7 @@ pub struct TypedValue {
 }
 
 /// PropertyOrigin variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PropertyOrigin {
     Client,
     Driver,
@@ -2537,7 +2581,7 @@ impl Property {
 pub type PropertyList = Vec<Property>;
 
 /// MeasurementKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MeasurementKind {
     Float,
     Decimal,
@@ -2583,7 +2627,7 @@ impl Measurement {
 pub type MeasurementList = Vec<Measurement>;
 
 /// ConsentState variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConsentState {
     Granted,
     Denied,
@@ -2614,7 +2658,7 @@ impl Consent {
 }
 
 /// TelemetryKind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TelemetryKind {
     Event,
     PageView,
@@ -2734,7 +2778,7 @@ impl Envelope {
 }
 
 /// ErrorCode variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     InvalidArgument,
     Unauthenticated,
@@ -2759,14 +2803,14 @@ pub struct ServiceError {
 }
 
 /// SetExpr_set_test variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SetExpr_set_test {
     In,
     NotIn,
 }
 
 /// TextExpr_text_test variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextExpr_text_test {
     StartsWith,
     EndsWith,
@@ -2774,14 +2818,14 @@ pub enum TextExpr_text_test {
 }
 
 /// NullExpr_null_test variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NullExpr_null_test {
     IsNull,
     IsNotNull,
 }
 
 /// TimeExpr_time_fn variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimeExpr_time_fn {
     Truncate,
     Extract,
@@ -2789,7 +2833,7 @@ pub enum TimeExpr_time_fn {
 }
 
 /// Interval_calendar variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Interval_calendar {
     Hour,
     Day,
@@ -2798,14 +2842,14 @@ pub enum Interval_calendar {
 }
 
 /// SortKey_direction variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SortKey_direction {
     Asc,
     Desc,
 }
 
 /// RetentionQuery_period variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetentionQuery_period {
     Day,
     Week,
@@ -2813,14 +2857,14 @@ pub enum RetentionQuery_period {
 }
 
 /// PathQuery_direction variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathQuery_direction {
     Previous,
     Next,
 }
 
 /// CampaignSummaryQuery_dimension variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CampaignSummaryQuery_dimension {
     Campaign,
     Channel,
@@ -2830,14 +2874,14 @@ pub enum CampaignSummaryQuery_dimension {
 }
 
 /// NotificationTarget_kind variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotificationTarget_kind {
     Webhook,
     CsilCallback,
 }
 
 /// Membership_role variants
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Membership_role {
     Viewer,
     Admin,

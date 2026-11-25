@@ -10,7 +10,7 @@
 // invents a second protocol.
 
 import { RpcRequest, RpcResponse } from "../../../.deps/csilgen/transports/typescript/src/rpc.ts";
-import { fromServiceErrorCbor, type ServiceError } from "./control-api.ts";
+import { fromServiceErrorTypeCbor, type ServiceErrorType } from "./control-api.ts";
 
 export const CONTROL_SERVICE = "TallyOwlControl";
 const SERVICE_ERROR_VARIANT = "ServiceError";
@@ -21,7 +21,7 @@ export class ControlError extends Error {
   readonly code: string;
   readonly retryable: boolean;
 
-  constructor(error: ServiceError) {
+  constructor(error: ServiceErrorType) {
     super(error.message);
     this.name = "ControlError";
     this.code = String(error.code);
@@ -113,7 +113,7 @@ export class Control {
       throw new TransportFailure(response.status, response.error ?? "The request did not arrive.");
     }
     if (response.variant === SERVICE_ERROR_VARIANT) {
-      throw new ControlError(fromServiceErrorCbor(response.payload));
+      throw new ControlError(fromServiceErrorTypeCbor(response.payload));
     }
     return response.payload;
   }

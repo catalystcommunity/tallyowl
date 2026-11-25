@@ -5,18 +5,21 @@ use super::types::*;
 /// TallyOwlIngest service trait
 pub trait TallyOwlIngest {
     type Context;
+    #[allow(clippy::result_large_err)]
     /// Accept telemetry on the application's existing connection. Best effort.
     fn capture(
         &self,
         ctx: &Self::Context,
         input: CaptureRequest,
     ) -> Result<CaptureResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Accept telemetry and wait for the collector durability boundary.
     fn capture_critical(
         &self,
         ctx: &Self::Context,
         input: CaptureCriticalRequest,
     ) -> Result<CaptureCriticalResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Report the collection policy that the client must apply.
     fn policy_version(
         &self,
@@ -36,6 +39,7 @@ pub mod tally_owl_ingest_wire_ids {
 /// TallyOwlAlertReceiver service trait
 pub trait TallyOwlAlertReceiver {
     type Context;
+    #[allow(clippy::result_large_err)]
     /// Take one signed alert notification.
     fn notify(
         &self,

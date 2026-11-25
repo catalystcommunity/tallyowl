@@ -1,35 +1,34 @@
-// Zest publishes JavaScript without type declarations. These declare only the
-// names the dashboard imports, from the modules `zest.ts` imports them from.
-
-declare module "@catalystcommunity/base-components" {
-  export function defineElements(tags: Record<string, CustomElementConstructor>): void;
-}
+// Zest ships its declarations at each package index only. `zest.ts` imports
+// each class from its own module (see the note there), so each of those
+// modules takes its declaration from the index of its package.
+//
+// Do not declare a package index here. An ambient declaration of
+// `@catalystcommunity/<package>` hides the declarations that Zest ships.
 
 declare module "@catalystcommunity/controls/src/button.js" {
-  export const PushButton: CustomElementConstructor;
+  export { PushButton } from "@catalystcommunity/controls";
 }
 
 declare module "@catalystcommunity/controls/src/check.js" {
-  export const CheckBox: CustomElementConstructor;
+  export { CheckBox } from "@catalystcommunity/controls";
 }
 
 declare module "@catalystcommunity/controls/src/combo.js" {
-  export const ComboBox: CustomElementConstructor;
+  export { ComboBox } from "@catalystcommunity/controls";
 }
 
 declare module "@catalystcommunity/controls/src/text.js" {
-  export const TextField: CustomElementConstructor;
+  export { TextField } from "@catalystcommunity/controls";
 }
 
 declare module "@catalystcommunity/containers/src/group-box.js" {
-  export const GroupBox: CustomElementConstructor;
+  export { GroupBox } from "@catalystcommunity/containers";
 }
 
 declare module "@catalystcommunity/containers/src/layouts.js" {
-  export const StatusBar: CustomElementConstructor;
-  export const StatusPane: CustomElementConstructor;
+  export { StatusBar, StatusPane } from "@catalystcommunity/containers";
 }
 
 declare module "@catalystcommunity/data-views/src/table-view.js" {
-  export const TableView: CustomElementConstructor;
+  export { TableView } from "@catalystcommunity/data-views";
 }

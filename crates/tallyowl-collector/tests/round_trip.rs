@@ -347,6 +347,7 @@ fn trend_request(project_id: &[u8], range: (i64, i64), bucket_ms: i64) -> Vec<u8
         bucket_ms,
         "events",
     ))
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -887,7 +888,8 @@ fn a_signed_in_operator_sees_only_the_workspaces_they_belong_to() {
                     cursor: None,
                     limit: None,
                 },
-            ),
+            )
+            .unwrap(),
         )
         .expect("the call reaches the head");
     let decoded =

@@ -4,6 +4,8 @@
 
 import type { AssignProjectRequest, BootstrapGroupRequest, ChangeReplicaRequest, ClearDegradedRequest, ClusterAck, ClusterSnapshotRequest, ClusterSnapshotResponse, ConsensusMessage, ConsensusReply, DescribeTopologyRequest, DirectoryRequest, DirectoryResponse, FailOverRegionRequest, MergeTabletsRequest, MoveTabletRequest, NodeHealthReport, PartialQueryRequest, PartialQueryResponse, RemoveReplicaRequest, ReplicaStatus, ReplicaStatusRequest, RestoreRequest, RouteRequest, RouteResponse, SegmentList, SegmentListRequest, SegmentTransfer, SegmentTransferRequest, ServiceError, SetReceiptPolicyRequest, SnapshotChunk, SnapshotChunkRequest, SplitTabletRequest, TopologyResponse, UnsafeRecoverRequest, UnsafeRecoverResponse } from "./types.gen.ts";
 
+import { type RpcReply, encodeTallyOwlReplicationDeliverConsensusReply, encodeTallyOwlReplicationFetchSnapshotChunkReply, encodeTallyOwlReplicationFetchSegmentReply, encodeTallyOwlReplicationPartialAggregateReply, encodeTallyOwlReplicationReplicaStatusReply, encodeTallyOwlReplicationReportHealthReply, encodeTallyOwlReplicationListSegmentsReply, encodeTallyOwlClusterDescribeTopologyReply, encodeTallyOwlClusterRouteReply, encodeTallyOwlClusterBootstrapGroupReply, encodeTallyOwlClusterAddReplicaReply, encodeTallyOwlClusterRemoveReplicaReply, encodeTallyOwlClusterSplitTabletReply, encodeTallyOwlClusterMergeTabletsReply, encodeTallyOwlClusterMoveTabletReply, encodeTallyOwlClusterSetReceiptPolicyReply, encodeTallyOwlClusterFailOverRegionReply, encodeTallyOwlClusterUnsafeRecoverReply, encodeTallyOwlClusterClearDegradedReply, encodeTallyOwlClusterSnapshotClusterReply, encodeTallyOwlClusterRestoreReply, encodeTallyOwlClusterDirectoryReply, encodeTallyOwlClusterAssignProjectReply } from "./codec.gen.ts";
+
 // The consumer-defined context carries auth, request id, etc. It is opaque to
 // generated code; the adapter defines its shape.
 export interface RequestContext {
@@ -170,89 +172,73 @@ export async function dispatch(
   method: string,
   reqBytes: Uint8Array,
   ctx: RequestContext,
-): Promise<Uint8Array> {
+): Promise<Uint8Array | RpcReply> {
   switch (service) {
     case "TallyOwlCluster": {
       switch (method) {
         case "describe-topology": {
           const req = codec.decode<DescribeTopologyRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.describeTopology(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterDescribeTopologyReply(() => handlers.tallyOwlCluster.describeTopology(req, ctx));
         }
         case "route": {
           const req = codec.decode<RouteRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.route(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterRouteReply(() => handlers.tallyOwlCluster.route(req, ctx));
         }
         case "bootstrap-group": {
           const req = codec.decode<BootstrapGroupRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.bootstrapGroup(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterBootstrapGroupReply(() => handlers.tallyOwlCluster.bootstrapGroup(req, ctx));
         }
         case "add-replica": {
           const req = codec.decode<ChangeReplicaRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.addReplica(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterAddReplicaReply(() => handlers.tallyOwlCluster.addReplica(req, ctx));
         }
         case "remove-replica": {
           const req = codec.decode<RemoveReplicaRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.removeReplica(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterRemoveReplicaReply(() => handlers.tallyOwlCluster.removeReplica(req, ctx));
         }
         case "split-tablet": {
           const req = codec.decode<SplitTabletRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.splitTablet(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterSplitTabletReply(() => handlers.tallyOwlCluster.splitTablet(req, ctx));
         }
         case "merge-tablets": {
           const req = codec.decode<MergeTabletsRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.mergeTablets(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterMergeTabletsReply(() => handlers.tallyOwlCluster.mergeTablets(req, ctx));
         }
         case "move-tablet": {
           const req = codec.decode<MoveTabletRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.moveTablet(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterMoveTabletReply(() => handlers.tallyOwlCluster.moveTablet(req, ctx));
         }
         case "set-receipt-policy": {
           const req = codec.decode<SetReceiptPolicyRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.setReceiptPolicy(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterSetReceiptPolicyReply(() => handlers.tallyOwlCluster.setReceiptPolicy(req, ctx));
         }
         case "fail-over-region": {
           const req = codec.decode<FailOverRegionRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.failOverRegion(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterFailOverRegionReply(() => handlers.tallyOwlCluster.failOverRegion(req, ctx));
         }
         case "unsafe-recover": {
           const req = codec.decode<UnsafeRecoverRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.unsafeRecover(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterUnsafeRecoverReply(() => handlers.tallyOwlCluster.unsafeRecover(req, ctx));
         }
         case "clear-degraded": {
           const req = codec.decode<ClearDegradedRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.clearDegraded(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterClearDegradedReply(() => handlers.tallyOwlCluster.clearDegraded(req, ctx));
         }
         case "snapshot-cluster": {
           const req = codec.decode<ClusterSnapshotRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.snapshotCluster(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterSnapshotClusterReply(() => handlers.tallyOwlCluster.snapshotCluster(req, ctx));
         }
         case "restore": {
           const req = codec.decode<RestoreRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.restore(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterRestoreReply(() => handlers.tallyOwlCluster.restore(req, ctx));
         }
         case "directory": {
           const req = codec.decode<DirectoryRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.directory(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterDirectoryReply(() => handlers.tallyOwlCluster.directory(req, ctx));
         }
         case "assign-project": {
           const req = codec.decode<AssignProjectRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.assignProject(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterAssignProjectReply(() => handlers.tallyOwlCluster.assignProject(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown method ${service}.${method}` } satisfies ServiceError;
@@ -262,38 +248,31 @@ export async function dispatch(
       switch (method) {
         case "deliver-consensus": {
           const req = codec.decode<ConsensusMessage>(reqBytes);
-          const res = await handlers.tallyOwlReplication.deliverConsensus(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationDeliverConsensusReply(() => handlers.tallyOwlReplication.deliverConsensus(req, ctx));
         }
         case "fetch-snapshot-chunk": {
           const req = codec.decode<SnapshotChunkRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.fetchSnapshotChunk(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationFetchSnapshotChunkReply(() => handlers.tallyOwlReplication.fetchSnapshotChunk(req, ctx));
         }
         case "fetch-segment": {
           const req = codec.decode<SegmentTransferRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.fetchSegment(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationFetchSegmentReply(() => handlers.tallyOwlReplication.fetchSegment(req, ctx));
         }
         case "partial-aggregate": {
           const req = codec.decode<PartialQueryRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.partialAggregate(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationPartialAggregateReply(() => handlers.tallyOwlReplication.partialAggregate(req, ctx));
         }
         case "replica-status": {
           const req = codec.decode<ReplicaStatusRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.replicaStatus(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationReplicaStatusReply(() => handlers.tallyOwlReplication.replicaStatus(req, ctx));
         }
         case "report-health": {
           const req = codec.decode<NodeHealthReport>(reqBytes);
-          const res = await handlers.tallyOwlReplication.reportHealth(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationReportHealthReply(() => handlers.tallyOwlReplication.reportHealth(req, ctx));
         }
         case "list-segments": {
           const req = codec.decode<SegmentListRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.listSegments(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationListSegmentsReply(() => handlers.tallyOwlReplication.listSegments(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown method ${service}.${method}` } satisfies ServiceError;
@@ -318,89 +297,73 @@ export async function dispatchCompact(
   method: number,
   reqBytes: Uint8Array,
   ctx: RequestContext,
-): Promise<Uint8Array> {
+): Promise<Uint8Array | RpcReply> {
   switch (service) {
     case 5: {
       switch (method) {
         case 0: {
           const req = codec.decode<DescribeTopologyRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.describeTopology(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterDescribeTopologyReply(() => handlers.tallyOwlCluster.describeTopology(req, ctx));
         }
         case 1: {
           const req = codec.decode<RouteRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.route(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterRouteReply(() => handlers.tallyOwlCluster.route(req, ctx));
         }
         case 2: {
           const req = codec.decode<BootstrapGroupRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.bootstrapGroup(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterBootstrapGroupReply(() => handlers.tallyOwlCluster.bootstrapGroup(req, ctx));
         }
         case 3: {
           const req = codec.decode<ChangeReplicaRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.addReplica(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterAddReplicaReply(() => handlers.tallyOwlCluster.addReplica(req, ctx));
         }
         case 4: {
           const req = codec.decode<RemoveReplicaRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.removeReplica(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterRemoveReplicaReply(() => handlers.tallyOwlCluster.removeReplica(req, ctx));
         }
         case 5: {
           const req = codec.decode<SplitTabletRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.splitTablet(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterSplitTabletReply(() => handlers.tallyOwlCluster.splitTablet(req, ctx));
         }
         case 6: {
           const req = codec.decode<MergeTabletsRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.mergeTablets(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterMergeTabletsReply(() => handlers.tallyOwlCluster.mergeTablets(req, ctx));
         }
         case 7: {
           const req = codec.decode<MoveTabletRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.moveTablet(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterMoveTabletReply(() => handlers.tallyOwlCluster.moveTablet(req, ctx));
         }
         case 8: {
           const req = codec.decode<SetReceiptPolicyRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.setReceiptPolicy(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterSetReceiptPolicyReply(() => handlers.tallyOwlCluster.setReceiptPolicy(req, ctx));
         }
         case 9: {
           const req = codec.decode<FailOverRegionRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.failOverRegion(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterFailOverRegionReply(() => handlers.tallyOwlCluster.failOverRegion(req, ctx));
         }
         case 10: {
           const req = codec.decode<UnsafeRecoverRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.unsafeRecover(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterUnsafeRecoverReply(() => handlers.tallyOwlCluster.unsafeRecover(req, ctx));
         }
         case 11: {
           const req = codec.decode<ClearDegradedRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.clearDegraded(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterClearDegradedReply(() => handlers.tallyOwlCluster.clearDegraded(req, ctx));
         }
         case 12: {
           const req = codec.decode<ClusterSnapshotRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.snapshotCluster(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterSnapshotClusterReply(() => handlers.tallyOwlCluster.snapshotCluster(req, ctx));
         }
         case 13: {
           const req = codec.decode<RestoreRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.restore(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterRestoreReply(() => handlers.tallyOwlCluster.restore(req, ctx));
         }
         case 14: {
           const req = codec.decode<DirectoryRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.directory(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterDirectoryReply(() => handlers.tallyOwlCluster.directory(req, ctx));
         }
         case 15: {
           const req = codec.decode<AssignProjectRequest>(reqBytes);
-          const res = await handlers.tallyOwlCluster.assignProject(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlClusterAssignProjectReply(() => handlers.tallyOwlCluster.assignProject(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown ordinal ${service}.${method}` } satisfies ServiceError;
@@ -410,38 +373,31 @@ export async function dispatchCompact(
       switch (method) {
         case 0: {
           const req = codec.decode<ConsensusMessage>(reqBytes);
-          const res = await handlers.tallyOwlReplication.deliverConsensus(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationDeliverConsensusReply(() => handlers.tallyOwlReplication.deliverConsensus(req, ctx));
         }
         case 1: {
           const req = codec.decode<SnapshotChunkRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.fetchSnapshotChunk(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationFetchSnapshotChunkReply(() => handlers.tallyOwlReplication.fetchSnapshotChunk(req, ctx));
         }
         case 2: {
           const req = codec.decode<SegmentTransferRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.fetchSegment(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationFetchSegmentReply(() => handlers.tallyOwlReplication.fetchSegment(req, ctx));
         }
         case 3: {
           const req = codec.decode<PartialQueryRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.partialAggregate(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationPartialAggregateReply(() => handlers.tallyOwlReplication.partialAggregate(req, ctx));
         }
         case 4: {
           const req = codec.decode<ReplicaStatusRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.replicaStatus(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationReplicaStatusReply(() => handlers.tallyOwlReplication.replicaStatus(req, ctx));
         }
         case 5: {
           const req = codec.decode<NodeHealthReport>(reqBytes);
-          const res = await handlers.tallyOwlReplication.reportHealth(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationReportHealthReply(() => handlers.tallyOwlReplication.reportHealth(req, ctx));
         }
         case 6: {
           const req = codec.decode<SegmentListRequest>(reqBytes);
-          const res = await handlers.tallyOwlReplication.listSegments(req, ctx);
-          return codec.encode(res);
+          return encodeTallyOwlReplicationListSegmentsReply(() => handlers.tallyOwlReplication.listSegments(req, ctx));
         }
         default:
           throw { code: 404, message: `unknown ordinal ${service}.${method}` } satisfies ServiceError;

@@ -133,7 +133,7 @@ pub fn vectors() -> Vec<Vector> {
             name,
             type_name: "TypedValue",
             package: COLLECTOR,
-            bytes: cc::encode_typed_value(&cwire::write(&value)),
+            bytes: cc::encode_typed_value(&cwire::write(&value)).unwrap(),
         });
     };
 
@@ -162,7 +162,8 @@ pub fn vectors() -> Vec<Vector> {
             "region",
             Value::Text("us-west2".into()),
             ct::PropertyOrigin::Collector,
-        )),
+        ))
+        .unwrap(),
     });
 
     out.push(Vector {
@@ -176,20 +177,21 @@ pub fn vectors() -> Vec<Vector> {
                 Some("USD"),
             )
             .expect("a number"),
-        ),
+        )
+        .unwrap(),
     });
 
     out.push(Vector {
         name: "envelope-minimal",
         type_name: "Envelope",
         package: COLLECTOR,
-        bytes: cc::encode_envelope(&minimal_envelope()),
+        bytes: cc::encode_envelope(&minimal_envelope()).unwrap(),
     });
     out.push(Vector {
         name: "envelope-full",
         type_name: "Envelope",
         package: COLLECTOR,
-        bytes: cc::encode_envelope(&full_envelope()),
+        bytes: cc::encode_envelope(&full_envelope()).unwrap(),
     });
 
     out.push(Vector {
@@ -203,7 +205,8 @@ pub fn vectors() -> Vec<Vector> {
                 route: Some("/checkout".into()),
                 page_title: None,
             },
-        )),
+        ))
+        .unwrap(),
     });
 
     out.push(Vector {
@@ -225,7 +228,8 @@ pub fn vectors() -> Vec<Vector> {
                     click_id: None,
                 }),
             },
-        )),
+        ))
+        .unwrap(),
     });
 
     out.push(Vector {
@@ -245,7 +249,8 @@ pub fn vectors() -> Vec<Vector> {
                 campaign: None,
                 touch_event_id: None,
             },
-        )),
+        ))
+        .unwrap(),
     });
 
     out.push(Vector {
@@ -270,7 +275,8 @@ pub fn vectors() -> Vec<Vector> {
                 }]),
                 breadcrumbs: None,
             },
-        )),
+        ))
+        .unwrap(),
     });
 
     out.push(Vector {
@@ -280,7 +286,7 @@ pub fn vectors() -> Vec<Vector> {
         bytes: {
             let mut item = citems::empty_item(minimal_envelope());
             item.envelope.kind = ct::TelemetryKind::SessionHeartbeat;
-            cc::encode_telemetry_item(&item)
+            cc::encode_telemetry_item(&item).unwrap()
         },
     });
 
@@ -311,7 +317,8 @@ pub fn vectors() -> Vec<Vector> {
             common_properties: None,
             sealed_at: AT,
             compression: Some(ct::Compression::Zstd),
-        }),
+        })
+        .unwrap(),
     });
 
     out.push(Vector {
@@ -332,7 +339,8 @@ pub fn vectors() -> Vec<Vector> {
                 message: "This item carries no project.".into(),
             }]),
             deduplicated: Some(false),
-        }),
+        })
+        .unwrap(),
     });
 
     out.push(Vector {
@@ -344,7 +352,8 @@ pub fn vectors() -> Vec<Vector> {
             message: "We could not reach the durable store.".into(),
             retryable: true,
             detail: None,
-        }),
+        })
+        .unwrap(),
     });
 
     // The ingest package carries the same shared types. A vector from each
@@ -392,7 +401,8 @@ pub fn vectors() -> Vec<Vector> {
                         page_title: None,
                     },
                 )],
-            }),
+            })
+            .unwrap(),
         });
     }
 
@@ -416,7 +426,8 @@ pub fn vectors() -> Vec<Vector> {
             bytes: qc::encode_query_node_box(&query::node::scan(query::events(
                 &id(9),
                 range.clone(),
-            ))),
+            )))
+            .unwrap(),
         });
 
         out.push(Vector {
@@ -433,7 +444,8 @@ pub fn vectors() -> Vec<Vector> {
                 right: query::expression_ref(&query::expression::literal(control::write(
                     &Value::Text("/pricing".into()),
                 ))),
-            })),
+            }))
+            .unwrap(),
         });
 
         out.push(Vector {
@@ -445,7 +457,8 @@ pub fn vectors() -> Vec<Vector> {
                 query::events(&id(9), range),
                 60_000,
                 "events",
-            )),
+            ))
+            .unwrap(),
         });
     }
 

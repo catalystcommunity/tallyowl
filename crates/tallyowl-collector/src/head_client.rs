@@ -183,7 +183,8 @@ impl KeyDirectory for RemoteHead {
             "resolve-key",
             encode_resolve_key_request(&ResolveKeyRequest {
                 credential: credential.to_string(),
-            }),
+            })
+            .map_err(|e| TallyOwlError::unencodable("A key request", e))?,
         )?;
         if response.variant.as_deref() == Some(SERVICE_ERROR_VARIANT) {
             let error = decode_service_error(&response.payload).map_err(|e| {
@@ -222,7 +223,8 @@ impl crate::policy::PolicySource for RemoteHead {
             encode_fetch_policy_request(&FetchPolicyRequest {
                 source_id: source_id.to_vec(),
                 known_version,
-            }),
+            })
+            .map_err(|e| TallyOwlError::unencodable("A policy request", e))?,
         )?;
         if response.variant.as_deref() == Some(SERVICE_ERROR_VARIANT) {
             let error = decode_service_error(&response.payload).map_err(|e| {

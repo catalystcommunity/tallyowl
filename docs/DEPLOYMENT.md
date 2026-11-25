@@ -406,12 +406,22 @@ only when the installation has no domain.
 
 To set up `domain` mode:
 
-1. On the RP server, make a service account with the `api_access` relation.
-   The command shows the API key one time only.
+1. On the RP server, make an application account with the application ID
+   `tallyowl` and the `api_access` relation. The command shows the API key
+   one time only.
 
    ```sh
-   linkkeys user create tallyowl "TallyOwl" --api-key --relation api_access
+   linkkeys user create tallyowl "TallyOwl" --application-id tallyowl --relation api_access
    ```
+
+   From LinkKeys v0.16.11, only an application account can call
+   `Rp/sign-request`. The RP server names the application ID of the account
+   in each request that it signs. A person gives consent to each application
+   ID one time. If you upgrade from an earlier LinkKeys, its migration sets
+   the application ID of the account to the account username. Before, TallyOwl
+   sent the application ID `tallyowl`. If the username is not `tallyowl`, set
+   the application ID to `tallyowl` with `Admin/set-application-id`. If you do
+   not, each person must give consent again.
 
 2. Store the key in a Secret in the TallyOwl namespace. Do not put the key in
    a values file.

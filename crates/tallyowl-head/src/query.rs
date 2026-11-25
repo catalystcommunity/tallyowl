@@ -1425,7 +1425,7 @@ impl QueryService {
             // contract small, and this is where the views live rather than in
             // the store.
             .filter(|row| kind.is_none_or(|wanted| row.kind == wanted))
-            .filter(|row| keeps_derived(scan.scan.clone(), row))
+            .filter(|row| keeps_derived(scan.scan, row))
             .collect();
 
         Ok(Stage::Rows {
@@ -1482,7 +1482,8 @@ impl QueryService {
         };
         let project_id = to_id(&scan.project_id)?;
         let basis = to_basis(&scan.range.basis);
-        let plan = tallyowl_control_api::codec::encode_query_node_box(node);
+        let plan = tallyowl_control_api::codec::encode_query_node_box(node)
+            .map_err(|e| TallyOwlError::unencodable("The pushed-down plan", e))?;
         let Some(partials) = self
             .store
             .partial_aggregates(
@@ -1898,7 +1899,7 @@ impl QueryService {
             })
             .filter(|row| seen.insert(row.event_id))
             .filter(|row| kind.is_none_or(|wanted| row.kind == wanted))
-            .filter(|row| keeps_derived(scan.scan.clone(), row))
+            .filter(|row| keeps_derived(scan.scan, row))
             .collect();
 
         Ok(Some(Stage::Rows {
@@ -2157,7 +2158,7 @@ impl Accumulator {
                 merged: None,
                 misaligned: None,
             },
-            ref other => Accumulator::Unsupported(other.clone()),
+            ref other => Accumulator::Unsupported(*other),
         }
     }
 
@@ -2190,7 +2191,7 @@ impl Accumulator {
         let read = expr::Field {
             name: field.name.clone(),
             value_type: field.value_type.clone(),
-            origin: field.origin.clone(),
+            origin: field.origin,
         };
         let Some(value) = read.read(row).value().cloned() else {
             // A row with no value for this field contributes nothing. It does
@@ -2689,7 +2690,7 @@ fn field_of(dimension: &Dimension) -> expr::Field {
     expr::Field {
         name: dimension.field.name.clone(),
         value_type: dimension.field.value_type.clone(),
-        origin: dimension.field.origin.clone(),
+        origin: dimension.field.origin,
     }
 }
 

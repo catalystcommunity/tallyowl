@@ -1,4 +1,4 @@
-import type { AlertNotifyRequest, AlertNotifyResponse, AliasPayload, CampaignCostPayload, CampaignParameters, CampaignTouchPayload, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, Consent, ConversionPayload, Envelope, ErrorPayload, EventPayload, FeatureExposurePayload, GroupPayload, HistogramValue, IdentifyPayload, InteractionPayload, Measurement, MetricPointPayload, PageViewPayload, PolicyVersionRequest, PolicyVersionResponse, Property, RejectedItem, ServiceError, SessionEndPayload, SessionStartPayload, SpanLink, SpanPayload, StackFrame, TelemetryItem, TypedValue } from "./types.gen.ts";
+import type { AlertNotifyRequest, AlertNotifyResponse, AliasPayload, CampaignCostPayload, CampaignParameters, CampaignTouchPayload, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, Consent, ConversionPayload, Envelope, ErrorPayload, EventPayload, FeatureExposurePayload, GroupPayload, HistogramValue, IdentifyPayload, InteractionPayload, Measurement, MetricPointPayload, PageViewPayload, PolicyVersionRequest, PolicyVersionResponse, Property, RejectedItem, ServiceErrorType, SessionEndPayload, SessionStartPayload, SpanLink, SpanPayload, StackFrame, TelemetryItem, TypedValue } from "./types.gen.ts";
 /** A CBOR semantic tag wrapping an inner value (e.g. tag 0 timestamp, tag 4 decimal). */
 export type CborTag = {
     readonly tag: number;
@@ -20,6 +20,8 @@ export declare function asBytes(value: CborValue): Uint8Array;
 export declare function asBool(value: CborValue): boolean;
 export declare function asArray(value: CborValue): CborValue[];
 export declare function asMap(value: CborValue): Map<CborValue, CborValue>;
+/** A `{ * K => V }` map: its keys must arrive in canonical order (RFC 8949 section 4.2.1). */
+export declare function asDynamicMap(value: CborValue): Map<CborValue, CborValue>;
 /** A decoded integer may surface as `bigint` (see `decInto`'s large-value path), so a
  * numeric literal's expected `number` is compared against the `bigint`-normalized form
  * rather than failing on a type mismatch that isn't a value mismatch. */
@@ -27,6 +29,10 @@ export declare function asLiteral<T extends CborValue>(value: CborValue, expecte
 /** Validate a decoded scalar against a literal-enum's declared vocabulary, erroring
  * on an unknown value. The caller reads through `asNumber`/`asString`/`asBool`, which
  * already normalize a decoded `bigint` to `number`, so a plain membership check suffices. */
+/** CBOR orders unsigned integer keys first, then negative keys by magnitude. */
+export declare function enumNumberMap(entries: [bigint, CborValue][]): Map<CborValue, CborValue>;
+export declare function enumToNumber(label: string, entries: readonly (readonly [string, bigint])[]): bigint;
+export declare function enumFromNumber(value: CborValue, entries: readonly (readonly [string, bigint])[]): string;
 export declare function asEnumMember<T extends number | string | boolean | null>(value: T, members: readonly T[]): T;
 /** Read a decoded CBOR scalar without narrowing to one JS type, normalizing a
  * decoded integer `bigint` to `number` the same way `asNumber` does. Used for a
@@ -36,6 +42,14 @@ export declare function asEnumMember<T extends number | string | boolean | null>
 export declare function asEnumScalar(value: CborValue): string | number | boolean | null;
 /** Decode a tag-0 (RFC 3339, UTC) timestamp into a `Date`. */
 export declare function asTimestamp(value: CborValue): Date;
+/** Parse canonical tag-0 text strictly. `Date` holds milliseconds, so a nonzero digit
+ * past the third fraction digit is an error rather than a silent rounding. */
+export declare function csilTsFromText(text: string): Date;
+/** Decode tag-1 epoch seconds (`cddl_time`) into a `Date`. A `Date` holds
+ * milliseconds, so a float fraction is rounded to three digits by the shared rule. */
+export declare function asCddlTime(value: CborValue): Date;
+/** A `Date` as tag-1 content: whole seconds as an integer, else a binary64 float. */
+export declare function csilEpochFromDate(d: Date): number;
 /** Decode a tag-4 decimal fraction into its `[exponent, mantissa]` payload. */
 export declare function asDecimalPayload(value: CborValue): [number | bigint, number | bigint];
 /** A `Date` rendered as the canonical tag-0 text: RFC 3339, UTC, `Z` offset. */
@@ -176,7 +190,20 @@ export declare function toEnvelopeCborValue(v: Envelope): CborValue;
 export declare function fromEnvelopeCborValue(value: CborValue): Envelope;
 export declare function toEnvelopeCbor(v: Envelope): Uint8Array;
 export declare function fromEnvelopeCbor(bytes: Uint8Array): Envelope;
-export declare function toServiceErrorCborValue(v: ServiceError): CborValue;
-export declare function fromServiceErrorCborValue(value: CborValue): ServiceError;
-export declare function toServiceErrorCbor(v: ServiceError): Uint8Array;
-export declare function fromServiceErrorCbor(bytes: Uint8Array): ServiceError;
+export declare function toServiceErrorTypeCborValue(v: ServiceErrorType): CborValue;
+export declare function fromServiceErrorTypeCborValue(value: CborValue): ServiceErrorType;
+export declare function toServiceErrorTypeCbor(v: ServiceErrorType): Uint8Array;
+export declare function fromServiceErrorTypeCbor(bytes: Uint8Array): ServiceErrorType;
+export interface RpcReply {
+    variant: string;
+    payload: Uint8Array;
+}
+export declare class ServiceErrorTypeRefusal extends Error {
+    readonly value: ServiceErrorType;
+    constructor(value: ServiceErrorType);
+}
+export declare function encodeTallyOwlIngestCaptureReply(handler: () => Promise<CaptureResponse> | CaptureResponse): Promise<RpcReply>;
+export declare function encodeTallyOwlIngestCaptureCriticalReply(handler: () => Promise<CaptureCriticalResponse> | CaptureCriticalResponse): Promise<RpcReply>;
+export declare function encodeTallyOwlIngestPolicyVersionReply(handler: () => Promise<PolicyVersionResponse> | PolicyVersionResponse): Promise<RpcReply>;
+export declare function encodeTallyOwlAlertReceiverNotifyReply(handler: () => Promise<AlertNotifyResponse> | AlertNotifyResponse): Promise<RpcReply>;
+export declare function resolveRpcReply(service: string, op: string, variant: string | null | undefined, payload: Uint8Array): Uint8Array;

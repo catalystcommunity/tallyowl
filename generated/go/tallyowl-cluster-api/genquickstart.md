@@ -49,15 +49,16 @@ type HTTPRpcCarrier struct {
 	HTTP    *http.Client // optional; defaults to http.DefaultClient
 }
 
-func (t *HTTPRpcCarrier) Call(ctx context.Context, service, op string, req []byte) ([]byte, error) {
+func (t *HTTPRpcCarrier) exchange(ctx context.Context, service, op string, req []byte) (transport.RpcResponse, error) {
+	var none transport.RpcResponse
 	envelope, err := transport.NewRpcRequest(service, op, req).Encode()
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	url := strings.TrimRight(t.BaseURL, "/") + "/csil/v1/rpc"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envelope))
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	httpReq.Header.Set("Content-Type", "application/cbor")
 	httpReq.Header.Set("Accept", "application/cbor")
@@ -67,35 +68,40 @@ func (t *HTTPRpcCarrier) Call(ctx context.Context, service, op string, req []byt
 	}
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	defer httpResp.Body.Close()
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return nil, fmt.Errorf("csil-rpc %s/%s: http %d", service, op, httpResp.StatusCode)
+		return none, fmt.Errorf("csil-rpc %s/%s: http %d", service, op, httpResp.StatusCode)
 	}
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	resp, err := transport.DecodeRpcResponse(body)
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	// AsTransportError returns a StatusError for any non-zero transport status.
 	if err := resp.AsTransportError(); err != nil {
-		return nil, err
+		return none, err
 	}
-	// A typed application error rides as a status-0 "ServiceError" variant — distinct
-	// from a transport failure. Surface it so the typed client decodes success only.
-	if resp.Variant != nil && *resp.Variant == "ServiceError" {
-		return nil, fmt.Errorf("csil-rpc %s/%s: ServiceError", service, op)
-	}
-	return resp.Payload, nil
+	return resp, nil
+}
+
+func (t *HTTPRpcCarrier) Call(ctx context.Context, service, op string, req []byte) ([]byte, error) {
+	resp, err := t.exchange(ctx, service, op, req)
+	return resp.Payload, err
+}
+
+func (t *HTTPRpcCarrier) CallReply(ctx context.Context, service, op string, req []byte) (api.WireReply, error) {
+	resp, err := t.exchange(ctx, service, op, req)
+	return api.WireReply{Variant: resp.Variant, Payload: resp.Payload}, err
 }
 
 func main() {
 	client := api.NewTallyOwlReplicationClient(&HTTPRpcCarrier{BaseURL: "http://localhost:5080"})
-	resp, err := client.DeliverConsensus(context.Background(), api.ConsensusMessage{Group: api.GroupRef{}, Payload: nil})
+	resp, err := client.DeliverConsensus(context.Background(), api.ConsensusMessage{Group: api.GroupRef{Kind: "global-directory"}, Kind: "append-entries", Payload: nil})
 	if err != nil {
 		panic(err)
 	}
@@ -252,9 +258,13 @@ func openUDPCarrier(addr string) (transport.DatagramCarrier, error) {
 // response type MAY arrive later — or never — so the caller must tolerate loss and
 // reordering.
 func runDatagrams(carrier transport.DatagramCarrier) error {
-	req := api.ConsensusMessage{Group: api.GroupRef{}, Payload: nil}
+	req := api.ConsensusMessage{Group: api.GroupRef{Kind: "global-directory"}, Kind: "append-entries", Payload: nil}
+	payload, err := api.EncodeConsensusMessage(req)
+	if err != nil {
+		return err
+	}
 	// seq 0 marks an unsequenced datagram.
-	datagram, err := transport.NewDatagram(opOrd, 0, api.EncodeConsensusMessage(req)).Encode()
+	datagram, err := transport.NewDatagram(opOrd, 0, payload).Encode()
 	if err != nil {
 		return err
 	}

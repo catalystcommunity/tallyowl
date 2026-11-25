@@ -120,7 +120,7 @@ fn edit_scan(request: &mut QueryRequest, change: impl FnOnce(&mut ScanNode)) {
     let mut boxed = decode_query_node_box(&aggregate.input).expect("the child decodes");
     assert_eq!(boxed.node, QueryNodeKind::Scan, "a trend query scans");
     change(boxed.scan.as_mut().expect("the scan"));
-    aggregate.input = encode_query_node_box(&boxed);
+    aggregate.input = encode_query_node_box(&boxed).unwrap();
     put_aggregate(request, aggregate);
 }
 

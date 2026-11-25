@@ -9,6 +9,9 @@ import (
 
 // ValidateEventPayload validates the EventPayload struct
 func (v *EventPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("EventPayload is nil")
+	}
 	if len(v.Name) < 1 {
 		return fmt.Errorf("field 'Name' must have at least 1 elements")
 	}
@@ -40,6 +43,9 @@ func (v *EventPayload) Validate() error {
 
 // ValidatePageViewPayload validates the PageViewPayload struct
 func (v *PageViewPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("PageViewPayload is nil")
+	}
 	if len(v.Route) < 1 {
 		return fmt.Errorf("field 'Route' must have at least 1 elements")
 	}
@@ -71,6 +77,9 @@ func (v *PageViewPayload) Validate() error {
 
 // ValidateCampaignParameters validates the CampaignParameters struct
 func (v *CampaignParameters) Validate() error {
+	if v == nil {
+		return fmt.Errorf("CampaignParameters is nil")
+	}
 	if v.Source != nil {
 		if len((*v.Source)) < 1 {
 			return fmt.Errorf("field 'Source' must have at least 1 elements")
@@ -136,6 +145,9 @@ func (v *CampaignParameters) Validate() error {
 
 // ValidateSessionStartPayload validates the SessionStartPayload struct
 func (v *SessionStartPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("SessionStartPayload is nil")
+	}
 	if v.EntryRoute != nil {
 		if len((*v.EntryRoute)) < 1 {
 			return fmt.Errorf("field 'EntryRoute' must have at least 1 elements")
@@ -151,6 +163,9 @@ func (v *SessionStartPayload) Validate() error {
 
 // ValidateInteractionPayload validates the InteractionPayload struct
 func (v *InteractionPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("InteractionPayload is nil")
+	}
 	if len(v.Target) < 1 {
 		return fmt.Errorf("field 'Target' must have at least 1 elements")
 	}
@@ -168,6 +183,9 @@ func (v *InteractionPayload) Validate() error {
 
 // ValidateFeatureExposurePayload validates the FeatureExposurePayload struct
 func (v *FeatureExposurePayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("FeatureExposurePayload is nil")
+	}
 	if len(v.Feature) < 1 {
 		return fmt.Errorf("field 'Feature' must have at least 1 elements")
 	}
@@ -185,6 +203,9 @@ func (v *FeatureExposurePayload) Validate() error {
 
 // ValidateIdentifyPayload validates the IdentifyPayload struct
 func (v *IdentifyPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("IdentifyPayload is nil")
+	}
 	if len(v.EndUserId) < 1 {
 		return fmt.Errorf("field 'EndUserId' must have at least 1 elements")
 	}
@@ -196,6 +217,9 @@ func (v *IdentifyPayload) Validate() error {
 
 // ValidateAliasPayload validates the AliasPayload struct
 func (v *AliasPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("AliasPayload is nil")
+	}
 	if len(v.FromId) < 1 {
 		return fmt.Errorf("field 'FromId' must have at least 1 elements")
 	}
@@ -213,6 +237,9 @@ func (v *AliasPayload) Validate() error {
 
 // ValidateGroupPayload validates the GroupPayload struct
 func (v *GroupPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("GroupPayload is nil")
+	}
 	if len(v.GroupId) < 1 {
 		return fmt.Errorf("field 'GroupId' must have at least 1 elements")
 	}
@@ -234,6 +261,9 @@ func (v *GroupPayload) Validate() error {
 
 // ValidateConversionPayload validates the ConversionPayload struct
 func (v *ConversionPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("ConversionPayload is nil")
+	}
 	if len(v.Goal) < 1 {
 		return fmt.Errorf("field 'Goal' must have at least 1 elements")
 	}
@@ -265,6 +295,9 @@ func (v *ConversionPayload) Validate() error {
 
 // ValidateStackFrame validates the StackFrame struct
 func (v *StackFrame) Validate() error {
+	if v == nil {
+		return fmt.Errorf("StackFrame is nil")
+	}
 	if v.Module != nil {
 		if len((*v.Module)) < 1 {
 			return fmt.Errorf("field 'Module' must have at least 1 elements")
@@ -300,6 +333,9 @@ func (v *StackFrame) Validate() error {
 
 // ValidateErrorPayload validates the ErrorPayload struct
 func (v *ErrorPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("ErrorPayload is nil")
+	}
 	if len(v.ErrorType) < 1 {
 		return fmt.Errorf("field 'ErrorType' must have at least 1 elements")
 	}
@@ -337,6 +373,9 @@ func (v *ErrorPayload) Validate() error {
 
 // ValidateSpanPayload validates the SpanPayload struct
 func (v *SpanPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("SpanPayload is nil")
+	}
 	if len(v.Operation) < 1 {
 		return fmt.Errorf("field 'Operation' must have at least 1 elements")
 	}
@@ -368,6 +407,9 @@ func (v *SpanPayload) Validate() error {
 
 // ValidateMetricPointPayload validates the MetricPointPayload struct
 func (v *MetricPointPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("MetricPointPayload is nil")
+	}
 	if len(v.MetricName) < 1 {
 		return fmt.Errorf("field 'MetricName' must have at least 1 elements")
 	}
@@ -399,6 +441,9 @@ func (v *MetricPointPayload) Validate() error {
 
 // ValidateCampaignTouchPayload validates the CampaignTouchPayload struct
 func (v *CampaignTouchPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("CampaignTouchPayload is nil")
+	}
 	if v.Referrer != nil {
 		if len((*v.Referrer)) < 1 {
 			return fmt.Errorf("field 'Referrer' must have at least 1 elements")
@@ -434,6 +479,9 @@ func (v *CampaignTouchPayload) Validate() error {
 
 // ValidateCampaignCostPayload validates the CampaignCostPayload struct
 func (v *CampaignCostPayload) Validate() error {
+	if v == nil {
+		return fmt.Errorf("CampaignCostPayload is nil")
+	}
 	if len(v.Campaign) < 1 {
 		return fmt.Errorf("field 'Campaign' must have at least 1 elements")
 	}
@@ -461,6 +509,9 @@ func (v *CampaignCostPayload) Validate() error {
 
 // ValidateAlertNotifyRequest validates the AlertNotifyRequest struct
 func (v *AlertNotifyRequest) Validate() error {
+	if v == nil {
+		return fmt.Errorf("AlertNotifyRequest is nil")
+	}
 	if len(v.Signature) < 64 {
 		return fmt.Errorf("field 'Signature' must have at least 64 elements")
 	}
@@ -478,6 +529,9 @@ func (v *AlertNotifyRequest) Validate() error {
 
 // ValidateProperty validates the Property struct
 func (v *Property) Validate() error {
+	if v == nil {
+		return fmt.Errorf("Property is nil")
+	}
 	if len(v.Key) < 1 {
 		return fmt.Errorf("field 'Key' must have at least 1 elements")
 	}
@@ -489,6 +543,9 @@ func (v *Property) Validate() error {
 
 // ValidateMeasurement validates the Measurement struct
 func (v *Measurement) Validate() error {
+	if v == nil {
+		return fmt.Errorf("Measurement is nil")
+	}
 	if len(v.Key) < 1 {
 		return fmt.Errorf("field 'Key' must have at least 1 elements")
 	}
@@ -510,6 +567,9 @@ func (v *Measurement) Validate() error {
 
 // ValidateConsent validates the Consent struct
 func (v *Consent) Validate() error {
+	if v == nil {
+		return fmt.Errorf("Consent is nil")
+	}
 	if v.PolicyVersion != nil {
 		if len((*v.PolicyVersion)) < 1 {
 			return fmt.Errorf("field 'PolicyVersion' must have at least 1 elements")
@@ -525,6 +585,9 @@ func (v *Consent) Validate() error {
 
 // ValidateEnvelope validates the Envelope struct
 func (v *Envelope) Validate() error {
+	if v == nil {
+		return fmt.Errorf("Envelope is nil")
+	}
 	if v.Release != nil {
 		if len((*v.Release)) < 1 {
 			return fmt.Errorf("field 'Release' must have at least 1 elements")

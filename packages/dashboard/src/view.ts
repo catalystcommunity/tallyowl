@@ -14,7 +14,9 @@
 // How they look is in `static/dashboard.css`; these functions only give each
 // part a class.
 
+import type { TableView } from "@catalystcommunity/data-views";
 import { type ResultRow, type TypedValue } from "./control-api.ts";
+import * as time from "./time.ts";
 
 /// One point of the trend: the bucket's start, and how many events it holds.
 export interface Point {
@@ -57,11 +59,49 @@ export interface Range {
   readonly start: number;
   readonly end: number;
   readonly bucketMs: number;
+  /// True (the default) when the range ends now, so the last bucket is not
+  /// over yet.
+  readonly live?: boolean;
+  /// Set when the person chose days. Absent, the range is the rolling last
+  /// 24 hours.
+  readonly days?: string;
+  /// The clock that the text uses. The default is the time of the browser.
+  readonly clock?: time.Clock;
+}
+
+const BROWSER_CLOCK: time.Clock = { timeZone: undefined, label: "browser time" };
+
+function clockOf(range: Range): time.Clock {
+  return range.clock ?? BROWSER_CLOCK;
+}
+
+function isLive(range: Range): boolean {
+  return range.live ?? true;
+}
+
+function byDay(range: Range): boolean {
+  return range.bucketMs >= time.DAY_MS;
+}
+
+/// "hour" or "day": what one bar holds.
+function bucketWord(range: Range): string {
+  return byDay(range) ? "day" : "hour";
+}
+
+/// The time a bucket starts, as a person reads it. A day bucket is a UTC day.
+function bucketText(at: number, range: Range): string {
+  if (byDay(range)) return `${time.utcDay(at)} (UTC)`;
+  return range.end - range.start > time.DAY_MS ? time.dayAndTime(at, clockOf(range)) : time.timeOfDay(at, clockOf(range));
+}
+
+/// What the charts cover, in words.
+function rangeText(range: Range): string {
+  if (range.days === undefined) return `the last ${hoursIn(range)} hours`;
+  return time.dayRangeText({ ...range, live: isLive(range) });
 }
 
 const WHOLE = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 const RATE = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 3 });
-const CLOCK = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 
 /// A count as a person reads it, with the separators of their locale.
 export function whole(value: number): string {
@@ -74,7 +114,10 @@ export function whole(value: number): string {
 /// drawing nothing at all: "no data" and "the chart is broken" must not look
 /// the same.
 export function eventPanel(points: Point[], range: Range): HTMLElement {
-  const section = panel("events", `Events in the last ${hoursIn(range)} hours`);
+  const section = panel(
+    "events",
+    range.days === undefined ? `Events in the last ${hoursIn(range)} hours` : `Events, ${rangeText(range)}`,
+  );
   const total = points.reduce((sum, point) => sum + point.count, 0);
   const peak = Math.max(0, ...points.map((point) => point.count));
 
@@ -89,7 +132,11 @@ export function eventPanel(points: Point[], range: Range): HTMLElement {
   }
   section.append(frame, timeAxis(range));
   if (peak > 0) {
-    section.append(element("p", "chart-caption", `The busiest hour had ${whole(peak)} ${peak === 1 ? "event" : "events"}. The last bar is the current hour, which is not over yet.`));
+    const unit = bucketWord(range);
+    const busiest = `The busiest ${unit} had ${whole(peak)} ${peak === 1 ? "event" : "events"}.`;
+    const last = isLive(range) ? ` The last bar is the current ${unit}, which is not over yet.` : "";
+    const days = byDay(range) ? " Each bar is one UTC day." : "";
+    section.append(element("p", "chart-caption", busiest + last + days));
   }
   return section;
 }
@@ -115,7 +162,7 @@ export function barChart(points: Point[], range: Range): SVGElement {
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "Events for each hour");
+  svg.setAttribute("aria-label", `Events for each ${bucketWord(range)}`);
   svg.append(gridLine(0, width), gridLine(height / 2, width), gridLine(height - 0.5, width, "baseline"));
 
   const highest = Math.max(1, ...points.map((point) => point.count));
@@ -125,13 +172,13 @@ export function barChart(points: Point[], range: Range): SVGElement {
     // A bucket with one event in it still gets a bar a person can see.
     const barHeight = Math.max(1.5, (point.count / highest) * (height - 4));
     const bar = svgElement("rect");
-    bar.setAttribute("class", slot === slots - 1 ? "bar current" : "bar");
+    bar.setAttribute("class", slot === slots - 1 && isLive(range) ? "bar current" : "bar");
     bar.setAttribute("x", String(slot * slotWidth + 1.5));
     bar.setAttribute("width", String(slotWidth - 3));
     bar.setAttribute("y", (height - barHeight).toFixed(2));
     bar.setAttribute("height", barHeight.toFixed(2));
     const title = svgElement("title");
-    title.textContent = `${CLOCK.format(point.at)}: ${whole(point.count)} ${point.count === 1 ? "event" : "events"}`;
+    title.textContent = `${bucketText(point.at, range)}: ${whole(point.count)} ${point.count === 1 ? "event" : "events"}`;
     bar.append(title);
     svg.append(bar);
   }
@@ -194,8 +241,8 @@ export function timeAxis(range: Range): HTMLElement {
   axis.setAttribute("aria-hidden", "true");
   const marks = 4;
   for (let mark = 0; mark <= marks; mark += 1) {
-    const time = range.start + ((range.end - range.start) * mark) / marks;
-    axis.append(element("span", "", mark === marks ? "Now" : CLOCK.format(time)));
+    const at = range.start + ((range.end - range.start) * mark) / marks;
+    axis.append(element("span", "", mark === marks && isLive(range) ? "Now" : bucketText(at, range)));
   }
   return axis;
 }
@@ -234,10 +281,12 @@ export function healthStatus(report: HealthReport | undefined): HTMLElement {
 export function statusBar(report: HealthReport | undefined, range: Range, drawnAt: number): HTMLElement {
   const bar = element("status-bar", "footer");
   bar.setAttribute("label", "Status");
-  const span = element("status-pane", "", `Last ${hoursIn(range)} hours, by hour`);
-  const drawn = element("status-pane", "", `Drawn at ${CLOCK.format(drawnAt)}`);
+  const covered = range.days === undefined ? `Last ${hoursIn(range)} hours` : rangeText(range);
+  const span = element("status-pane", "", `${covered}, by ${bucketWord(range)}`);
+  const drawn = element("status-pane", "", `Drawn at ${time.timeOfDay(drawnAt, clockOf(range))}`);
   drawn.setAttribute("stretch", "");
-  bar.append(healthStatus(report), span, drawn);
+  const clock = element("status-pane", "clock", `Times in ${clockOf(range).label}`);
+  bar.append(healthStatus(report), span, drawn, clock);
   return bar;
 }
 
@@ -314,6 +363,79 @@ export function topBar(options: {
 /// Where the owl mark is. The build puts it beside the bundle.
 export const OWL = "/assets/app/owl.svg";
 
+/// The bar above the charts: the days they cover, and the clock of the page.
+///
+/// The days are a Zest date range picker. An empty picker is the rolling last
+/// 24 hours, which is what the page shows first. The picker reads UTC days for
+/// every viewer, so two people who choose the same days see the same numbers.
+/// The clock changes only how the times on the page are written.
+///
+/// The clock is one editable list: the time of the browser, UTC, and each zone
+/// the browser knows. A person types "Berl" and picks Europe/Berlin. The choice
+/// is stored on their account.
+export function chartControls(options: {
+  readonly days: string | undefined;
+  readonly clock: time.Clock;
+  readonly choice: string;
+  readonly zones: readonly string[];
+  readonly now: number;
+  readonly onDays: (days: string | undefined) => void;
+  readonly onClock: (choice: string) => void;
+}): HTMLElement {
+  const bar = element("div", "chart-controls");
+
+  const picker = element("date-time-picker", "days");
+  picker.setAttribute("mode", "date");
+  picker.setAttribute("selection", "range");
+  picker.setAttribute("name", "days");
+  picker.setAttribute("label", "Days to show (UTC)");
+  picker.setAttribute("placeholder", "Last 24 hours");
+  // Chosen days are UTC days for every viewer (see `time.chosenDays`), so the
+  // picker's "today" and its presets are UTC dates too.
+  picker.setAttribute("max", time.utcToday(options.now));
+  picker.setAttribute("time-zone", "UTC");
+  if (options.days !== undefined) picker.setAttribute("value", options.days);
+  // Presets are functions, so they are data and not an attribute. A test with
+  // no component class has no `updateConfig`.
+  const configurable = picker as HTMLElement & { updateConfig?: (config: unknown) => void };
+  if (typeof configurable.updateConfig === "function") {
+    configurable.updateConfig({ presets: time.dayPresets() });
+  }
+  picker.addEventListener("date-changed", (event) => {
+    const value = (event as CustomEvent<{ value?: string }>).detail?.value ?? "";
+    options.onDays(value.length > 0 ? value : undefined);
+  });
+
+  const chooser = chooserOf(
+    "clock",
+    "Show times in",
+    [
+      { value: time.BROWSER_CHOICE, label: `Browser time (${time.browserZone()})` },
+      { value: time.UTC_CHOICE, label: "UTC" },
+      ...options.zones.map((zone) => ({ value: zone, label: zone })),
+    ],
+    options.choice,
+  );
+  chooser.setAttribute("editable", "");
+  chooser.addEventListener("change", () => {
+    const chosen = valueOf(chooser).trim();
+    if (chosen.length > 0 && chosen !== options.choice) options.onClock(chosen);
+  });
+
+  bar.append(labelled("Days", "for-days", picker), labelled("Times", "for-clock", chooser));
+  return bar;
+}
+
+/// A small caption before a control. The control keeps its own accessible
+/// name; this text is for the eye.
+function labelled(caption: string, kind: string, control: HTMLElement): HTMLElement {
+  const group = element("div", `control-group ${kind}`);
+  const text = element("span", "control-caption", caption);
+  text.setAttribute("aria-hidden", "true");
+  group.append(text, control);
+  return group;
+}
+
 /// A Zest combo box that chooses one of a few values.
 ///
 /// The options and the value are attributes, not properties: an attribute
@@ -360,24 +482,24 @@ export function breakdown(columns: string[], rows: ResultRow[]): HTMLElement {
   }
 
   const highest = Math.max(1, ...entries.map((entry) => entry.count));
-  const table = element("table-view", "ranked") as TableView;
+  const table = element("table-view", "ranked") as TableView<RankedEntry>;
   table.setAttribute("label", "Top events");
-  table.keyOf = (entry) => (entry as { name: string }).name;
+  table.keyOf = (entry) => entry.name;
   table.columns = [
     {
       key: "name",
       label: "Event",
       width: 240,
-      sortValue: (entry: { name: string }) => entry.name,
+      sortValue: (entry) => entry.name,
       // The view reuses a cell for another row, so this replaces what the
       // cell held and adds nothing that stays.
-      render: (cell: HTMLElement, value: unknown, entry: { count: number }) => {
+      render: (cell, value, entry) => {
         const line = element("span", "event");
         line.append(element("span", "event-name", String(value)), share(entry.count / highest));
         cell.replaceChildren(line);
       },
     },
-    { key: "count", label: "Count", type: "number", width: COUNT_WIDTH, format: (value: number) => whole(value) },
+    { key: "count", label: "Count", type: "number", width: COUNT_WIDTH, format: (value) => whole(Number(value)) },
   ];
   table.items = entries;
   fitFirstColumn(table);
@@ -387,21 +509,22 @@ export function breakdown(columns: string[], rows: ResultRow[]): HTMLElement {
 
 const COUNT_WIDTH = 96;
 
-/// What the dashboard sets on a Zest table view.
-interface TableView extends HTMLElement {
-  keyOf: (item: unknown) => unknown;
-  columns: unknown[];
-  items: unknown[];
-  setColumnWidth?: (index: number, width: number) => void;
+/// One row of the top-events table.
+interface RankedEntry {
+  readonly name: string;
+  readonly count: number;
 }
 
 /// Give the event column the width of the table that the count does not use.
-function fitFirstColumn(table: TableView): void {
+///
+/// The method is optional here because a test without a browser has no
+/// component class, so the element there is a plain element.
+function fitFirstColumn(table: TableView<RankedEntry>): void {
   if (typeof ResizeObserver === "undefined") return;
   new ResizeObserver(([entry]) => {
     // The rows add a 0.25em selection bar at their start, about 4px.
     const width = Math.floor(entry.contentRect.width) - COUNT_WIDTH - 5;
-    table.setColumnWidth?.(0, Math.max(160, width));
+    if (typeof table.setColumnWidth === "function") table.setColumnWidth(0, Math.max(160, width));
   }).observe(table);
 }
 
@@ -461,7 +584,7 @@ export function metricPanel(
   const summary = element("p", "summary");
   const latest = points.at(-1);
   if (latest !== undefined) {
-    summary.append(element("strong", "", RATE.format(latest.count)), element("span", "", " each second, latest hour"));
+    summary.append(element("strong", "", RATE.format(latest.count)), element("span", "", ` each second, latest ${bucketWord(range)}`));
   } else {
     summary.append(element("span", "", "Each second"));
   }
@@ -726,7 +849,7 @@ const ALERT_MEANING: Readonly<Record<string, string>> = {
 };
 
 /// The alert list.
-export function alertList(alerts: readonly AlertRow[]): HTMLElement {
+export function alertList(alerts: readonly AlertRow[], clock: time.Clock = BROWSER_CLOCK): HTMLElement {
   const section = document.createElement("section");
   section.className = "alerts";
   const heading = document.createElement("h2");
@@ -749,7 +872,7 @@ export function alertList(alerts: readonly AlertRow[]): HTMLElement {
     row.append(
       cell(alert.name),
       cell(alert.state),
-      cell(new Date(alert.since).toISOString()),
+      cell(time.instant(alert.since, clock)),
       // An absent value is not a zero. A `no-data` alert has no value at all,
       // and drawing a zero would say the measure was zero.
       cell(alert.observedValue === undefined ? "—" : String(alert.observedValue)),
@@ -838,7 +961,7 @@ export interface DeliveryRow {
   readonly at: number;
 }
 
-export function deliveryList(deliveries: readonly DeliveryRow[]): HTMLElement {
+export function deliveryList(deliveries: readonly DeliveryRow[], clock: time.Clock = BROWSER_CLOCK): HTMLElement {
   const section = document.createElement("section");
   section.className = "deliveries";
   const heading = document.createElement("h2");
@@ -859,7 +982,7 @@ export function deliveryList(deliveries: readonly DeliveryRow[]): HTMLElement {
     const row = document.createElement("tr");
     row.setAttribute("data-delivered", String(delivery.delivered));
     row.append(
-      cell(new Date(delivery.at).toISOString()),
+      cell(time.instant(delivery.at, clock)),
       cell(delivery.ruleId),
       cell(delivery.target),
       cell(String(delivery.attempts)),

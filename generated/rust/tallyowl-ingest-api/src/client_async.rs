@@ -12,6 +12,16 @@ use super::types::*;
 /// only moves bytes, so it can be HTTP, a queue, or an in-process loop.
 pub trait AsyncTransport {
     async fn call(&self, service: &str, op: &str, req: &[u8]) -> Result<Vec<u8>, ClientError>;
+
+    /// Perform a call whose operation declares several reply arms and return
+    /// the status-zero reply `variant` with its payload, so the client can
+    /// return the success arm or the declared error arm.
+    async fn call_reply(
+        &self,
+        service: &str,
+        op: &str,
+        req: &[u8],
+    ) -> Result<super::client::WireReply, ClientError>;
 }
 
 /// Typed client for the TallyOwlIngest service.
@@ -27,11 +37,21 @@ impl<T: AsyncTransport> TallyOwlIngestAsyncClient<T> {
 
     /// Accept telemetry on the application's existing connection. Best effort.
     pub async fn capture(&self, req: CaptureRequest) -> Result<CaptureResponse, ClientError> {
-        let csil_resp = self
+        let csil_req = match encode_capture_request(&req) {
+            Ok(csil_bytes) => csil_bytes,
+            Err(e) => return Err(ClientError::Encode(e.to_string())),
+        };
+        let csil_reply = self
             .transport
-            .call("TallyOwlIngest", "capture", &encode_capture_request(&req))
+            .call_reply("TallyOwlIngest", "capture", &csil_req)
             .await?;
-        decode_capture_response(&csil_resp).map_err(|e| ClientError::Transport(e.to_string()))
+        let csil_resp = super::client::resolve_rpc_reply(
+            "TallyOwlIngest",
+            "capture",
+            csil_reply.variant.as_deref(),
+            csil_reply.payload,
+        )?;
+        decode_capture_response(&csil_resp).map_err(|e| ClientError::Decode(e.to_string()))
     }
 
     /// Accept telemetry and wait for the collector durability boundary.
@@ -39,16 +59,21 @@ impl<T: AsyncTransport> TallyOwlIngestAsyncClient<T> {
         &self,
         req: CaptureCriticalRequest,
     ) -> Result<CaptureCriticalResponse, ClientError> {
-        let csil_resp = self
+        let csil_req = match encode_capture_critical_request(&req) {
+            Ok(csil_bytes) => csil_bytes,
+            Err(e) => return Err(ClientError::Encode(e.to_string())),
+        };
+        let csil_reply = self
             .transport
-            .call(
-                "TallyOwlIngest",
-                "capture-critical",
-                &encode_capture_critical_request(&req),
-            )
+            .call_reply("TallyOwlIngest", "capture-critical", &csil_req)
             .await?;
-        decode_capture_critical_response(&csil_resp)
-            .map_err(|e| ClientError::Transport(e.to_string()))
+        let csil_resp = super::client::resolve_rpc_reply(
+            "TallyOwlIngest",
+            "capture-critical",
+            csil_reply.variant.as_deref(),
+            csil_reply.payload,
+        )?;
+        decode_capture_critical_response(&csil_resp).map_err(|e| ClientError::Decode(e.to_string()))
     }
 
     /// Report the collection policy that the client must apply.
@@ -56,16 +81,21 @@ impl<T: AsyncTransport> TallyOwlIngestAsyncClient<T> {
         &self,
         req: PolicyVersionRequest,
     ) -> Result<PolicyVersionResponse, ClientError> {
-        let csil_resp = self
+        let csil_req = match encode_policy_version_request(&req) {
+            Ok(csil_bytes) => csil_bytes,
+            Err(e) => return Err(ClientError::Encode(e.to_string())),
+        };
+        let csil_reply = self
             .transport
-            .call(
-                "TallyOwlIngest",
-                "policy-version",
-                &encode_policy_version_request(&req),
-            )
+            .call_reply("TallyOwlIngest", "policy-version", &csil_req)
             .await?;
-        decode_policy_version_response(&csil_resp)
-            .map_err(|e| ClientError::Transport(e.to_string()))
+        let csil_resp = super::client::resolve_rpc_reply(
+            "TallyOwlIngest",
+            "policy-version",
+            csil_reply.variant.as_deref(),
+            csil_reply.payload,
+        )?;
+        decode_policy_version_response(&csil_resp).map_err(|e| ClientError::Decode(e.to_string()))
     }
 }
 
@@ -85,14 +115,20 @@ impl<T: AsyncTransport> TallyOwlAlertReceiverAsyncClient<T> {
         &self,
         req: AlertNotifyRequest,
     ) -> Result<AlertNotifyResponse, ClientError> {
-        let csil_resp = self
+        let csil_req = match encode_alert_notify_request(&req) {
+            Ok(csil_bytes) => csil_bytes,
+            Err(e) => return Err(ClientError::Encode(e.to_string())),
+        };
+        let csil_reply = self
             .transport
-            .call(
-                "TallyOwlAlertReceiver",
-                "notify",
-                &encode_alert_notify_request(&req),
-            )
+            .call_reply("TallyOwlAlertReceiver", "notify", &csil_req)
             .await?;
-        decode_alert_notify_response(&csil_resp).map_err(|e| ClientError::Transport(e.to_string()))
+        let csil_resp = super::client::resolve_rpc_reply(
+            "TallyOwlAlertReceiver",
+            "notify",
+            csil_reply.variant.as_deref(),
+            csil_reply.payload,
+        )?;
+        decode_alert_notify_response(&csil_resp).map_err(|e| ClientError::Decode(e.to_string()))
     }
 }

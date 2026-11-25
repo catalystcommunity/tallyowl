@@ -60,6 +60,15 @@ TARGETS = ("rust", "go", "typescript")
 CSILGEN_TRANSPORT_TAG = "transport-typescript/v0.2.0"
 
 
+#: Written beside the generated Rust crates. rustfmt reads the nearest
+#: configuration file, so this one applies to the generated code only.
+RUSTFMT_OFF = (
+    "# Written by `./tools.sh gen`. The generated code is compared with the\n"
+    "# generator output, so rustfmt must not change it.\n"
+    "disable_all_formatting = true\n"
+)
+
+
 def csilgen_program() -> str:
     """The pinned generator, fetched if this is the first run."""
     from . import deps
@@ -104,6 +113,13 @@ def generate(into: Path | None = None) -> Path:
                 cwd=CSIL_DIR,
                 quiet=True,
             )
+    # rustfmt must not rewrite the generated Rust. csilgen 0.2.15 wrote some
+    # lines that are not in rustfmt style, `./tools.sh fmt` formats the whole
+    # workspace, and `gen-check` then failed on code that nobody changed. The
+    # 0.3.0 output is in rustfmt style, but the file stays, so that a release
+    # that is not cannot break the drift check again. Generated code is
+    # compared with the generator, not formatted.
+    (destination / "rust" / "rustfmt.toml").write_text(RUSTFMT_OFF)
     say("Generated.")
     return destination
 

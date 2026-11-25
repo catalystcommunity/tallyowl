@@ -575,7 +575,8 @@ impl SegmentReader for PeerSegments {
         use tallyowl_cluster_api::codec::{decode_segment_list, encode_segment_list_request};
         let payload = encode_segment_list_request(&SegmentListRequest {
             tablet: tablet.to_string(),
-        });
+        })
+        .map_err(|e| TallyOwlError::unencodable("A segment list request", e))?;
         let answer = self.call("list-segments", payload)?;
         decode_segment_list(&answer)
             .map_err(|e| TallyOwlError::internal(format!("A segment list could not be read: {e}")))
@@ -596,7 +597,8 @@ impl SegmentReader for PeerSegments {
             segment_id: segment_id.to_string(),
             offset,
             max_bytes,
-        });
+        })
+        .map_err(|e| TallyOwlError::unencodable("A segment transfer request", e))?;
         let answer = self.call("fetch-segment", payload)?;
         decode_segment_transfer(&answer).map_err(|e| {
             TallyOwlError::internal(format!("A segment transfer could not be read: {e}"))

@@ -108,6 +108,8 @@ impl Dispatcher for HeadService {
             (CONTROL_SERVICE, "list-workflows") => self.list_workflows(request),
             (CONTROL_SERVICE, "run-workflow") => self.run_workflow(request),
             (CONTROL_SERVICE, "list-notifications") => self.list_notifications(request),
+            (CONTROL_SERVICE, "get-user-preferences") => self.get_user_preferences(request),
+            (CONTROL_SERVICE, "put-user-preferences") => self.put_user_preferences(request),
             (COLLECTOR_SERVICE, "fetch-policy") => match collectors_only(peer) {
                 Ok(()) => self.fetch_policy(request),
                 Err(e) => self.refused_collector_call(e),
@@ -281,7 +283,7 @@ impl HeadService {
             &tallyowl_store::control::SignedIn,
             tallyowl_control_api::types::ListRequest,
         ) -> Result<T, TallyOwlError>,
-        encode: impl FnOnce(&T) -> Vec<u8>,
+        encode: impl FnOnce(&T) -> Result<Vec<u8>, tallyowl_control_api::CsilCborError>,
         variant: &str,
     ) -> Outcome {
         let decoded = match decode_list_request(&request.payload) {
@@ -1271,6 +1273,43 @@ impl HeadService {
             }
             Err(e) => {
                 self.log_failure("Attribution settings were not stored.", &e);
+                error_outcome(encode_control_error(&crate::wire::to_control_error(&e)))
+            }
+        }
+    }
+
+    /// The display preferences of the person who calls. Each person reads only
+    /// their own record, so this needs a session and no role.
+    fn get_user_preferences(&self, request: &Request) -> Outcome {
+        use tallyowl_control_api::codec::{decode_empty, encode_user_preferences};
+        if let Err(e) = decode_empty(&request.payload) {
+            return malformed(e);
+        }
+        let outcome = (|| {
+            let who = self.control.signed_in(request.auth.as_deref())?;
+            self.control.preferences(&who)
+        })();
+        match outcome {
+            Ok(preferences) => reply("UserPreferences", encode_user_preferences(&preferences)),
+            Err(e) => error_outcome(encode_control_error(&crate::wire::to_control_error(&e))),
+        }
+    }
+
+    /// Replace the display preferences of the person who calls.
+    fn put_user_preferences(&self, request: &Request) -> Outcome {
+        use tallyowl_control_api::codec::{decode_user_preferences, encode_user_preferences};
+        let decoded = match decode_user_preferences(&request.payload) {
+            Ok(decoded) => decoded,
+            Err(e) => return malformed(e),
+        };
+        let outcome = (|| {
+            let who = self.control.signed_in(request.auth.as_deref())?;
+            self.control.put_preferences(&who, &decoded)
+        })();
+        match outcome {
+            Ok(preferences) => reply("UserPreferences", encode_user_preferences(&preferences)),
+            Err(e) => {
+                self.log_failure("Preferences were not stored.", &e);
                 error_outcome(encode_control_error(&crate::wire::to_control_error(&e)))
             }
         }

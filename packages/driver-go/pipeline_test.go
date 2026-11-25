@@ -99,12 +99,12 @@ func (c *pipelinedCollector) serve(conn net.Conn) {
 			response := transport.RpcResponse{
 				ID:     request.ID,
 				Status: transport.StatusOk,
-				Payload: collector.EncodeSubmitBatchResponse(collector.SubmitBatchResponse{
+				Payload: mustEncode(collector.EncodeSubmitBatchResponse(collector.SubmitBatchResponse{
 					BatchId:       decoded.Batch.BatchId,
 					Accepted:      uint64(len(decoded.Batch.Items)),
 					DurableCopies: 1,
 					QueuedAt:      collector.Timestamp(nowMs()),
-				}),
+				})),
 			}
 			variant := "SubmitBatchResponse"
 			response.Variant = &variant

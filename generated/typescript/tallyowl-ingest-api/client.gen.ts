@@ -3,56 +3,74 @@
 // Target: typescript-client
 
 import type { AlertNotifyRequest, AlertNotifyResponse, CaptureCriticalRequest, CaptureCriticalResponse, CaptureRequest, CaptureResponse, PolicyVersionRequest, PolicyVersionResponse } from "./types.gen.ts";
-import { fromAlertNotifyResponseCbor, fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromPolicyVersionResponseCbor, toAlertNotifyRequestCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, toPolicyVersionRequestCbor } from "./codec.gen.ts";
+import { fromAlertNotifyResponseCbor, fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromPolicyVersionResponseCbor, resolveRpcReply, toAlertNotifyRequestCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, toPolicyVersionRequestCbor } from "./codec.gen.ts";
 
 export interface ServiceTransport {
   call(service: string, op: string, req: Uint8Array): Uint8Array;
+  /**
+   * Perform an operation that declares more than one reply arm. Return the
+   * CSIL-RPC response `variant` (the CSIL name of the arm) with its payload
+   * bytes; the client decodes the arm that the variant names.
+   */
+  callReply(service: string, op: string, req: Uint8Array): { readonly variant?: string | null; readonly payload: Uint8Array };
 }
 
 export class TallyOwlAlertReceiverClient {
-  constructor(private readonly t: ServiceTransport) {}
+  private readonly t: ServiceTransport;
+
+  constructor(t: ServiceTransport) {
+    this.t = t;
+  }
 
   /**
    * Take one signed alert notification.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   notify(req: AlertNotifyRequest): AlertNotifyResponse {
-    const csilResp = this.t.call("TallyOwlAlertReceiver", "notify", toAlertNotifyRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlAlertReceiver", "notify", toAlertNotifyRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlAlertReceiver", "notify", csilReply.variant, csilReply.payload);
     return fromAlertNotifyResponseCbor(csilResp);
   }
 }
 
 export class TallyOwlIngestClient {
-  constructor(private readonly t: ServiceTransport) {}
+  private readonly t: ServiceTransport;
+
+  constructor(t: ServiceTransport) {
+    this.t = t;
+  }
 
   /**
    * Accept telemetry on the application's existing connection. Best effort.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   capture(req: CaptureRequest): CaptureResponse {
-    const csilResp = this.t.call("TallyOwlIngest", "capture", toCaptureRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlIngest", "capture", toCaptureRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlIngest", "capture", csilReply.variant, csilReply.payload);
     return fromCaptureResponseCbor(csilResp);
   }
 
   /**
    * Accept telemetry and wait for the collector durability boundary.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   captureCritical(req: CaptureCriticalRequest): CaptureCriticalResponse {
-    const csilResp = this.t.call("TallyOwlIngest", "capture-critical", toCaptureCriticalRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlIngest", "capture-critical", toCaptureCriticalRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlIngest", "capture-critical", csilReply.variant, csilReply.payload);
     return fromCaptureCriticalResponseCbor(csilResp);
   }
 
   /**
    * Report the collection policy that the client must apply.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   policyVersion(req: PolicyVersionRequest): PolicyVersionResponse {
-    const csilResp = this.t.call("TallyOwlIngest", "policy-version", toPolicyVersionRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlIngest", "policy-version", toPolicyVersionRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlIngest", "policy-version", csilReply.variant, csilReply.payload);
     return fromPolicyVersionResponseCbor(csilResp);
   }
 }

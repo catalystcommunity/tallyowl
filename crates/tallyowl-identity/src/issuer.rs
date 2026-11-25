@@ -93,7 +93,9 @@ impl Issuer for RemoteIssuer {
             HEAD_SERVER_NAME,
             Some(self.trust.authorities()),
         )?;
-        self.call(client, "enroll-node", encode_enroll_node_request(&request))
+        let payload = encode_enroll_node_request(&request)
+            .map_err(|e| TallyOwlError::unencodable("An enrollment request", e))?;
+        self.call(client, "enroll-node", payload)
     }
 
     fn renew(
@@ -108,11 +110,9 @@ impl Issuer for RemoteIssuer {
             current,
             Arc::clone(&self.trust),
         );
-        self.call(
-            client,
-            "renew-node-certificate",
-            encode_renew_node_certificate_request(&request),
-        )
+        let payload = encode_renew_node_certificate_request(&request)
+            .map_err(|e| TallyOwlError::unencodable("A renewal request", e))?;
+        self.call(client, "renew-node-certificate", payload)
     }
 }
 

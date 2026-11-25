@@ -220,6 +220,7 @@ control/policy-generation
 control/analysis/<project-id>/<analysis-id>
 control/dashboard/<project-id>/<dashboard-id>
 auth/api-key/<key-id>
+identity/preferences/<subject, as hexadecimal>
 receipt/<source-id>/<batch-id>
 tablet/<tablet-id>/log-checkpoint
 segment/<tablet-id>/<generation>/<segment-id>

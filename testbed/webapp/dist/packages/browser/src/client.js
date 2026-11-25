@@ -10,7 +10,7 @@
 // The unload flush is the one exception the design permits, and it is not an
 // exception to that rule. It reaches the host application's own same-origin
 // route, never a TallyOwl domain. See D34.
-import { fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromServiceErrorCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, } from "./ingest-api.js";
+import { fromCaptureCriticalResponseCbor, fromCaptureResponseCbor, fromServiceErrorTypeCbor, toCaptureCriticalRequestCbor, toCaptureRequestCbor, } from "./ingest-api.js";
 import { nowMs, payloadName } from "./capture.js";
 const SERVICE = "TallyOwlIngest";
 /** A typed rejection from the host or the collector behind it. */
@@ -400,7 +400,7 @@ export class BrowserClient {
     throwIfServiceError(reply) {
         if (reply.variant !== "ServiceError")
             return;
-        const wire = fromServiceErrorCbor(reply.payload);
+        const wire = fromServiceErrorTypeCbor(reply.payload);
         throw new ServiceError(wire.code, wire.message, wire.retryable);
     }
 }

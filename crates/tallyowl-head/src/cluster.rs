@@ -660,7 +660,10 @@ fn peer_holds_data(address: &str, security: &PeerSecurity) -> bool {
         .call(
             tallyowl_cluster::raft::network::REPLICATION_SERVICE,
             "replica-status",
-            encode_replica_status_request(&ReplicaStatusRequest { tablet: None }),
+            match encode_replica_status_request(&ReplicaStatusRequest { tablet: None }) {
+                Ok(encoded) => encoded,
+                Err(_) => return false,
+            },
         )
         .ok()
         .and_then(|response| decode_replica_status(&response.payload).ok())

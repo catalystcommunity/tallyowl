@@ -8,7 +8,64 @@ repository here uses starts an untagged repository at 0.1.0.
 
 This is a first release. Read the limits before you install it.
 
-## Not released yet — changes after 0.4.0
+Write the notes of a change under `## Not released yet` when you make it. The
+release job changes that heading to the version and the date of the release
+(`./tools.sh release stamp`). Do not write a version in the heading: the
+release job computes the version from the commits.
+
+## Not released yet
+
+- **Days on the dashboard.** A range picker above the charts selects the days
+  that the charts show. With no days selected, the charts show the last 24
+  hours, as before. The days are UTC days for each person, whatever clock the
+  page shows. Two people in different zones who select the same days see the
+  same numbers. A range of four days or less shows one bar for each hour. A
+  longer range shows one bar for each UTC day. The tab keeps the selected days
+  after a reload.
+- **A time zone for each person.** The dashboard shows times in the time of
+  the browser, in UTC, or in an IANA zone that the person selects. The choice
+  is stored on the account of the person, so it follows them to each browser.
+  It changes only the text on the page. TallyOwl stores, queries, and sends
+  each instant in UTC. New control operations: `get-user-preferences`
+  (wire ID 32) and `put-user-preferences` (wire ID 33). A person needs a
+  session and no role. The head refuses a zone name that it does not know.
+- The alert and notification tables show times on the clock of the page, not
+  ISO 8601 text in UTC.
+- **csilgen moved to 0.3.3.** The Rust, Go, and TypeScript transports did not
+  change. Each generated Rust and Go encoder now returns an error. A reply
+  that cannot be encoded gets transport status 6 (`Internal`), and the
+  service continues. A Rust caller of `tallyowl_rpc::reply` or
+  `error_outcome` can give it the encoder result as it is. The Go driver
+  returns the encoder error from `Capture`. The TallyOwl contracts have no
+  field that an encoder can refuse, so no request or reply changes on the
+  wire. The contract has no calendar-day field, so it uses no CSIL `date`.
+  Some lines of the generated Rust are not in rustfmt style, so
+  `./tools.sh gen` now writes `generated/rust/rustfmt.toml`, which turns
+  rustfmt off for the generated crates.
+  In TypeScript, the CSIL rule `ServiceError` is now generated as
+  `ServiceErrorType` (with `toServiceErrorTypeCbor` and
+  `fromServiceErrorTypeCbor`), because the old name clashed with a name in
+  the generated code. The wire name is still `ServiceError`. A TypeScript
+  program that imports the generated API types directly must use the new
+  names. The `ServiceError` class of `@catalystcommunity/tallyowl-browser` did not change.
+- **LinkKeys moved from v0.16.7 to v0.16.11.** In `domain` mode, the RP
+  account of TallyOwl must now be an application account. The head no longer
+  sends an application ID. The RP server uses the application ID of the
+  account. See "To set up `domain` mode" in DEPLOYMENT.md: if the account
+  username is not `tallyowl`, set its application ID to `tallyowl`, or each
+  person must give consent again. A refusal from the RP server (`RpError`) now
+  goes to the log with its reason. In `local` mode, the head signs its stored
+  sign-in identity again in the new LinkKeys format at the first sign-in after
+  the upgrade. The keys and the fingerprint do not change, so the domains that
+  approved the installation do not need to approve it again.
+- `url` moved from 2.5.8 to 2.5.9 (RUSTSEC-2026-0592, a stack overflow in
+  `Url::origin()`). It comes in through LinkKeys and hickory.
+- The dashboard uses the current Zest packages: base-components 0.2.7,
+  containers 0.1.4, controls 0.2.0, data-views 0.1.2, design-tokens 0.1.2,
+  date-time-picker 0.2.8, and date-model 0.1.2. It uses the TypeScript
+  declarations that Zest ships.
+
+## 0.4.1 — 2026-11-11
 
 ### Read this before you upgrade
 

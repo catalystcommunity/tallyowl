@@ -219,20 +219,14 @@ fn one_metric(body: &[u8], attributes: &Attributes, out: &mut Normalized) {
             MetricKind::Gauge
         };
         for point in points {
-            out.items.push(number_item(
-                &shape,
-                &point,
-                kind.clone(),
-                monotonic,
-                temporality.clone(),
-            ));
+            out.items
+                .push(number_item(&shape, &point, kind, monotonic, temporality));
         }
     }
     if let Some(body) = histogram {
         let (points, temporality) = read_histogram(body);
         for point in points {
-            out.items
-                .push(histogram_item(&shape, &point, temporality.clone()));
+            out.items.push(histogram_item(&shape, &point, temporality));
         }
     }
     if exponential > 0 {

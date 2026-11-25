@@ -133,10 +133,7 @@ impl Snapshot {
                 .unwrap_or_default()
                 .into_iter()
                 .collect(),
-            campaign_linking: policy
-                .campaign_linking
-                .clone()
-                .unwrap_or(CampaignLinking::Linked),
+            campaign_linking: policy.campaign_linking.unwrap_or(CampaignLinking::Linked),
             kill_switch: policy.kill_switch.unwrap_or(false),
             max_event_bytes: policy.max_event_bytes,
             max_properties: policy.max_properties,

@@ -267,7 +267,8 @@ impl PeerLink {
             generation: self.generation,
             payload,
         };
-        let encoded = encode_consensus_message(&message);
+        let encoded = encode_consensus_message(&message)
+            .map_err(|e| format!("A consensus message could not be encoded: {e}"))?;
         let peer = self.connections.peer(&self.address);
         let Some(place) = peer.wait() else {
             return Err(format!(

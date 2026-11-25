@@ -150,6 +150,53 @@
   align-items: start;
 }
 
+/* The days the charts cover, and the clock of the page. Each control keeps
+ * its own accessible name; the caption before it is for the eye. */
+.chart-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zest-gap-related) var(--zest-gap-unrelated);
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  /* A basis that can shrink, so that a control fits beside its caption on a
+   * narrow screen and the page does not scroll sideways. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.control-group.for-days {
+  flex-basis: 25em;
+}
+
+.control-group.for-clock {
+  flex-basis: 20em;
+}
+
+.control-group > :last-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.control-caption {
+  color: var(--zest-color-secondary-text);
+}
+
+/* The picker root is an inline block that fits its text. Here it fills the
+ * width of its group, so that a range of days shows in full. */
+.chart-controls .days .zest-date-time-picker {
+  display: block;
+}
+
+.chart-controls .failure {
+  flex-basis: 100%;
+}
+
 .banner {
   border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent);
   border-radius: var(--zest-control-radius);
@@ -351,6 +398,9 @@ td {
 .footer {
   position: sticky;
   bottom: 0;
+  /* Above the table headers, which are sticky in their own view and would
+   * otherwise paint over the bar while the page scrolls. */
+  z-index: 2;
 }
 
 .health {

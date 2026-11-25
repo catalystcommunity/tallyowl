@@ -477,8 +477,52 @@ def stamp_release(root: Path = REPOSITORY_ROOT) -> int:
         return 0
 
     set_version(version, root)
+    stamp_release_notes(version, _utc_today(), root)
     say(f"The tree is stamped {version}. Nothing is committed until the artifacts exist.")
     return 0
+
+
+#: The release notes, and the heading of the section that the next release
+#: takes. A person adds notes under this heading as they change things. The
+#: heading names no version, because nobody knows the next version until the
+#: release job computes it. "Changes after 0.4.0" stayed in the file after
+#: 0.4.1 shipped, and the notes of 0.4.1 then read as unreleased.
+RELEASE_NOTES = Path("docs") / "RELEASE_NOTES.md"
+UNRELEASED_HEADING = "## Not released yet"
+
+
+def _utc_today() -> str:
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+
+def stamp_release_notes(version: str, day: str, root: Path = REPOSITORY_ROOT) -> bool:
+    """Give the unreleased section of the notes its version and its date.
+
+    The first `## Not released yet` heading becomes `## <version> — <day>`, and
+    the release commit carries it. A release with no unreleased section gets a
+    section that says so, so that each version has a heading in the notes.
+
+    Returns whether a written section was there.
+    """
+    import re
+
+    path = root / RELEASE_NOTES
+    text = path.read_text()
+    released = f"## {version} — {day}"
+    unreleased = re.compile(rf"(?m)^{re.escape(UNRELEASED_HEADING)}\b.*$")
+    if unreleased.search(text):
+        path.write_text(unreleased.sub(released, text, count=1))
+        return True
+    first = re.search(r"(?m)^## ", text)
+    section = (
+        f"{released}\n\nNo notes were written for this release. Read the "
+        "commits since the previous tag.\n\n"
+    )
+    at = first.start() if first else len(text)
+    path.write_text(text[:at] + section + text[at:])
+    return False
 
 
 def tag_release(root: Path = REPOSITORY_ROOT) -> int:

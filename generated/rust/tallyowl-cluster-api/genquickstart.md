@@ -42,8 +42,8 @@ impl HttpRpcCarrier {
     }
 }
 
-impl Transport for HttpRpcCarrier {
-    fn call(&self, service: &str, op: &str, req: &[u8]) -> Result<Vec<u8>, ClientError> {
+impl HttpRpcCarrier {
+    fn exchange(&self, service: &str, op: &str, req: &[u8]) -> Result<RpcResponse, ClientError> {
         let envelope = RpcRequest::new(service, op, req.to_vec())
             .encode()
             .map_err(|e| ClientError::Transport(e.to_string()))?;
@@ -60,19 +60,24 @@ impl Transport for HttpRpcCarrier {
 
         // into_transport_error surfaces any non-zero transport status distinctly from a
         // typed application error.
-        let decoded = RpcResponse::decode(&body)
+        RpcResponse::decode(&body)
             .map_err(|e| ClientError::Transport(e.to_string()))?
             .into_transport_error()
-            .map_err(|e| ClientError::Transport(e.to_string()))?;
-        // A typed application error rides as a status-0 "ServiceError" variant — distinct
-        // from a transport failure. Surface it so the typed client decodes success only.
-        if decoded.variant.as_deref() == Some("ServiceError") {
-            return Err(ClientError::Service {
-                code: 0,
-                message: format!("csil-rpc {service}/{op}: ServiceError"),
-            });
-        }
-        Ok(decoded.payload)
+            .map_err(|e| ClientError::Transport(e.to_string()))
+    }
+}
+
+impl Transport for HttpRpcCarrier {
+    fn call(&self, service: &str, op: &str, req: &[u8]) -> Result<Vec<u8>, ClientError> {
+        Ok(self.exchange(service, op, req)?.payload)
+    }
+
+    fn call_reply(&self, service: &str, op: &str, req: &[u8]) -> Result<WireReply, ClientError> {
+        let reply = self.exchange(service, op, req)?;
+        Ok(WireReply {
+            variant: reply.variant,
+            payload: reply.payload,
+        })
     }
 }
 
@@ -180,8 +185,8 @@ const OP_ORD: u64 = 0;
 // reordering.
 fn run_datagrams(carrier: &mut impl DatagramCarrier) -> Result<(), Box<dyn std::error::Error>> {
     let req = ConsensusMessage { group: GroupRef { kind: todo!(), name: None }, kind: todo!(), sender: "example".to_string(), generation: 0, payload: Vec::new() };
-    // seq 0 marks an unsequenced datagram.
-    carrier.send_datagram(&Datagram::new(OP_ORD, 0, encode_consensus_message(&req)).encode()?)?;
+    // seq 0 marks an unsequenced datagram. A value with no wire form is an error here.
+    carrier.send_datagram(&Datagram::new(OP_ORD, 0, encode_consensus_message(&req)?).encode()?)?;
 
     if let Some(inbound) = carrier.recv_datagram()? {
         let dg = Datagram::decode(&inbound)?;

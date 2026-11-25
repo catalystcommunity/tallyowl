@@ -573,11 +573,20 @@ impl Forwarder {
             // collector is briefly one version behind the head it forwards to.
             protocol_version: Some(tallyowl_wire::protocol::PROTOCOL_VERSION),
         };
+        // The batch came from the decoder, so the encoder cannot refuse it
+        // unless the generated code is wrong. No retry changes that.
+        let encoded = match encode_commit_batch_request(&request) {
+            Ok(encoded) => encoded,
+            Err(e) => {
+                let reason = format!("The commit request could not be encoded: {e}");
+                if self.quarantine(task, &reason) {
+                    self.state.note_finished(&task.uuid, accepted_at);
+                }
+                return Step::Finished;
+            }
+        };
 
-        match self
-            .head
-            .commit_batch(encode_commit_batch_request(&request))
-        {
+        match self.head.commit_batch(encoded) {
             Ok(receipt) => {
                 // The task completes only after a valid committed receipt. If
                 // the connection had dropped after the commit, the retry would
@@ -654,7 +663,15 @@ impl Forwarder {
                     None
                 } else {
                     crate::task::note_attempt(&mut delivery, now, delay * 1_000, &e.message);
-                    Some(crate::task::encode(&delivery))
+                    match crate::task::encode(&delivery) {
+                        Ok(payload) => Some(payload),
+                        Err(encode_error) => {
+                            if self.quarantine(task, &encode_error.message) {
+                                self.state.note_finished(&task.uuid, accepted_at);
+                            }
+                            return Step::Finished;
+                        }
+                    }
                 };
                 if let Err(park_error) = self.queue.park(task, delay, payload) {
                     self.logger.warning(

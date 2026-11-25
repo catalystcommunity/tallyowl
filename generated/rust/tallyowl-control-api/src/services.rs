@@ -5,48 +5,56 @@ use super::types::*;
 /// TallyOwlControl service trait
 pub trait TallyOwlControl {
     type Context;
+    #[allow(clippy::result_large_err)]
     /// Run one analytic query.
     fn run_query(
         &self,
         ctx: &Self::Context,
         input: QueryRequest,
     ) -> Result<QueryResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List the workspaces that the session can read.
     fn list_workspaces(
         &self,
         ctx: &Self::Context,
         input: ListRequest,
     ) -> Result<WorkspaceList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List the projects that the session can read.
     fn list_projects(
         &self,
         ctx: &Self::Context,
         input: ListRequest,
     ) -> Result<ProjectList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List the active keys for a project.
     fn list_api_keys(
         &self,
         ctx: &Self::Context,
         input: ListRequest,
     ) -> Result<ApiKeyList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Create or replace an alert rule.
     fn put_alert_rule(
         &self,
         ctx: &Self::Context,
         input: AlertRule,
     ) -> Result<AlertRule, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List alert rules.
     fn list_alert_rules(
         &self,
         ctx: &Self::Context,
         input: AlertListRequest,
     ) -> Result<AlertRuleList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List current alert instances and their state.
     fn list_alert_instances(
         &self,
         ctx: &Self::Context,
         input: AlertListRequest,
     ) -> Result<AlertInstanceList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Start an erasure. The tombstone applies immediately and stays active
     /// for late arrivals until its horizon ends. See D28.
     fn request_deletion(
@@ -54,24 +62,28 @@ pub trait TallyOwlControl {
         ctx: &Self::Context,
         input: DeletionRequest,
     ) -> Result<DeletionResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Fetch the compiled collection policy for a source.
     fn get_policy(
         &self,
         ctx: &Self::Context,
         input: PolicyRequest,
     ) -> Result<CompiledPolicy, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Start a sign-in. Returns the URL to send the browser to.
     fn begin_login(
         &self,
         ctx: &Self::Context,
         input: BeginLoginRequest,
     ) -> Result<BeginLoginResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Finish a sign-in with what the callback carried, and get a session.
     fn complete_login(
         &self,
         ctx: &Self::Context,
         input: CompleteLoginRequest,
     ) -> Result<CompleteLoginResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Create a reusable role token. The token text is returned once and is
     /// never recoverable afterwards.
     fn create_role_token(
@@ -79,18 +91,21 @@ pub trait TallyOwlControl {
         ctx: &Self::Context,
         input: CreateRoleTokenRequest,
     ) -> Result<CreateRoleTokenResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List role tokens and what each one has enrolled.
     fn list_role_tokens(
         &self,
         ctx: &Self::Context,
         input: ListRequest,
     ) -> Result<RoleTokenList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Stop a token enrolling anything more.
     fn revoke_role_token(
         &self,
         ctx: &Self::Context,
         input: RevokeRoleTokenRequest,
     ) -> Result<Empty, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Enroll a node. The node generates its private key and sends only a
     /// certificate request; the control plane signs and never sees the key.
     fn enroll_node(
@@ -98,15 +113,21 @@ pub trait TallyOwlControl {
         ctx: &Self::Context,
         input: EnrollNodeRequest,
     ) -> Result<EnrollNodeResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Renew a node certificate against the node's current identity.
     fn renew_node_certificate(
         &self,
         ctx: &Self::Context,
         input: RenewNodeCertificateRequest,
     ) -> Result<EnrollNodeResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List enrolled nodes.
-    fn list_nodes(&self, ctx: &Self::Context, input: ListRequest)
-        -> Result<NodeList, ServiceError>;
+    fn list_nodes(
+        &self,
+        ctx: &Self::Context,
+        input_value: ListRequest,
+    ) -> Result<NodeList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Set one level of collection policy. It compiles before it is stored,
     /// because invalid policy never replaces valid policy.
     fn put_policy(
@@ -114,36 +135,42 @@ pub trait TallyOwlControl {
         ctx: &Self::Context,
         input: PolicyDocument,
     ) -> Result<CompiledPolicy, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Save an analysis, or replace it.
     fn put_analysis(
         &self,
         ctx: &Self::Context,
         input: SavedAnalysis,
     ) -> Result<SavedAnalysis, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List the saved analyses of a project.
     fn list_analyses(
         &self,
         ctx: &Self::Context,
         input: SavedRequest,
     ) -> Result<SavedAnalysisList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Remove a saved analysis. Refused while a dashboard shows it.
     fn delete_analysis(
         &self,
         ctx: &Self::Context,
         input: SavedRequest,
     ) -> Result<Empty, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Save a dashboard, or replace it.
     fn put_dashboard(
         &self,
         ctx: &Self::Context,
         input: SavedDashboard,
     ) -> Result<SavedDashboard, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// List the dashboards of a project.
     fn list_dashboards(
         &self,
         ctx: &Self::Context,
         input: SavedRequest,
     ) -> Result<SavedDashboardList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Set the attribution weights and windows of a project. A change
     /// recomputes every later result and rewrites no stored fact. See D40.
     fn put_attribution_settings(
@@ -151,12 +178,14 @@ pub trait TallyOwlControl {
         ctx: &Self::Context,
         input: AttributionSettings,
     ) -> Result<AttributionSettings, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Read the attribution settings a project answers under.
     fn get_attribution_settings(
         &self,
         ctx: &Self::Context,
         input: SavedRequest,
     ) -> Result<AttributionSettings, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Remove a dashboard. The analyses it showed stay, because an analysis is
     /// a question somebody saved and a dashboard is only one arrangement of
     /// several. Removing an analysis is `delete-analysis`, and it is refused
@@ -166,12 +195,14 @@ pub trait TallyOwlControl {
         ctx: &Self::Context,
         input: SavedRequest,
     ) -> Result<Empty, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Remove an alert rule and its instance.
     fn delete_alert_rule(
         &self,
         ctx: &Self::Context,
         input: DeleteAlertRuleRequest,
     ) -> Result<Empty, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Suppress notification for a period. The evaluation still runs and still
     /// records state, so an operator can see what happened while it was quiet.
     fn silence_alert(
@@ -179,12 +210,14 @@ pub trait TallyOwlControl {
         ctx: &Self::Context,
         input: SilenceRequest,
     ) -> Result<AlertInstance, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Put a firing rule back to `ok` by hand and send the resolution.
     fn resolve_alert(
         &self,
         ctx: &Self::Context,
         input: ResolveRequest,
     ) -> Result<AlertInstance, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// What every workflow is doing: its lag, its failures, and what is in
     /// quarantine waiting for a person.
     fn list_workflows(
@@ -192,18 +225,36 @@ pub trait TallyOwlControl {
         ctx: &Self::Context,
         input: ListRequest,
     ) -> Result<WorkflowList, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Start one workflow now rather than at its schedule.
     fn run_workflow(
         &self,
         ctx: &Self::Context,
         input: RunWorkflowRequest,
     ) -> Result<RunWorkflowResponse, ServiceError>;
+    #[allow(clippy::result_large_err)]
     /// Every notification attempt, delivered or not.
     fn list_notifications(
         &self,
         ctx: &Self::Context,
         input: AlertListRequest,
     ) -> Result<NotificationDeliveryList, ServiceError>;
+    #[allow(clippy::result_large_err)]
+    /// Read the preferences of the signed-in person. A person who has never
+    /// set them gets the defaults: the time of the browser.
+    fn get_user_preferences(
+        &self,
+        ctx: &Self::Context,
+        input: Empty,
+    ) -> Result<UserPreferences, ServiceError>;
+    #[allow(clippy::result_large_err)]
+    /// Replace the preferences of the signed-in person. Each person can do
+    /// this, with or without a role in a workspace.
+    fn put_user_preferences(
+        &self,
+        ctx: &Self::Context,
+        input: UserPreferences,
+    ) -> Result<UserPreferences, ServiceError>;
 }
 
 /// Wire-id ordinals for the TallyOwlControl service (transport compact profiles).
@@ -241,4 +292,6 @@ pub mod tally_owl_control_wire_ids {
     pub const OP_LIST_WORKFLOWS: u64 = 29;
     pub const OP_RUN_WORKFLOW: u64 = 30;
     pub const OP_LIST_NOTIFICATIONS: u64 = 31;
+    pub const OP_GET_USER_PREFERENCES: u64 = 32;
+    pub const OP_PUT_USER_PREFERENCES: u64 = 33;
 }

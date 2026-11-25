@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tallyowl_collector_api::types::{ResolveKeyRequest, ResolveKeyResponse};
 use tallyowl_control_api::types::{
     ApiKeyList, ApiKeySummary, ListRequest, PolicyRequest, PolicyScope, Project as WireProject,
-    ProjectList, Workspace as WireWorkspace, WorkspaceList,
+    ProjectList, TimeDisplay, UserPreferences, Workspace as WireWorkspace, WorkspaceList,
 };
 use tallyowl_obs::error::TallyOwlError;
 use tallyowl_obs::metrics::{labels, Registry};
@@ -222,6 +222,21 @@ pub fn holds_installation_authority(who: &SignedIn) -> bool {
             .any(|(_, role)| role.allows(Role::Owner))
 }
 
+/// A stored record as the wire type. A value this build does not know reads
+/// as the default, because a display preference must never stop a page.
+fn preferences_to_wire(record: tallyowl_store::control::PreferencesRecord) -> UserPreferences {
+    let time_display = match record.time_display.as_str() {
+        "utc" => TimeDisplay::Utc,
+        "zone" if record.time_zone.is_some() => TimeDisplay::Zone,
+        _ => TimeDisplay::Browser,
+    };
+    UserPreferences {
+        time_display,
+        time_zone: record.time_zone,
+        updated_at: Some(record.updated_at),
+    }
+}
+
 fn not_signed_in() -> TallyOwlError {
     TallyOwlError::new(
         tallyowl_obs::ErrorCode::Unauthenticated,
@@ -405,6 +420,61 @@ impl ControlService {
             .map_err(|e| TallyOwlError::internal(e.to_string()))
     }
 
+    /// The preferences of the person who is signed in. A person who never set
+    /// any gets the defaults: the time of the browser.
+    pub fn preferences(&self, who: &SignedIn) -> Result<UserPreferences, TallyOwlError> {
+        let held = self
+            .store
+            .catalog()
+            .preferences(&who.subject)
+            .map_err(|e| TallyOwlError::internal(e.to_string()))?;
+        Ok(held.map(preferences_to_wire).unwrap_or(UserPreferences {
+            time_display: TimeDisplay::Browser,
+            time_zone: None,
+            updated_at: None,
+        }))
+    }
+
+    /// Replace the preferences of the person who is signed in.
+    ///
+    /// A zone name is checked against the zones this installation knows, so
+    /// that a mistake is refused here and does not reach each page as a time
+    /// in the wrong zone. `zone` with no zone name is refused for the same
+    /// reason.
+    pub fn put_preferences(
+        &self,
+        who: &SignedIn,
+        wanted: &UserPreferences,
+    ) -> Result<UserPreferences, TallyOwlError> {
+        let time_zone = match wanted.time_zone.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => {
+                Some(crate::calendar::Zone::named(Some(name))?.name().to_owned())
+            }
+            _ => None,
+        };
+        if wanted.time_display == TimeDisplay::Zone && time_zone.is_none() {
+            return Err(TallyOwlError::invalid_argument(
+                "Name the time zone to show times in, such as `Europe/Berlin` or \
+                 `America/New_York`, or show the time of the browser or UTC.",
+            ));
+        }
+        let record = tallyowl_store::control::PreferencesRecord {
+            time_display: match wanted.time_display {
+                TimeDisplay::Browser => "browser",
+                TimeDisplay::Utc => "utc",
+                TimeDisplay::Zone => "zone",
+            }
+            .to_owned(),
+            time_zone,
+            updated_at: now_ms(),
+        };
+        self.store
+            .catalog()
+            .put_preferences(&who.subject, &record)
+            .map_err(|e| TallyOwlError::internal(e.to_string()))?;
+        Ok(preferences_to_wire(record))
+    }
+
     /// The workspaces this session can read.
     pub fn list_workspaces(
         &self,
@@ -558,6 +628,79 @@ mod tests {
             .expect("a session")
             .token;
         (control.signed_in(Some(&token)).expect("signs in"), source)
+    }
+
+    #[test]
+    fn a_person_keeps_their_own_time_display_and_a_bad_zone_is_refused() {
+        let control = service("preferences");
+        // No role: a display preference belongs to the person, not a workspace.
+        let (ada, _) = person(&control, "ada", None);
+        let (grace, _) = person(&control, "grace", Some(Role::Viewer));
+
+        let fresh = control.preferences(&ada).expect("defaults");
+        assert_eq!(fresh.time_display, TimeDisplay::Browser);
+        assert_eq!(fresh.time_zone, None);
+
+        let stored = control
+            .put_preferences(
+                &ada,
+                &UserPreferences {
+                    time_display: TimeDisplay::Zone,
+                    time_zone: Some(" Europe/Berlin ".into()),
+                    updated_at: Some(1),
+                },
+            )
+            .expect("a known zone is stored");
+        assert_eq!(stored.time_zone.as_deref(), Some("Europe/Berlin"));
+        assert_ne!(
+            stored.updated_at,
+            Some(1),
+            "the head sets the time, not the client"
+        );
+        assert_eq!(
+            control.preferences(&ada).unwrap().time_display,
+            TimeDisplay::Zone
+        );
+        assert_eq!(
+            control.preferences(&grace).unwrap().time_display,
+            TimeDisplay::Browser,
+            "one person's choice does not reach another"
+        );
+
+        // UTC keeps the zone, so that the person can go back to it.
+        let utc = control
+            .put_preferences(
+                &ada,
+                &UserPreferences {
+                    time_display: TimeDisplay::Utc,
+                    time_zone: Some("Europe/Berlin".into()),
+                    updated_at: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(utc.time_display, TimeDisplay::Utc);
+        assert_eq!(utc.time_zone.as_deref(), Some("Europe/Berlin"));
+
+        for wanted in [
+            UserPreferences {
+                time_display: TimeDisplay::Zone,
+                time_zone: Some("Mars/Olympus".into()),
+                updated_at: None,
+            },
+            UserPreferences {
+                time_display: TimeDisplay::Zone,
+                time_zone: None,
+                updated_at: None,
+            },
+        ] {
+            let refused = control.put_preferences(&ada, &wanted).expect_err("refused");
+            assert_eq!(refused.code, tallyowl_obs::ErrorCode::InvalidArgument);
+        }
+        assert_eq!(
+            control.preferences(&ada).unwrap().time_display,
+            TimeDisplay::Utc,
+            "a refusal changes nothing"
+        );
     }
 
     #[test]

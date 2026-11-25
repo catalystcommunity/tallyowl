@@ -98,8 +98,15 @@ type ErrorPayload struct {
 	Breadcrumbs []EventId    `json:"breadcrumbs,omitempty" yaml:"breadcrumbs,omitempty"`
 }
 
-// SpanKind is a type alias
 type SpanKind string
+
+const (
+	SpanKindInternal SpanKind = "internal"
+	SpanKindServer   SpanKind = "server"
+	SpanKindClient   SpanKind = "client"
+	SpanKindProducer SpanKind = "producer"
+	SpanKindConsumer SpanKind = "consumer"
+)
 
 // SpanLink represents a structured data type
 type SpanLink struct {
@@ -121,8 +128,13 @@ type SpanPayload struct {
 	SamplingReason *string    `json:"sampling_reason,omitempty" yaml:"sampling_reason,omitempty"`
 }
 
-// MetricKind is a type alias
 type MetricKind string
+
+const (
+	MetricKindCounter   MetricKind = "counter"
+	MetricKindGauge     MetricKind = "gauge"
+	MetricKindHistogram MetricKind = "histogram"
+)
 
 // HistogramValue represents a structured data type
 type HistogramValue struct {
@@ -269,8 +281,18 @@ type Timestamp int64
 // DurationMs is a type alias
 type DurationMs int64
 
-// TypedValueKind is a type alias
 type TypedValueKind string
+
+const (
+	TypedValueKindNull    TypedValueKind = "null"
+	TypedValueKindBool    TypedValueKind = "bool"
+	TypedValueKindInt     TypedValueKind = "int"
+	TypedValueKindUint    TypedValueKind = "uint"
+	TypedValueKindFloat   TypedValueKind = "float"
+	TypedValueKindDecimal TypedValueKind = "decimal"
+	TypedValueKindText    TypedValueKind = "text"
+	TypedValueKindBytes   TypedValueKind = "bytes"
+)
 
 // TypedValue represents a structured data type
 type TypedValue struct {
@@ -284,8 +306,13 @@ type TypedValue struct {
 	BytesValue   *[]byte        `json:"bytes_value,omitempty" yaml:"bytes_value,omitempty"`
 }
 
-// PropertyOrigin is a type alias
 type PropertyOrigin string
+
+const (
+	PropertyOriginClient    PropertyOrigin = "client"
+	PropertyOriginDriver    PropertyOrigin = "driver"
+	PropertyOriginCollector PropertyOrigin = "collector"
+)
 
 // Property represents a structured data type
 type Property struct {
@@ -297,8 +324,13 @@ type Property struct {
 // PropertyList is a type alias
 type PropertyList []Property
 
-// MeasurementKind is a type alias
 type MeasurementKind string
+
+const (
+	MeasurementKindFloat   MeasurementKind = "float"
+	MeasurementKindDecimal MeasurementKind = "decimal"
+	MeasurementKindInt     MeasurementKind = "int"
+)
 
 // Measurement represents a structured data type
 type Measurement struct {
@@ -313,8 +345,13 @@ type Measurement struct {
 // MeasurementList is a type alias
 type MeasurementList []Measurement
 
-// ConsentState is a type alias
 type ConsentState string
+
+const (
+	ConsentStateGranted ConsentState = "granted"
+	ConsentStateDenied  ConsentState = "denied"
+	ConsentStateAbsent  ConsentState = "absent"
+)
 
 // Consent represents a structured data type
 type Consent struct {
@@ -323,8 +360,26 @@ type Consent struct {
 	PolicyVersion *string      `json:"policy_version,omitempty" yaml:"policy_version,omitempty"`
 }
 
-// TelemetryKind is a type alias
 type TelemetryKind string
+
+const (
+	TelemetryKindEvent            TelemetryKind = "event"
+	TelemetryKindPageView         TelemetryKind = "page-view"
+	TelemetryKindSessionStart     TelemetryKind = "session-start"
+	TelemetryKindSessionEnd       TelemetryKind = "session-end"
+	TelemetryKindSessionHeartbeat TelemetryKind = "session-heartbeat"
+	TelemetryKindInteraction      TelemetryKind = "interaction"
+	TelemetryKindFeatureExposure  TelemetryKind = "feature-exposure"
+	TelemetryKindIdentify         TelemetryKind = "identify"
+	TelemetryKindAlias            TelemetryKind = "alias"
+	TelemetryKindGroup            TelemetryKind = "group"
+	TelemetryKindConversion       TelemetryKind = "conversion"
+	TelemetryKindError            TelemetryKind = "error"
+	TelemetryKindSpan             TelemetryKind = "span"
+	TelemetryKindMetricPoint      TelemetryKind = "metric-point"
+	TelemetryKindCampaignTouch    TelemetryKind = "campaign-touch"
+	TelemetryKindCampaignCost     TelemetryKind = "campaign-cost"
+)
 
 // Envelope represents a structured data type
 type Envelope struct {
@@ -353,8 +408,22 @@ type Envelope struct {
 	Measurements  *MeasurementList `json:"measurements,omitempty" yaml:"measurements,omitempty"`
 }
 
-// ErrorCode is a type alias
 type ErrorCode string
+
+const (
+	ErrorCodeInvalidArgument    ErrorCode = "invalid-argument"
+	ErrorCodeUnauthenticated    ErrorCode = "unauthenticated"
+	ErrorCodePermissionDenied   ErrorCode = "permission-denied"
+	ErrorCodeNotFound           ErrorCode = "not-found"
+	ErrorCodeAlreadyExists      ErrorCode = "already-exists"
+	ErrorCodeResourceExhausted  ErrorCode = "resource-exhausted"
+	ErrorCodeFailedPrecondition ErrorCode = "failed-precondition"
+	ErrorCodeUnavailable        ErrorCode = "unavailable"
+	ErrorCodeSchemaUnsupported  ErrorCode = "schema-unsupported"
+	ErrorCodeBudgetExceeded     ErrorCode = "budget-exceeded"
+	ErrorCodeIncompleteResult   ErrorCode = "incomplete-result"
+	ErrorCodeInternal           ErrorCode = "internal"
+)
 
 // ServiceError represents a structured data type
 type ServiceError struct {

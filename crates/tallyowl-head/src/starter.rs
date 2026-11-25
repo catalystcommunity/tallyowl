@@ -155,9 +155,9 @@ pub fn analyses(project_id: [u8; 16], goal: &str, now: i64) -> Vec<SavedAnalysis
                         timezone: None,
                     },
                     conversion_goal: goal.to_string(),
-                    model: panel.model.clone(),
+                    model: panel.model,
                     lookback_ms: RANGE_MS,
-                    dimension: Some(panel.dimension.clone()),
+                    dimension: Some(panel.dimension),
                     touch_filter: None,
                     resolution: None,
                 }),
@@ -167,7 +167,10 @@ pub fn analyses(project_id: [u8; 16], goal: &str, now: i64) -> Vec<SavedAnalysis
                 project_id: project_id.to_vec(),
                 name: panel.name.to_string(),
                 form: QueryForm::CampaignSummary,
-                request: tallyowl_control_api::codec::encode_query_request(&request),
+                // The panels are constants in this file, and a query has no
+                // value that the encoder can refuse.
+                request: tallyowl_control_api::codec::encode_query_request(&request)
+                    .expect("a starter panel's query has no value that encode can refuse"),
                 algebra_version: crate::query::ALGEBRA_VERSION,
                 created_at: Some(now),
                 updated_at: Some(now),

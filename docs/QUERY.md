@@ -192,6 +192,13 @@ A query selects one time basis:
 A caller supplies a timezone for interval truncation. TallyOwl uses
 Coordinated Universal Time when the caller supplies none.
 
+**The timezone belongs to the question, never to the viewer.** A saved
+analysis or a project report can name a timezone, and then each person who
+opens it gets the same buckets. A person's display clock (`UserPreferences`)
+changes only the text on the page. It never goes into `TimeRange.timezone`,
+because then two people who read the same analysis in different zones would
+see different counts for each day. The dashboard asks for UTC days.
+
 An interval is a fixed duration or a calendar interval. A calendar interval
 uses the supplied timezone. TallyOwl carries the IANA timezone database, so an
 hour, a day, a week, and a month are all calendar units: an hour bucket is a

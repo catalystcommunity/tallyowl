@@ -1,5 +1,5 @@
-github.com/catalystcommunity/csilgen/transports/go v0.0.0-20260926220402-baec1dad191c h1:9jKjVvpkeHdvT3MPT0He5PW/Mm+M9/MCug280ZGE+5U=
-github.com/catalystcommunity/csilgen/transports/go v0.0.0-20260926220402-baec1dad191c/go.mod h1:7CdM6CycSuRgLJ1Qt8A10qJZlIIlvSZG8PfkU8s0fCM=
+github.com/catalystcommunity/csilgen/transports/go v0.0.0-20261125171933-73ba5ac55f74 h1:rKwYIKIuwNnALy9CXoE6JoIv6FrV79iJgncBcMLvB8Y=
+github.com/catalystcommunity/csilgen/transports/go v0.0.0-20261125171933-73ba5ac55f74/go.mod h1:7CdM6CycSuRgLJ1Qt8A10qJZlIIlvSZG8PfkU8s0fCM=
 github.com/klauspost/cpuid/v2 v2.0.9 h1:lgaqFMSdTdQYdZ04uHyN2d/eKdOMyi2YLSvlQIBFYa4=
 github.com/klauspost/cpuid/v2 v2.0.9/go.mod h1:FInQzS24/EEf25PyTYn52gqo7WaD8xa0213Md/qVLRg=
 lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=

@@ -2,6 +2,11 @@
 // Source: <csil spec>
 // Target: typescript-typesonly
 
+export interface ServiceError {
+  code: number;
+  message: string;
+}
+
 /**
  * An exact base-10 decimal, carried on the wire as a CBOR tag-4 decimal
  * fraction `[exponent, mantissa]` (value = `mantissa * 10 ** exponent`).
@@ -15,10 +20,13 @@ export class CsilDecimal {
   /** CBOR semantic tag for a decimal fraction. */
   static readonly CBOR_TAG = 4;
 
-  constructor(
-    readonly exponent: number,
-    readonly mantissa: bigint,
-  ) {}
+  readonly exponent: number;
+  readonly mantissa: bigint;
+
+  constructor(exponent: number, mantissa: bigint) {
+    this.exponent = exponent;
+    this.mantissa = mantissa;
+  }
 
   /** Reconstruct from the CBOR tag-4 payload `[exponent, mantissa]`. */
   static fromTag4(payload: readonly [number | bigint, number | bigint]): CsilDecimal {
@@ -86,6 +94,10 @@ export class CsilDecimal {
   }
 }
 
+export const Compression = {
+  NONE: "none",
+  ZSTD: "zstd",
+} as const;
 export type Compression = "none" | "zstd";
 
 export interface Batch {
@@ -115,6 +127,12 @@ export interface SubmitBatchResponse {
   policyVersion?: number;
 }
 
+export const ReceiptPolicy = {
+  LOCAL_ONE: "local-one",
+  LOCAL_QUORUM: "local-quorum",
+  REMOTE_ONE: "remote-one",
+  CUSTOM: "custom",
+} as const;
 export type ReceiptPolicy = "local-one" | "local-quorum" | "remote-one" | "custom";
 
 export interface CommitBatchRequest {
@@ -163,6 +181,13 @@ export interface ResolveKeyResponse {
   expiresAt?: Timestamp;
 }
 
+export const RetentionClass = {
+  PROVISIONAL: "provisional",
+  RAW: "raw",
+  DETAILED: "detailed",
+  ROLLUP: "rollup",
+  AUDIT: "audit",
+} as const;
 export type RetentionClass = "provisional" | "raw" | "detailed" | "rollup" | "audit";
 
 export interface RetentionRule {
@@ -194,6 +219,11 @@ export interface ProtectedKey {
   origin: PropertyOrigin;
 }
 
+export const CampaignLinking = {
+  LINKED: "linked",
+  UNLINKED: "unlinked",
+  NONE: "none",
+} as const;
 /**
  * How much of a campaign touch is joined to the person who made it. The same
  * three values as `CampaignLinking` in tallyowl-control.csil, and the same
@@ -267,6 +297,16 @@ export type Timestamp = number;
 
 export type DurationMs = number;
 
+export const TypedValueKind = {
+  NULL: "null",
+  BOOL: "bool",
+  INT: "int",
+  UINT: "uint",
+  FLOAT: "float",
+  DECIMAL: "decimal",
+  TEXT: "text",
+  BYTES: "bytes",
+} as const;
 export type TypedValueKind = "null" | "bool" | "int" | "uint" | "float" | "decimal" | "text" | "bytes";
 
 /**
@@ -285,6 +325,11 @@ export interface TypedValue {
   bytesValue?: Uint8Array;
 }
 
+export const PropertyOrigin = {
+  CLIENT: "client",
+  DRIVER: "driver",
+  COLLECTOR: "collector",
+} as const;
 /**
  * Where a property came from. An operator can trust a `collector` origin,
  * because the collector stamps it from its own configuration and refuses a
@@ -300,6 +345,11 @@ export interface Property {
 
 export type PropertyList = Property[];
 
+export const MeasurementKind = {
+  FLOAT: "float",
+  DECIMAL: "decimal",
+  INT: "int",
+} as const;
 /**
  * A measure is a number, so its kinds are the three numeric ones. It carries
  * its own discriminant for the same reason `TypedValue` does.
@@ -321,6 +371,11 @@ export interface Measurement {
 
 export type MeasurementList = Measurement[];
 
+export const ConsentState = {
+  GRANTED: "granted",
+  DENIED: "denied",
+  ABSENT: "absent",
+} as const;
 export type ConsentState = "granted" | "denied" | "absent";
 
 export interface Consent {
@@ -329,6 +384,24 @@ export interface Consent {
   policyVersion?: string;
 }
 
+export const TelemetryKind = {
+  EVENT: "event",
+  PAGE_VIEW: "page-view",
+  SESSION_START: "session-start",
+  SESSION_END: "session-end",
+  SESSION_HEARTBEAT: "session-heartbeat",
+  INTERACTION: "interaction",
+  FEATURE_EXPOSURE: "feature-exposure",
+  IDENTIFY: "identify",
+  ALIAS: "alias",
+  GROUP: "group",
+  CONVERSION: "conversion",
+  ERROR: "error",
+  SPAN: "span",
+  METRIC_POINT: "metric-point",
+  CAMPAIGN_TOUCH: "campaign-touch",
+  CAMPAIGN_COST: "campaign-cost",
+} as const;
 export type TelemetryKind = "event" | "page-view" | "session-start" | "session-end" | "session-heartbeat" | "interaction" | "feature-exposure" | "identify" | "alias" | "group" | "conversion" | "error" | "span" | "metric-point" | "campaign-touch" | "campaign-cost";
 
 export interface Envelope {
@@ -357,9 +430,23 @@ export interface Envelope {
   measurements?: MeasurementList;
 }
 
+export const ErrorCode = {
+  INVALID_ARGUMENT: "invalid-argument",
+  UNAUTHENTICATED: "unauthenticated",
+  PERMISSION_DENIED: "permission-denied",
+  NOT_FOUND: "not-found",
+  ALREADY_EXISTS: "already-exists",
+  RESOURCE_EXHAUSTED: "resource-exhausted",
+  FAILED_PRECONDITION: "failed-precondition",
+  UNAVAILABLE: "unavailable",
+  SCHEMA_UNSUPPORTED: "schema-unsupported",
+  BUDGET_EXCEEDED: "budget-exceeded",
+  INCOMPLETE_RESULT: "incomplete-result",
+  INTERNAL: "internal",
+} as const;
 export type ErrorCode = "invalid-argument" | "unauthenticated" | "permission-denied" | "not-found" | "already-exists" | "resource-exhausted" | "failed-precondition" | "unavailable" | "schema-unsupported" | "budget-exceeded" | "incomplete-result" | "internal";
 
-export interface ServiceError {
+export interface ServiceErrorType {
   code: ErrorCode;
   message: string;
   retryable: boolean;
@@ -472,6 +559,13 @@ export interface ErrorPayload {
   breadcrumbs?: EventId[];
 }
 
+export const SpanKind = {
+  INTERNAL: "internal",
+  SERVER: "server",
+  CLIENT: "client",
+  PRODUCER: "producer",
+  CONSUMER: "consumer",
+} as const;
 export type SpanKind = "internal" | "server" | "client" | "producer" | "consumer";
 
 export interface SpanLink {
@@ -492,6 +586,11 @@ export interface SpanPayload {
   samplingReason?: string;
 }
 
+export const MetricKind = {
+  COUNTER: "counter",
+  GAUGE: "gauge",
+  HISTOGRAM: "histogram",
+} as const;
 export type MetricKind = "counter" | "gauge" | "histogram";
 
 export interface HistogramValue {

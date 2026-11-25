@@ -532,7 +532,7 @@ fn to_wire_analysis(
         analysis_id: analysis.analysis_id.clone(),
         project_id: analysis.project_id.to_vec(),
         name: analysis.name.clone(),
-        form: form.clone(),
+        form: *form,
         request: analysis.request.clone(),
         algebra_version: analysis.algebra_version,
         created_at: Some(analysis.created_at),

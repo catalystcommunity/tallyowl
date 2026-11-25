@@ -614,7 +614,7 @@ fn a_node_that_does_not_hold_a_tablet_refuses_its_messages_by_name() {
         .call(
             crate::raft::network::REPLICATION_SERVICE,
             crate::raft::network::DELIVER_CONSENSUS,
-            encode_consensus_message(&message),
+            encode_consensus_message(&message).unwrap(),
         )
         .expect("the call reaches the service");
     let reply = decode_consensus_reply(&response.payload).expect("a reply");
@@ -682,7 +682,8 @@ fn a_message_from_an_older_placement_generation_is_refused_with_the_current_one(
                 // One generation behind.
                 generation: current,
                 payload: vec![0xf6],
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the service");
     let reply = decode_consensus_reply(&response.payload).unwrap();
@@ -702,7 +703,8 @@ fn a_message_from_an_older_placement_generation_is_refused_with_the_current_one(
                 sender: "n1".into(),
                 generation: current - 1,
                 payload: vec![0xf6],
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the service");
     let stale = decode_consensus_reply(&stale.payload).unwrap();
@@ -725,7 +727,8 @@ fn a_message_from_an_older_placement_generation_is_refused_with_the_current_one(
                 sender: "somebody-else".into(),
                 generation: current,
                 payload: vec![0xf6],
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the service");
     let stranger = decode_consensus_reply(&stranger.payload).unwrap();
@@ -2153,7 +2156,7 @@ fn send_as(
         .call(
             crate::raft::network::REPLICATION_SERVICE,
             "deliver-consensus",
-            encode_consensus_message(&message),
+            encode_consensus_message(&message).unwrap(),
         )
         .expect("the message reaches the node");
     let reply = decode_consensus_reply(&response.payload).expect("a consensus reply");

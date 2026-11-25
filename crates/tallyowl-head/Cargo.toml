@@ -48,6 +48,11 @@ blake3 = { workspace = true }
 linkkeys-local-rp = { workspace = true }
 liblinkkeys = { workspace = true }
 linkkeys-rpc-client = { workspace = true }
+# LinkKeys v0.16.11 uses `time` for each timestamp. The two key crates sign an
+# identity that an earlier release stored again; see `resign_stored_identity`.
+time = { workspace = true }
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }

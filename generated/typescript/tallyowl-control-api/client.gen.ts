@@ -2,268 +2,303 @@
 // Source: <csil spec>
 // Target: typescript-client
 
-import type { AlertInstance, AlertInstanceList, AlertListRequest, AlertRule, AlertRuleList, ApiKeyList, AttributionSettings, BeginLoginRequest, BeginLoginResponse, CompiledPolicy, CompleteLoginRequest, CompleteLoginResponse, CreateRoleTokenRequest, CreateRoleTokenResponse, DeleteAlertRuleRequest, DeletionRequest, DeletionResponse, Empty, EnrollNodeRequest, EnrollNodeResponse, ListRequest, NodeList, NotificationDeliveryList, PolicyDocument, PolicyRequest, ProjectList, QueryRequest, QueryResponse, RenewNodeCertificateRequest, ResolveRequest, RevokeRoleTokenRequest, RoleTokenList, RunWorkflowRequest, RunWorkflowResponse, SavedAnalysis, SavedAnalysisList, SavedDashboard, SavedDashboardList, SavedRequest, SilenceRequest, WorkflowList, WorkspaceList } from "./types.gen.ts";
-import { fromAlertInstanceCbor, fromAlertInstanceListCbor, fromAlertRuleCbor, fromAlertRuleListCbor, fromApiKeyListCbor, fromAttributionSettingsCbor, fromBeginLoginResponseCbor, fromCompiledPolicyCbor, fromCompleteLoginResponseCbor, fromCreateRoleTokenResponseCbor, fromDeletionResponseCbor, fromEmptyCbor, fromEnrollNodeResponseCbor, fromNodeListCbor, fromNotificationDeliveryListCbor, fromProjectListCbor, fromQueryResponseCbor, fromRoleTokenListCbor, fromRunWorkflowResponseCbor, fromSavedAnalysisCbor, fromSavedAnalysisListCbor, fromSavedDashboardCbor, fromSavedDashboardListCbor, fromWorkflowListCbor, fromWorkspaceListCbor, toAlertListRequestCbor, toAlertRuleCbor, toAttributionSettingsCbor, toBeginLoginRequestCbor, toCompleteLoginRequestCbor, toCreateRoleTokenRequestCbor, toDeleteAlertRuleRequestCbor, toDeletionRequestCbor, toEnrollNodeRequestCbor, toListRequestCbor, toPolicyDocumentCbor, toPolicyRequestCbor, toQueryRequestCbor, toRenewNodeCertificateRequestCbor, toResolveRequestCbor, toRevokeRoleTokenRequestCbor, toRunWorkflowRequestCbor, toSavedAnalysisCbor, toSavedDashboardCbor, toSavedRequestCbor, toSilenceRequestCbor } from "./codec.gen.ts";
+import type { AlertInstance, AlertInstanceList, AlertListRequest, AlertRule, AlertRuleList, ApiKeyList, AttributionSettings, BeginLoginRequest, BeginLoginResponse, CompiledPolicy, CompleteLoginRequest, CompleteLoginResponse, CreateRoleTokenRequest, CreateRoleTokenResponse, DeleteAlertRuleRequest, DeletionRequest, DeletionResponse, Empty, EnrollNodeRequest, EnrollNodeResponse, ListRequest, NodeList, NotificationDeliveryList, PolicyDocument, PolicyRequest, ProjectList, QueryRequest, QueryResponse, RenewNodeCertificateRequest, ResolveRequest, RevokeRoleTokenRequest, RoleTokenList, RunWorkflowRequest, RunWorkflowResponse, SavedAnalysis, SavedAnalysisList, SavedDashboard, SavedDashboardList, SavedRequest, SilenceRequest, UserPreferences, WorkflowList, WorkspaceList } from "./types.gen.ts";
+import { fromAlertInstanceCbor, fromAlertInstanceListCbor, fromAlertRuleCbor, fromAlertRuleListCbor, fromApiKeyListCbor, fromAttributionSettingsCbor, fromBeginLoginResponseCbor, fromCompiledPolicyCbor, fromCompleteLoginResponseCbor, fromCreateRoleTokenResponseCbor, fromDeletionResponseCbor, fromEmptyCbor, fromEnrollNodeResponseCbor, fromNodeListCbor, fromNotificationDeliveryListCbor, fromProjectListCbor, fromQueryResponseCbor, fromRoleTokenListCbor, fromRunWorkflowResponseCbor, fromSavedAnalysisCbor, fromSavedAnalysisListCbor, fromSavedDashboardCbor, fromSavedDashboardListCbor, fromUserPreferencesCbor, fromWorkflowListCbor, fromWorkspaceListCbor, resolveRpcReply, toAlertListRequestCbor, toAlertRuleCbor, toAttributionSettingsCbor, toBeginLoginRequestCbor, toCompleteLoginRequestCbor, toCreateRoleTokenRequestCbor, toDeleteAlertRuleRequestCbor, toDeletionRequestCbor, toEmptyCbor, toEnrollNodeRequestCbor, toListRequestCbor, toPolicyDocumentCbor, toPolicyRequestCbor, toQueryRequestCbor, toRenewNodeCertificateRequestCbor, toResolveRequestCbor, toRevokeRoleTokenRequestCbor, toRunWorkflowRequestCbor, toSavedAnalysisCbor, toSavedDashboardCbor, toSavedRequestCbor, toSilenceRequestCbor, toUserPreferencesCbor } from "./codec.gen.ts";
 
 export interface ServiceTransport {
   call(service: string, op: string, req: Uint8Array): Uint8Array;
+  /**
+   * Perform an operation that declares more than one reply arm. Return the
+   * CSIL-RPC response `variant` (the CSIL name of the arm) with its payload
+   * bytes; the client decodes the arm that the variant names.
+   */
+  callReply(service: string, op: string, req: Uint8Array): { readonly variant?: string | null; readonly payload: Uint8Array };
 }
 
 export class TallyOwlControlClient {
-  constructor(private readonly t: ServiceTransport) {}
+  private readonly t: ServiceTransport;
+
+  constructor(t: ServiceTransport) {
+    this.t = t;
+  }
 
   /**
    * Run one analytic query.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   runQuery(req: QueryRequest): QueryResponse {
-    const csilResp = this.t.call("TallyOwlControl", "run-query", toQueryRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "run-query", toQueryRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "run-query", csilReply.variant, csilReply.payload);
     return fromQueryResponseCbor(csilResp);
   }
 
   /**
    * List the workspaces that the session can read.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listWorkspaces(req: ListRequest): WorkspaceList {
-    const csilResp = this.t.call("TallyOwlControl", "list-workspaces", toListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-workspaces", toListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-workspaces", csilReply.variant, csilReply.payload);
     return fromWorkspaceListCbor(csilResp);
   }
 
   /**
    * List the projects that the session can read.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listProjects(req: ListRequest): ProjectList {
-    const csilResp = this.t.call("TallyOwlControl", "list-projects", toListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-projects", toListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-projects", csilReply.variant, csilReply.payload);
     return fromProjectListCbor(csilResp);
   }
 
   /**
    * List the active keys for a project.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listApiKeys(req: ListRequest): ApiKeyList {
-    const csilResp = this.t.call("TallyOwlControl", "list-api-keys", toListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-api-keys", toListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-api-keys", csilReply.variant, csilReply.payload);
     return fromApiKeyListCbor(csilResp);
   }
 
   /**
    * Create or replace an alert rule.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   putAlertRule(req: AlertRule): AlertRule {
-    const csilResp = this.t.call("TallyOwlControl", "put-alert-rule", toAlertRuleCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "put-alert-rule", toAlertRuleCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "put-alert-rule", csilReply.variant, csilReply.payload);
     return fromAlertRuleCbor(csilResp);
   }
 
   /**
    * List alert rules.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listAlertRules(req: AlertListRequest): AlertRuleList {
-    const csilResp = this.t.call("TallyOwlControl", "list-alert-rules", toAlertListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-alert-rules", toAlertListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-alert-rules", csilReply.variant, csilReply.payload);
     return fromAlertRuleListCbor(csilResp);
   }
 
   /**
    * List current alert instances and their state.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listAlertInstances(req: AlertListRequest): AlertInstanceList {
-    const csilResp = this.t.call("TallyOwlControl", "list-alert-instances", toAlertListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-alert-instances", toAlertListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-alert-instances", csilReply.variant, csilReply.payload);
     return fromAlertInstanceListCbor(csilResp);
   }
 
   /**
    * Start an erasure. The tombstone applies immediately and stays active
    * for late arrivals until its horizon ends. See D28.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   requestDeletion(req: DeletionRequest): DeletionResponse {
-    const csilResp = this.t.call("TallyOwlControl", "request-deletion", toDeletionRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "request-deletion", toDeletionRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "request-deletion", csilReply.variant, csilReply.payload);
     return fromDeletionResponseCbor(csilResp);
   }
 
   /**
    * Fetch the compiled collection policy for a source.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   getPolicy(req: PolicyRequest): CompiledPolicy {
-    const csilResp = this.t.call("TallyOwlControl", "get-policy", toPolicyRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "get-policy", toPolicyRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "get-policy", csilReply.variant, csilReply.payload);
     return fromCompiledPolicyCbor(csilResp);
   }
 
   /**
    * Start a sign-in. Returns the URL to send the browser to.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   beginLogin(req: BeginLoginRequest): BeginLoginResponse {
-    const csilResp = this.t.call("TallyOwlControl", "begin-login", toBeginLoginRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "begin-login", toBeginLoginRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "begin-login", csilReply.variant, csilReply.payload);
     return fromBeginLoginResponseCbor(csilResp);
   }
 
   /**
    * Finish a sign-in with what the callback carried, and get a session.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   completeLogin(req: CompleteLoginRequest): CompleteLoginResponse {
-    const csilResp = this.t.call("TallyOwlControl", "complete-login", toCompleteLoginRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "complete-login", toCompleteLoginRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "complete-login", csilReply.variant, csilReply.payload);
     return fromCompleteLoginResponseCbor(csilResp);
   }
 
   /**
    * Create a reusable role token. The token text is returned once and is
    * never recoverable afterwards.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   createRoleToken(req: CreateRoleTokenRequest): CreateRoleTokenResponse {
-    const csilResp = this.t.call("TallyOwlControl", "create-role-token", toCreateRoleTokenRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "create-role-token", toCreateRoleTokenRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "create-role-token", csilReply.variant, csilReply.payload);
     return fromCreateRoleTokenResponseCbor(csilResp);
   }
 
   /**
    * List role tokens and what each one has enrolled.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listRoleTokens(req: ListRequest): RoleTokenList {
-    const csilResp = this.t.call("TallyOwlControl", "list-role-tokens", toListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-role-tokens", toListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-role-tokens", csilReply.variant, csilReply.payload);
     return fromRoleTokenListCbor(csilResp);
   }
 
   /**
    * Stop a token enrolling anything more.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   revokeRoleToken(req: RevokeRoleTokenRequest): Empty {
-    const csilResp = this.t.call("TallyOwlControl", "revoke-role-token", toRevokeRoleTokenRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "revoke-role-token", toRevokeRoleTokenRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "revoke-role-token", csilReply.variant, csilReply.payload);
     return fromEmptyCbor(csilResp);
   }
 
   /**
    * Enroll a node. The node generates its private key and sends only a
    * certificate request; the control plane signs and never sees the key.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   enrollNode(req: EnrollNodeRequest): EnrollNodeResponse {
-    const csilResp = this.t.call("TallyOwlControl", "enroll-node", toEnrollNodeRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "enroll-node", toEnrollNodeRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "enroll-node", csilReply.variant, csilReply.payload);
     return fromEnrollNodeResponseCbor(csilResp);
   }
 
   /**
    * Renew a node certificate against the node's current identity.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   renewNodeCertificate(req: RenewNodeCertificateRequest): EnrollNodeResponse {
-    const csilResp = this.t.call("TallyOwlControl", "renew-node-certificate", toRenewNodeCertificateRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "renew-node-certificate", toRenewNodeCertificateRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "renew-node-certificate", csilReply.variant, csilReply.payload);
     return fromEnrollNodeResponseCbor(csilResp);
   }
 
   /**
    * List enrolled nodes.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listNodes(req: ListRequest): NodeList {
-    const csilResp = this.t.call("TallyOwlControl", "list-nodes", toListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-nodes", toListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-nodes", csilReply.variant, csilReply.payload);
     return fromNodeListCbor(csilResp);
   }
 
   /**
    * Set one level of collection policy. It compiles before it is stored,
    * because invalid policy never replaces valid policy.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   putPolicy(req: PolicyDocument): CompiledPolicy {
-    const csilResp = this.t.call("TallyOwlControl", "put-policy", toPolicyDocumentCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "put-policy", toPolicyDocumentCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "put-policy", csilReply.variant, csilReply.payload);
     return fromCompiledPolicyCbor(csilResp);
   }
 
   /**
    * Save an analysis, or replace it.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   putAnalysis(req: SavedAnalysis): SavedAnalysis {
-    const csilResp = this.t.call("TallyOwlControl", "put-analysis", toSavedAnalysisCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "put-analysis", toSavedAnalysisCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "put-analysis", csilReply.variant, csilReply.payload);
     return fromSavedAnalysisCbor(csilResp);
   }
 
   /**
    * List the saved analyses of a project.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listAnalyses(req: SavedRequest): SavedAnalysisList {
-    const csilResp = this.t.call("TallyOwlControl", "list-analyses", toSavedRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-analyses", toSavedRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-analyses", csilReply.variant, csilReply.payload);
     return fromSavedAnalysisListCbor(csilResp);
   }
 
   /**
    * Remove a saved analysis. Refused while a dashboard shows it.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   deleteAnalysis(req: SavedRequest): Empty {
-    const csilResp = this.t.call("TallyOwlControl", "delete-analysis", toSavedRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "delete-analysis", toSavedRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "delete-analysis", csilReply.variant, csilReply.payload);
     return fromEmptyCbor(csilResp);
   }
 
   /**
    * Save a dashboard, or replace it.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   putDashboard(req: SavedDashboard): SavedDashboard {
-    const csilResp = this.t.call("TallyOwlControl", "put-dashboard", toSavedDashboardCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "put-dashboard", toSavedDashboardCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "put-dashboard", csilReply.variant, csilReply.payload);
     return fromSavedDashboardCbor(csilResp);
   }
 
   /**
    * List the dashboards of a project.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listDashboards(req: SavedRequest): SavedDashboardList {
-    const csilResp = this.t.call("TallyOwlControl", "list-dashboards", toSavedRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-dashboards", toSavedRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-dashboards", csilReply.variant, csilReply.payload);
     return fromSavedDashboardListCbor(csilResp);
   }
 
   /**
    * Set the attribution weights and windows of a project. A change
    * recomputes every later result and rewrites no stored fact. See D40.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   putAttributionSettings(req: AttributionSettings): AttributionSettings {
-    const csilResp = this.t.call("TallyOwlControl", "put-attribution-settings", toAttributionSettingsCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "put-attribution-settings", toAttributionSettingsCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "put-attribution-settings", csilReply.variant, csilReply.payload);
     return fromAttributionSettingsCbor(csilResp);
   }
 
   /**
    * Read the attribution settings a project answers under.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   getAttributionSettings(req: SavedRequest): AttributionSettings {
-    const csilResp = this.t.call("TallyOwlControl", "get-attribution-settings", toSavedRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "get-attribution-settings", toSavedRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "get-attribution-settings", csilReply.variant, csilReply.payload);
     return fromAttributionSettingsCbor(csilResp);
   }
 
@@ -272,74 +307,105 @@ export class TallyOwlControlClient {
    * a question somebody saved and a dashboard is only one arrangement of
    * several. Removing an analysis is `delete-analysis`, and it is refused
    * while a dashboard still shows it.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   deleteDashboard(req: SavedRequest): Empty {
-    const csilResp = this.t.call("TallyOwlControl", "delete-dashboard", toSavedRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "delete-dashboard", toSavedRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "delete-dashboard", csilReply.variant, csilReply.payload);
     return fromEmptyCbor(csilResp);
   }
 
   /**
    * Remove an alert rule and its instance.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   deleteAlertRule(req: DeleteAlertRuleRequest): Empty {
-    const csilResp = this.t.call("TallyOwlControl", "delete-alert-rule", toDeleteAlertRuleRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "delete-alert-rule", toDeleteAlertRuleRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "delete-alert-rule", csilReply.variant, csilReply.payload);
     return fromEmptyCbor(csilResp);
   }
 
   /**
    * Suppress notification for a period. The evaluation still runs and still
    * records state, so an operator can see what happened while it was quiet.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   silenceAlert(req: SilenceRequest): AlertInstance {
-    const csilResp = this.t.call("TallyOwlControl", "silence-alert", toSilenceRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "silence-alert", toSilenceRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "silence-alert", csilReply.variant, csilReply.payload);
     return fromAlertInstanceCbor(csilResp);
   }
 
   /**
    * Put a firing rule back to `ok` by hand and send the resolution.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   resolveAlert(req: ResolveRequest): AlertInstance {
-    const csilResp = this.t.call("TallyOwlControl", "resolve-alert", toResolveRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "resolve-alert", toResolveRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "resolve-alert", csilReply.variant, csilReply.payload);
     return fromAlertInstanceCbor(csilResp);
   }
 
   /**
    * What every workflow is doing: its lag, its failures, and what is in
    * quarantine waiting for a person.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listWorkflows(req: ListRequest): WorkflowList {
-    const csilResp = this.t.call("TallyOwlControl", "list-workflows", toListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-workflows", toListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-workflows", csilReply.variant, csilReply.payload);
     return fromWorkflowListCbor(csilResp);
   }
 
   /**
    * Start one workflow now rather than at its schedule.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   runWorkflow(req: RunWorkflowRequest): RunWorkflowResponse {
-    const csilResp = this.t.call("TallyOwlControl", "run-workflow", toRunWorkflowRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "run-workflow", toRunWorkflowRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "run-workflow", csilReply.variant, csilReply.payload);
     return fromRunWorkflowResponseCbor(csilResp);
   }
 
   /**
    * Every notification attempt, delivered or not.
-   * @throws {ServiceError} when the API returns an error response
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
    * @throws transport errors (network, timeout) raised by the transport
    */
   listNotifications(req: AlertListRequest): NotificationDeliveryList {
-    const csilResp = this.t.call("TallyOwlControl", "list-notifications", toAlertListRequestCbor(req));
+    const csilReply = this.t.callReply("TallyOwlControl", "list-notifications", toAlertListRequestCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "list-notifications", csilReply.variant, csilReply.payload);
     return fromNotificationDeliveryListCbor(csilResp);
+  }
+
+  /**
+   * Read the preferences of the signed-in person. A person who has never
+   * set them gets the defaults: the time of the browser.
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
+   * @throws transport errors (network, timeout) raised by the transport
+   */
+  getUserPreferences(req: Empty): UserPreferences {
+    const csilReply = this.t.callReply("TallyOwlControl", "get-user-preferences", toEmptyCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "get-user-preferences", csilReply.variant, csilReply.payload);
+    return fromUserPreferencesCbor(csilResp);
+  }
+
+  /**
+   * Replace the preferences of the signed-in person. Each person can do
+   * this, with or without a role in a workspace.
+   * @throws {ServiceErrorTypeRefusal} for the declared application error
+   * @throws transport errors (network, timeout) raised by the transport
+   */
+  putUserPreferences(req: UserPreferences): UserPreferences {
+    const csilReply = this.t.callReply("TallyOwlControl", "put-user-preferences", toUserPreferencesCbor(req));
+    const csilResp = resolveRpcReply("TallyOwlControl", "put-user-preferences", csilReply.variant, csilReply.payload);
+    return fromUserPreferencesCbor(csilResp);
   }
 }
 

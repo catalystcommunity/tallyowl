@@ -800,7 +800,7 @@ fn to_wire_member(member: &Member) -> GroupMember {
 fn from_wire_member(member: &GroupMember) -> Member {
     Member {
         node: member.node.clone(),
-        role: from_wire_role(member.role.clone()),
+        role: from_wire_role(member.role),
         address: member.address.clone(),
         region: member.region.clone().unwrap_or_else(|| "home".into()),
         domain: member.domain.clone().unwrap_or_else(|| "default".into()),

@@ -49,7 +49,11 @@ func FromBrowser(item ingest.TelemetryItem, options ...BrowserOption) (*Capture,
 		option(&chosen)
 	}
 
-	converted, err := api.DecodeTelemetryItem(ingest.EncodeTelemetryItem(item))
+	encoded, err := ingest.EncodeTelemetryItem(item)
+	if err != nil {
+		return nil, fmt.Errorf("this browser item was not recorded. It could not be encoded: %w", err)
+	}
+	converted, err := api.DecodeTelemetryItem(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("this browser item was not recorded. It could not be read: %w", err)
 	}

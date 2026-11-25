@@ -3,7 +3,7 @@
 // Target: typescript-codec
 
 import { CsilDecimal } from "./types.gen.ts";
-import type { AssignProjectRequest, BootstrapGroupRequest, CellInfo, CellName, ChangeReplicaRequest, ClearDegradedRequest, ClusterAck, ClusterSnapshotRequest, ClusterSnapshotResponse, ConsensusKind, ConsensusMessage, ConsensusReply, Consent, ConsentState, DescribeTopologyRequest, DirectoryRequest, DirectoryResponse, DomainName, DurationMs, Envelope, Epoch, ErrorCode, EventId, FailOverRegionRequest, Generation, GroupKind, GroupMember, GroupRef, Measurement, MeasurementKind, MeasurementList, MemberRole, MergeTabletsRequest, MissingRange, MoveTabletRequest, NodeCondition, NodeHealthReport, NodeName, NodeState, PartialKind, PartialQueryRequest, PartialQueryResponse, ProjectId, ProjectPlacement, Property, PropertyList, PropertyOrigin, RegionName, RemoveReplicaRequest, ReplicaStatus, ReplicaStatusRequest, RestoreRequest, RouteRequest, RouteResponse, SegmentList, SegmentListRequest, SegmentSummary, SegmentTransfer, SegmentTransferRequest, ServiceError, SessionId, SetReceiptPolicyRequest, SlowCause, SnapshotChunk, SnapshotChunkRequest, SourceId, SpanId, SplitTabletRequest, TabletInfo, TabletName, TabletState, TelemetryKind, Timestamp, TopologyResponse, TraceId, TrendBucket, TypedValue, TypedValueKind, UnsafeRecoverRequest, UnsafeRecoverResponse, VirtualShard, WorkspaceId } from "./types.gen.ts";
+import type { AssignProjectRequest, BootstrapGroupRequest, CellInfo, CellName, ChangeReplicaRequest, ClearDegradedRequest, ClusterAck, ClusterSnapshotRequest, ClusterSnapshotResponse, ConsensusKind, ConsensusMessage, ConsensusReply, Consent, ConsentState, DescribeTopologyRequest, DirectoryRequest, DirectoryResponse, DomainName, DurationMs, Envelope, Epoch, ErrorCode, EventId, FailOverRegionRequest, Generation, GroupKind, GroupMember, GroupRef, Measurement, MeasurementKind, MeasurementList, MemberRole, MergeTabletsRequest, MissingRange, MoveTabletRequest, NodeCondition, NodeHealthReport, NodeName, NodeState, PartialKind, PartialQueryRequest, PartialQueryResponse, ProjectId, ProjectPlacement, Property, PropertyList, PropertyOrigin, RegionName, RemoveReplicaRequest, ReplicaStatus, ReplicaStatusRequest, RestoreRequest, RouteRequest, RouteResponse, SegmentList, SegmentListRequest, SegmentSummary, SegmentTransfer, SegmentTransferRequest, ServiceErrorType, SessionId, SetReceiptPolicyRequest, SlowCause, SnapshotChunk, SnapshotChunkRequest, SourceId, SpanId, SplitTabletRequest, TabletInfo, TabletName, TabletState, TelemetryKind, Timestamp, TopologyResponse, TraceId, TrendBucket, TypedValue, TypedValueKind, UnsafeRecoverRequest, UnsafeRecoverResponse, VirtualShard, WorkspaceId } from "./types.gen.ts";
 
 /** A CBOR semantic tag wrapping an inner value (e.g. tag 0 timestamp, tag 4 decimal). */
 export type CborTag = { readonly tag: number; readonly value: CborValue };
@@ -74,9 +74,13 @@ function encInto(v: CborValue, out: number[]): void {
     head(4, v.length, out);
     for (const x of v) encInto(x, out);
   } else if (v instanceof Map) {
-    head(5, v.size, out);
-    for (const [k, val] of v) {
-      encInto(k, out);
+    // RFC 8949 section 4.2.1: entries go in bytewise order of the encoded keys, so
+    // every peer emits the same bytes and a decoder can check the order in one pass.
+    const entries = Array.from(v, ([k, val]): [Uint8Array, CborValue] => [encodeValue(k), val]);
+    entries.sort(([a], [b]) => csilCompareBytes(a, b));
+    head(5, entries.length, out);
+    for (const [k, val] of entries) {
+      for (const b of k) out.push(b);
       encInto(val, out);
     }
   } else {
@@ -90,6 +94,34 @@ export function encodeValue(value: CborValue): Uint8Array {
   const out: number[] = [];
   encInto(value, out);
   return Uint8Array.from(out);
+}
+
+function csilCompareBytes(a: Uint8Array, b: Uint8Array): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+// A record accepts its fields in any order, so the decoder only marks a map whose
+// keys are out of canonical order; a dynamic-map reader refuses a marked map.
+const csilUnorderedMaps = new WeakSet<Map<CborValue, CborValue>>();
+
+// A key with a longer head than needed is a second byte form of the same key, so
+// the order and duplicate checks on raw bytes would miss it.
+function csilShortestHead(b: Uint8Array, at: number): boolean {
+  const major = b[at] >> 5;
+  const low = b[at] & 0x1f;
+  if (major === 7 || low < 24) return true;
+  if (low === 24) return b[at + 1] >= 24;
+  if (low === 25) return b[at + 1] !== 0;
+  if (low === 26) return b[at + 1] !== 0 || b[at + 2] !== 0;
+  return b[at + 1] !== 0 || b[at + 2] !== 0 || b[at + 3] !== 0 || b[at + 4] !== 0;
+}
+
+function csilKeyLabel(key: CborValue): string {
+  return typeof key === "string" ? JSON.stringify(key) : String(key);
 }
 
 type Cursor = { b: Uint8Array; pos: number };
@@ -133,8 +165,24 @@ function smallInt(arg: bigint): number | bigint {
   return arg <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(arg) : arg;
 }
 
+/** Widen an IEEE 754 half-precision value (RFC 8949 Appendix D) exactly to binary64. */
+function csilHalfToFloat64(half: number): number {
+  const exp = (half >> 10) & 0x1f;
+  const mant = half & 0x3ff;
+  let magnitude: number;
+  if (exp === 0) magnitude = mant * 2 ** -24;
+  else if (exp === 31) magnitude = mant === 0 ? Infinity : NaN;
+  else magnitude = (mant + 1024) * 2 ** (exp - 25);
+  return half & 0x8000 ? -magnitude : magnitude;
+}
+
 function readFloat(st: Cursor, low: number): number {
   const bits = readArg(st, low);
+  if (low === 25) {
+    const view = new DataView(new ArrayBuffer(2));
+    view.setUint16(0, Number(bits), false);
+    return csilHalfToFloat64(view.getUint16(0, false));
+  }
   if (low === 26) {
     const view = new DataView(new ArrayBuffer(4));
     view.setUint32(0, Number(bits), false);
@@ -164,7 +212,7 @@ function decInto(st: Cursor, depth: number): CborValue {
       st.pos += 1;
       return null;
     }
-    if (low === 26 || low === 27) return readFloat(st, low);
+    if (low === 25 || low === 26 || low === 27) return readFloat(st, low);
     throw new Error("malformed CBOR simple value");
   }
   const arg = readArg(st, low);
@@ -200,8 +248,21 @@ function decInto(st: Cursor, depth: number): CborValue {
       if (arg > BigInt(st.b.length - st.pos)) throw new Error("CBOR map length exceeds remaining input");
       const n = Number(arg);
       const m = new Map<CborValue, CborValue>();
+      // Raw key bytes catch a repeated byte-string key and a key encoded twice in
+      // different widths, which a JS `Map` cannot tell apart from distinct keys.
+      const seen = new Set<string>();
+      let prev: Uint8Array | null = null;
       for (let i = 0; i < n; i++) {
+        const start = st.pos;
         const k = decInto(st, depth + 1);
+        if (!csilShortestHead(st.b, start)) throw new Error("csil cbor: map key is not in shortest form");
+        const raw = st.b.subarray(start, st.pos);
+        let id = "";
+        for (const b of raw) id += String.fromCharCode(b);
+        if (seen.has(id) || m.has(k)) throw new Error(`csil cbor: duplicate key ${csilKeyLabel(k)}`);
+        seen.add(id);
+        if (prev !== null && csilCompareBytes(prev, raw) > 0) csilUnorderedMaps.add(m);
+        prev = raw;
         const val = decInto(st, depth + 1);
         m.set(k, val);
       }
@@ -267,6 +328,13 @@ export function asMap(value: CborValue): Map<CborValue, CborValue> {
   throw new Error("expected a map");
 }
 
+/** A `{ * K => V }` map: its keys must arrive in canonical order (RFC 8949 section 4.2.1). */
+export function asDynamicMap(value: CborValue): Map<CborValue, CborValue> {
+  const m = asMap(value);
+  if (csilUnorderedMaps.has(m)) throw new Error("csil cbor: map keys are not in canonical order");
+  return m;
+}
+
 /** A decoded integer may surface as `bigint` (see `decInto`'s large-value path), so a
  * numeric literal's expected `number` is compared against the `bigint`-normalized form
  * rather than failing on a type mismatch that isn't a value mismatch. */
@@ -279,6 +347,32 @@ export function asLiteral<T extends CborValue>(value: CborValue, expected: T): T
 /** Validate a decoded scalar against a literal-enum's declared vocabulary, erroring
  * on an unknown value. The caller reads through `asNumber`/`asString`/`asBool`, which
  * already normalize a decoded `bigint` to `number`, so a plain membership check suffices. */
+/** CBOR orders unsigned integer keys first, then negative keys by magnitude. */
+export function enumNumberMap(entries: [bigint, CborValue][]): Map<CborValue, CborValue> {
+  return new Map(entries.sort(([a], [b]) => {
+    if (a === b) return 0;
+    if ((a < 0n) !== (b < 0n)) return a < 0n ? 1 : -1;
+    if (a < 0n) return a > b ? -1 : 1;
+    return a < b ? -1 : 1;
+  }));
+}
+
+export function enumToNumber(label: string, entries: readonly (readonly [string, bigint])[]): bigint {
+  for (const [name, number] of entries) {
+    if (name === label) return number;
+  }
+  throw new Error("unknown enum label");
+}
+
+export function enumFromNumber(value: CborValue, entries: readonly (readonly [string, bigint])[]): string {
+  if (typeof value === "bigint" || (typeof value === "number" && Number.isSafeInteger(value))) {
+    for (const [name, number] of entries) {
+      if (BigInt(value) === number) return name;
+    }
+  }
+  throw new Error("unknown enum number");
+}
+
 export function asEnumMember<T extends number | string | boolean | null>(
   value: T,
   members: readonly T[],
@@ -323,7 +417,92 @@ function asTagged(value: CborValue, tag: number): CborValue {
 
 /** Decode a tag-0 (RFC 3339, UTC) timestamp into a `Date`. */
 export function asTimestamp(value: CborValue): Date {
-  return new Date(asString(asTagged(value, 0)));
+  return csilTsFromText(asString(asTagged(value, 0)));
+}
+
+// `Date` parsing accepts many shapes the wire contract forbids (a space for `T`, no
+// offset, leap seconds rolled over), so the grammar is checked by hand. `[0-9]` stays
+// ASCII-only, and `$` without the `m` flag matches only at the true end of input.
+const CSIL_TS_PATTERN =
+  /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(?:[Zz]|([+-])([0-9]{2}):([0-9]{2}))$/;
+
+/** Parse canonical tag-0 text strictly. `Date` holds milliseconds, so a nonzero digit
+ * past the third fraction digit is an error rather than a silent rounding. */
+export function csilTsFromText(text: string): Date {
+  const m = CSIL_TS_PATTERN.exec(text);
+  if (m === null) throw new Error(`invalid RFC 3339 timestamp ${JSON.stringify(text)}`);
+  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > monthDays[month - 1]) {
+    throw new Error(`invalid calendar date in timestamp ${JSON.stringify(text)}`);
+  }
+  if (hour > 23 || minute > 59 || second > 59) {
+    throw new Error(`invalid time of day in timestamp ${JSON.stringify(text)}`);
+  }
+  const fraction = m[7] ?? "";
+  if (/[1-9]/.test(fraction.slice(3))) {
+    throw new Error(`timestamp ${JSON.stringify(text)} is finer than milliseconds`);
+  }
+  let offsetMinutes = 0;
+  if (m[8] !== undefined) {
+    const offsetHour = Number(m[9]);
+    const offsetMinute = Number(m[10]);
+    if (offsetHour > 23 || offsetMinute > 59) {
+      throw new Error(`invalid offset in timestamp ${JSON.stringify(text)}`);
+    }
+    offsetMinutes = (m[8] === "-" ? -1 : 1) * (offsetHour * 60 + offsetMinute);
+  }
+  // `Date.UTC` maps years 0-99 to 1900-1999, so the year is set on its own.
+  const local = new Date(0);
+  local.setUTCFullYear(year, month - 1, day);
+  local.setUTCHours(hour, minute, second, Number(fraction.padEnd(3, "0").slice(0, 3)));
+  const instant = new Date(local.getTime() - offsetMinutes * 60000);
+  const utcYear = instant.getUTCFullYear();
+  if (utcYear < 1 || utcYear > 9999) {
+    throw new Error(`timestamp ${JSON.stringify(text)} is outside years 0001-9999 in UTC`);
+  }
+  return instant;
+}
+
+const CSIL_EPOCH_FIRST = -62135596800;
+const CSIL_EPOCH_LAST = 253402300799;
+
+/** Decode tag-1 epoch seconds (`cddl_time`) into a `Date`. A `Date` holds
+ * milliseconds, so a float fraction is rounded to three digits by the shared rule. */
+export function asCddlTime(value: CborValue): Date {
+  const inner = asTagged(value, 1);
+  // An integer past 2^53 decodes as a `bigint`; every one of those is out of range.
+  if (typeof inner === "bigint") throw new Error("cddl_time is outside years 0001-9999");
+  if (typeof inner !== "number") throw new Error("cddl_time content must be a number");
+  if (!Number.isFinite(inner)) throw new Error("cddl_time must be finite");
+  if (inner < CSIL_EPOCH_FIRST - 1 || inner > CSIL_EPOCH_LAST + 1) {
+    throw new Error("cddl_time is outside years 0001-9999");
+  }
+  // An integer and a float with the same value decode to the same `number`, and the
+  // rule gives an integer a zero fraction, so one path serves both.
+  let seconds = Math.floor(inner);
+  let units = Math.floor((inner - seconds) * 1000 + 0.5);
+  if (units === 1000) {
+    seconds += 1;
+    units = 0;
+  }
+  if (seconds < CSIL_EPOCH_FIRST || seconds > CSIL_EPOCH_LAST) {
+    throw new Error("cddl_time is outside years 0001-9999");
+  }
+  return new Date(seconds * 1000 + units);
+}
+
+/** A `Date` as tag-1 content: whole seconds as an integer, else a binary64 float. */
+export function csilEpochFromDate(d: Date): number {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) throw new Error("expected a valid Date");
+  const millis = d.getTime();
+  const seconds = Math.floor(millis / 1000);
+  if (seconds < CSIL_EPOCH_FIRST || seconds > CSIL_EPOCH_LAST) {
+    throw new Error("cddl_time is outside years 0001-9999");
+  }
+  const units = millis - seconds * 1000;
+  return units === 0 ? seconds : seconds + units / 1000;
 }
 
 /** Decode a tag-4 decimal fraction into its `[exponent, mantissa]` payload. */
@@ -338,6 +517,11 @@ export function asDecimalPayload(value: CborValue): [number | bigint, number | b
 
 /** A `Date` rendered as the canonical tag-0 text: RFC 3339, UTC, `Z` offset. */
 export function csilTsToText(d: Date): string {
+  // An Invalid Date or a year outside 0001-9999 has no canonical text, and
+  // `toISOString` would write an expanded `+YYYYYY` year for the latter.
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) throw new Error("expected a valid Date");
+  const year = d.getUTCFullYear();
+  if (year < 1 || year > 9999) throw new Error("timestamp is outside years 0001-9999");
   return d.toISOString().replace(/\.000Z$/, "Z");
 }
 
@@ -349,6 +533,7 @@ export function toGroupRefCborValue(v: GroupRef): CborValue {
 }
 
 export function fromGroupRefCborValue(value: CborValue): GroupRef {
+  asMap(value);
   return {
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["global-directory", "cell-controller", "tablet"]) as "global-directory" | "cell-controller" | "tablet"),
     name: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "name")),
@@ -374,6 +559,7 @@ export function toGroupMemberCborValue(v: GroupMember): CborValue {
 }
 
 export function fromGroupMemberCborValue(value: CborValue): GroupMember {
+  asMap(value);
   return {
     node: asString(requireKey(value, "node")),
     role: (asEnumMember(asString(requireKey(value, "role")), ["voter", "learner"]) as "voter" | "learner"),
@@ -402,6 +588,7 @@ export function toConsensusMessageCborValue(v: ConsensusMessage): CborValue {
 }
 
 export function fromConsensusMessageCborValue(value: CborValue): ConsensusMessage {
+  asMap(value);
   return {
     group: fromGroupRefCborValue(requireKey(value, "group")),
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["append-entries", "vote", "install-snapshot", "proposal"]) as "append-entries" | "vote" | "install-snapshot" | "proposal"),
@@ -429,6 +616,7 @@ export function toConsensusReplyCborValue(v: ConsensusReply): CborValue {
 }
 
 export function fromConsensusReplyCborValue(value: CborValue): ConsensusReply {
+  asMap(value);
   return {
     accepted: asBool(requireKey(value, "accepted")),
     payload: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "payload")),
@@ -455,6 +643,7 @@ export function toSnapshotChunkRequestCborValue(v: SnapshotChunkRequest): CborVa
 }
 
 export function fromSnapshotChunkRequestCborValue(value: CborValue): SnapshotChunkRequest {
+  asMap(value);
   return {
     group: fromGroupRefCborValue(requireKey(value, "group")),
     snapshotId: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "snapshot_id")),
@@ -483,6 +672,7 @@ export function toSnapshotChunkCborValue(v: SnapshotChunk): CborValue {
 }
 
 export function fromSnapshotChunkCborValue(value: CborValue): SnapshotChunk {
+  asMap(value);
   return {
     snapshotId: asString(requireKey(value, "snapshot_id")),
     offset: asNumber(requireKey(value, "offset")),
@@ -508,6 +698,7 @@ export function toSegmentListRequestCborValue(v: SegmentListRequest): CborValue 
 }
 
 export function fromSegmentListRequestCborValue(value: CborValue): SegmentListRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
   };
@@ -533,6 +724,7 @@ export function toSegmentSummaryCborValue(v: SegmentSummary): CborValue {
 }
 
 export function fromSegmentSummaryCborValue(value: CborValue): SegmentSummary {
+  asMap(value);
   return {
     segmentId: asString(requireKey(value, "segment_id")),
     totalBytes: asNumber(requireKey(value, "total_bytes")),
@@ -561,6 +753,7 @@ export function toSegmentListCborValue(v: SegmentList): CborValue {
 }
 
 export function fromSegmentListCborValue(value: CborValue): SegmentList {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     segments: asArray(requireKey(value, "segments")).map((csilE) => fromSegmentSummaryCborValue(csilE)),
@@ -587,6 +780,7 @@ export function toSegmentTransferRequestCborValue(v: SegmentTransferRequest): Cb
 }
 
 export function fromSegmentTransferRequestCborValue(value: CborValue): SegmentTransferRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     segmentId: asString(requireKey(value, "segment_id")),
@@ -615,6 +809,7 @@ export function toSegmentTransferCborValue(v: SegmentTransfer): CborValue {
 }
 
 export function fromSegmentTransferCborValue(value: CborValue): SegmentTransfer {
+  asMap(value);
   return {
     segmentId: asString(requireKey(value, "segment_id")),
     offset: asNumber(requireKey(value, "offset")),
@@ -654,6 +849,7 @@ export function toPartialQueryRequestCborValue(v: PartialQueryRequest): CborValu
 }
 
 export function fromPartialQueryRequestCborValue(value: CborValue): PartialQueryRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     generation: asNumber(requireKey(value, "generation")),
@@ -689,6 +885,7 @@ export function toTrendBucketCborValue(v: TrendBucket): CborValue {
 }
 
 export function fromTrendBucketCborValue(value: CborValue): TrendBucket {
+  asMap(value);
   return {
     bucketStart: asNumber(requireKey(value, "bucket_start")),
     count: asNumber(requireKey(value, "count")),
@@ -721,6 +918,7 @@ export function toPartialQueryResponseCborValue(v: PartialQueryResponse): CborVa
 }
 
 export function fromPartialQueryResponseCborValue(value: CborValue): PartialQueryResponse {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     commitWatermark: asNumber(requireKey(value, "commit_watermark")),
@@ -754,6 +952,7 @@ export function toMissingRangeCborValue(v: MissingRange): CborValue {
 }
 
 export function fromMissingRangeCborValue(value: CborValue): MissingRange {
+  asMap(value);
   return {
     tabletId: asString(requireKey(value, "tablet_id")),
     rangeStart: asNumber(requireKey(value, "range_start")),
@@ -789,6 +988,7 @@ export function toNodeHealthReportCborValue(v: NodeHealthReport): CborValue {
 }
 
 export function fromNodeHealthReportCborValue(value: CborValue): NodeHealthReport {
+  asMap(value);
   return {
     node: asString(requireKey(value, "node")),
     reportedAt: asNumber(requireKey(value, "reported_at")),
@@ -832,6 +1032,7 @@ export function toNodeConditionCborValue(v: NodeCondition): CborValue {
 }
 
 export function fromNodeConditionCborValue(value: CborValue): NodeCondition {
+  asMap(value);
   return {
     node: asString(requireKey(value, "node")),
     state: (asEnumMember(asString(requireKey(value, "state")), ["healthy", "slow", "unreachable", "read-only", "draining"]) as "healthy" | "slow" | "unreachable" | "read-only" | "draining"),
@@ -877,6 +1078,7 @@ export function toTabletInfoCborValue(v: TabletInfo): CborValue {
 }
 
 export function fromTabletInfoCborValue(value: CborValue): TabletInfo {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     cell: asString(requireKey(value, "cell")),
@@ -916,6 +1118,7 @@ export function toCellInfoCborValue(v: CellInfo): CborValue {
 }
 
 export function fromCellInfoCborValue(value: CborValue): CellInfo {
+  asMap(value);
   return {
     cell: asString(requireKey(value, "cell")),
     region: asString(requireKey(value, "region")),
@@ -943,6 +1146,7 @@ export function toProjectPlacementCborValue(v: ProjectPlacement): CborValue {
 }
 
 export function fromProjectPlacementCborValue(value: CborValue): ProjectPlacement {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     cells: asArray(requireKey(value, "cells")).map((csilE) => asString(csilE)),
@@ -966,6 +1170,7 @@ export function toDescribeTopologyRequestCborValue(v: DescribeTopologyRequest): 
 }
 
 export function fromDescribeTopologyRequestCborValue(value: CborValue): DescribeTopologyRequest {
+  asMap(value);
   return {
     cell: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "cell")),
   };
@@ -990,6 +1195,7 @@ export function toTopologyResponseCborValue(v: TopologyResponse): CborValue {
 }
 
 export function fromTopologyResponseCborValue(value: CborValue): TopologyResponse {
+  asMap(value);
   return {
     cells: asArray(requireKey(value, "cells")).map((csilE) => fromCellInfoCborValue(csilE)),
     tablets: asArray(requireKey(value, "tablets")).map((csilE) => fromTabletInfoCborValue(csilE)),
@@ -1015,6 +1221,7 @@ export function toSplitTabletRequestCborValue(v: SplitTabletRequest): CborValue 
 }
 
 export function fromSplitTabletRequestCborValue(value: CborValue): SplitTabletRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     atShard: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asNumber(csilV))(mapGet(value, "at_shard")),
@@ -1037,6 +1244,7 @@ export function toMergeTabletsRequestCborValue(v: MergeTabletsRequest): CborValu
 }
 
 export function fromMergeTabletsRequestCborValue(value: CborValue): MergeTabletsRequest {
+  asMap(value);
   return {
     left: asString(requireKey(value, "left")),
     right: asString(requireKey(value, "right")),
@@ -1060,6 +1268,7 @@ export function toMoveTabletRequestCborValue(v: MoveTabletRequest): CborValue {
 }
 
 export function fromMoveTabletRequestCborValue(value: CborValue): MoveTabletRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     awayFrom: asString(requireKey(value, "away_from")),
@@ -1087,6 +1296,7 @@ export function toChangeReplicaRequestCborValue(v: ChangeReplicaRequest): CborVa
 }
 
 export function fromChangeReplicaRequestCborValue(value: CborValue): ChangeReplicaRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     node: asString(requireKey(value, "node")),
@@ -1113,6 +1323,7 @@ export function toRemoveReplicaRequestCborValue(v: RemoveReplicaRequest): CborVa
 }
 
 export function fromRemoveReplicaRequestCborValue(value: CborValue): RemoveReplicaRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     node: asString(requireKey(value, "node")),
@@ -1135,6 +1346,7 @@ export function toSetReceiptPolicyRequestCborValue(v: SetReceiptPolicyRequest): 
 }
 
 export function fromSetReceiptPolicyRequestCborValue(value: CborValue): SetReceiptPolicyRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     policy: asString(requireKey(value, "policy")),
@@ -1158,6 +1370,7 @@ export function toFailOverRegionRequestCborValue(v: FailOverRegionRequest): Cbor
 }
 
 export function fromFailOverRegionRequestCborValue(value: CborValue): FailOverRegionRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     ontoRegion: asString(requireKey(value, "onto_region")),
@@ -1183,6 +1396,7 @@ export function toUnsafeRecoverRequestCborValue(v: UnsafeRecoverRequest): CborVa
 }
 
 export function fromUnsafeRecoverRequestCborValue(value: CborValue): UnsafeRecoverRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     confirmTablet: asString(requireKey(value, "confirm_tablet")),
@@ -1211,6 +1425,7 @@ export function toUnsafeRecoverResponseCborValue(v: UnsafeRecoverResponse): Cbor
 }
 
 export function fromUnsafeRecoverResponseCborValue(value: CborValue): UnsafeRecoverResponse {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     auditId: asString(requireKey(value, "audit_id")),
@@ -1238,6 +1453,7 @@ export function toClearDegradedRequestCborValue(v: ClearDegradedRequest): CborVa
 }
 
 export function fromClearDegradedRequestCborValue(value: CborValue): ClearDegradedRequest {
+  asMap(value);
   return {
     tablet: asString(requireKey(value, "tablet")),
     acceptedBy: asString(requireKey(value, "accepted_by")),
@@ -1260,6 +1476,7 @@ export function toClusterSnapshotRequestCborValue(v: ClusterSnapshotRequest): Cb
 }
 
 export function fromClusterSnapshotRequestCborValue(value: CborValue): ClusterSnapshotRequest {
+  asMap(value);
   return {
     tablet: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "tablet")),
   };
@@ -1284,6 +1501,7 @@ export function toClusterSnapshotResponseCborValue(v: ClusterSnapshotResponse): 
 }
 
 export function fromClusterSnapshotResponseCborValue(value: CborValue): ClusterSnapshotResponse {
+  asMap(value);
   return {
     snapshotId: asString(requireKey(value, "snapshot_id")),
     tablets: asArray(requireKey(value, "tablets")).map((csilE) => asString(csilE)),
@@ -1309,6 +1527,7 @@ export function toRestoreRequestCborValue(v: RestoreRequest): CborValue {
 }
 
 export function fromRestoreRequestCborValue(value: CborValue): RestoreRequest {
+  asMap(value);
   return {
     snapshotId: asString(requireKey(value, "snapshot_id")),
     ontoTablet: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "onto_tablet")),
@@ -1331,6 +1550,7 @@ export function toBootstrapGroupRequestCborValue(v: BootstrapGroupRequest): Cbor
 }
 
 export function fromBootstrapGroupRequestCborValue(value: CborValue): BootstrapGroupRequest {
+  asMap(value);
   return {
     group: fromGroupRefCborValue(requireKey(value, "group")),
     members: asArray(requireKey(value, "members")).map((csilE) => fromGroupMemberCborValue(csilE)),
@@ -1354,6 +1574,7 @@ export function toClusterAckCborValue(v: ClusterAck): CborValue {
 }
 
 export function fromClusterAckCborValue(value: CborValue): ClusterAck {
+  asMap(value);
   return {
     accepted: asBool(requireKey(value, "accepted")),
     generation: asNumber(requireKey(value, "generation")),
@@ -1377,6 +1598,7 @@ export function toAssignProjectRequestCborValue(v: AssignProjectRequest): CborVa
 }
 
 export function fromAssignProjectRequestCborValue(value: CborValue): AssignProjectRequest {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     cells: asArray(requireKey(value, "cells")).map((csilE) => asString(csilE)),
@@ -1398,6 +1620,7 @@ export function toDirectoryRequestCborValue(v: DirectoryRequest): CborValue {
 }
 
 export function fromDirectoryRequestCborValue(value: CborValue): DirectoryRequest {
+  asMap(value);
   return {
     projectId: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBytes(csilV))(mapGet(value, "project_id")),
   };
@@ -1419,6 +1642,7 @@ export function toDirectoryResponseCborValue(v: DirectoryResponse): CborValue {
 }
 
 export function fromDirectoryResponseCborValue(value: CborValue): DirectoryResponse {
+  asMap(value);
   return {
     placements: asArray(requireKey(value, "placements")).map((csilE) => fromProjectPlacementCborValue(csilE)),
     generation: asNumber(requireKey(value, "generation")),
@@ -1441,6 +1665,7 @@ export function toRouteRequestCborValue(v: RouteRequest): CborValue {
 }
 
 export function fromRouteRequestCborValue(value: CborValue): RouteRequest {
+  asMap(value);
   return {
     projectId: asBytes(requireKey(value, "project_id")),
     affinityKey: asBytes(requireKey(value, "affinity_key")),
@@ -1469,6 +1694,7 @@ export function toRouteResponseCborValue(v: RouteResponse): CborValue {
 }
 
 export function fromRouteResponseCborValue(value: CborValue): RouteResponse {
+  asMap(value);
   return {
     cell: asString(requireKey(value, "cell")),
     shard: asNumber(requireKey(value, "shard")),
@@ -1496,6 +1722,7 @@ export function toReplicaStatusRequestCborValue(v: ReplicaStatusRequest): CborVa
 }
 
 export function fromReplicaStatusRequestCborValue(value: CborValue): ReplicaStatusRequest {
+  asMap(value);
   return {
     tablet: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asString(csilV))(mapGet(value, "tablet")),
   };
@@ -1520,6 +1747,7 @@ export function toReplicaStatusCborValue(v: ReplicaStatus): CborValue {
 }
 
 export function fromReplicaStatusCborValue(value: CborValue): ReplicaStatus {
+  asMap(value);
   return {
     node: asString(requireKey(value, "node")),
     tablets: asArray(requireKey(value, "tablets")).map((csilE) => fromTabletInfoCborValue(csilE)),
@@ -1551,6 +1779,7 @@ export function toTypedValueCborValue(v: TypedValue): CborValue {
 }
 
 export function fromTypedValueCborValue(value: CborValue): TypedValue {
+  asMap(value);
   return {
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["null", "bool", "int", "uint", "float", "decimal", "text", "bytes"]) as "null" | "bool" | "int" | "uint" | "float" | "decimal" | "text" | "bytes"),
     boolValue: ((csilV: CborValue | undefined) => csilV === undefined ? undefined : asBool(csilV))(mapGet(value, "bool_value")),
@@ -1580,6 +1809,7 @@ export function toPropertyCborValue(v: Property): CborValue {
 }
 
 export function fromPropertyCborValue(value: CborValue): Property {
+  asMap(value);
   return {
     key: asString(requireKey(value, "key")),
     value: fromTypedValueCborValue(requireKey(value, "value")),
@@ -1607,6 +1837,7 @@ export function toMeasurementCborValue(v: Measurement): CborValue {
 }
 
 export function fromMeasurementCborValue(value: CborValue): Measurement {
+  asMap(value);
   return {
     key: asString(requireKey(value, "key")),
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["float", "decimal", "int"]) as "float" | "decimal" | "int"),
@@ -1634,6 +1865,7 @@ export function toConsentCborValue(v: Consent): CborValue {
 }
 
 export function fromConsentCborValue(value: CborValue): Consent {
+  asMap(value);
   return {
     marketing: (asEnumMember(asString(requireKey(value, "marketing")), ["granted", "denied", "absent"]) as "granted" | "denied" | "absent"),
     analytics: (asEnumMember(asString(requireKey(value, "analytics")), ["granted", "denied", "absent"]) as "granted" | "denied" | "absent"),
@@ -1678,6 +1910,7 @@ export function toEnvelopeCborValue(v: Envelope): CborValue {
 }
 
 export function fromEnvelopeCborValue(value: CborValue): Envelope {
+  asMap(value);
   return {
     eventId: asBytes(requireKey(value, "event_id")),
     kind: (asEnumMember(asString(requireKey(value, "kind")), ["event", "page-view", "session-start", "session-end", "session-heartbeat", "interaction", "feature-exposure", "identify", "alias", "group", "conversion", "error", "span", "metric-point", "campaign-touch", "campaign-cost"]) as "event" | "page-view" | "session-start" | "session-end" | "session-heartbeat" | "interaction" | "feature-exposure" | "identify" | "alias" | "group" | "conversion" | "error" | "span" | "metric-point" | "campaign-touch" | "campaign-cost"),
@@ -1713,7 +1946,7 @@ export function fromEnvelopeCbor(bytes: Uint8Array): Envelope {
   return fromEnvelopeCborValue(decode(bytes));
 }
 
-export function toServiceErrorCborValue(v: ServiceError): CborValue {
+export function toServiceErrorTypeCborValue(v: ServiceErrorType): CborValue {
   const csilMap = new Map<CborValue, CborValue>();
   csilMap.set("code", v.code);
   if (v.detail !== undefined) csilMap.set("detail", v.detail.map((csilE): CborValue => toPropertyCborValue(csilE)));
@@ -1722,7 +1955,8 @@ export function toServiceErrorCborValue(v: ServiceError): CborValue {
   return csilMap;
 }
 
-export function fromServiceErrorCborValue(value: CborValue): ServiceError {
+export function fromServiceErrorTypeCborValue(value: CborValue): ServiceErrorType {
+  asMap(value);
   return {
     code: (asEnumMember(asString(requireKey(value, "code")), ["invalid-argument", "unauthenticated", "permission-denied", "not-found", "already-exists", "resource-exhausted", "failed-precondition", "unavailable", "schema-unsupported", "budget-exceeded", "incomplete-result", "internal"]) as "invalid-argument" | "unauthenticated" | "permission-denied" | "not-found" | "already-exists" | "resource-exhausted" | "failed-precondition" | "unavailable" | "schema-unsupported" | "budget-exceeded" | "incomplete-result" | "internal"),
     message: asString(requireKey(value, "message")),
@@ -1731,11 +1965,416 @@ export function fromServiceErrorCborValue(value: CborValue): ServiceError {
   };
 }
 
-export function toServiceErrorCbor(v: ServiceError): Uint8Array {
-  return encodeValue(toServiceErrorCborValue(v));
+export function toServiceErrorTypeCbor(v: ServiceErrorType): Uint8Array {
+  return encodeValue(toServiceErrorTypeCborValue(v));
 }
 
-export function fromServiceErrorCbor(bytes: Uint8Array): ServiceError {
-  return fromServiceErrorCborValue(decode(bytes));
+export function fromServiceErrorTypeCbor(bytes: Uint8Array): ServiceErrorType {
+  return fromServiceErrorTypeCborValue(decode(bytes));
 }
 
+export interface RpcReply { variant: string; payload: Uint8Array }
+
+export class ServiceErrorTypeRefusal extends Error {
+  readonly value: ServiceErrorType;
+
+  constructor(value: ServiceErrorType) {
+    super("ServiceError");
+    this.value = value;
+  }
+}
+
+export async function encodeTallyOwlReplicationDeliverConsensusReply(handler: () => Promise<ConsensusReply> | ConsensusReply): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ConsensusReply", payload: encodeValue(toConsensusReplyCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlReplicationFetchSnapshotChunkReply(handler: () => Promise<SnapshotChunk> | SnapshotChunk): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "SnapshotChunk", payload: encodeValue(toSnapshotChunkCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlReplicationFetchSegmentReply(handler: () => Promise<SegmentTransfer> | SegmentTransfer): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "SegmentTransfer", payload: encodeValue(toSegmentTransferCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlReplicationPartialAggregateReply(handler: () => Promise<PartialQueryResponse> | PartialQueryResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "PartialQueryResponse", payload: encodeValue(toPartialQueryResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlReplicationReplicaStatusReply(handler: () => Promise<ReplicaStatus> | ReplicaStatus): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ReplicaStatus", payload: encodeValue(toReplicaStatusCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlReplicationReportHealthReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlReplicationListSegmentsReply(handler: () => Promise<SegmentList> | SegmentList): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "SegmentList", payload: encodeValue(toSegmentListCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterDescribeTopologyReply(handler: () => Promise<TopologyResponse> | TopologyResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "TopologyResponse", payload: encodeValue(toTopologyResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterRouteReply(handler: () => Promise<RouteResponse> | RouteResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "RouteResponse", payload: encodeValue(toRouteResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterBootstrapGroupReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterAddReplicaReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterRemoveReplicaReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterSplitTabletReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterMergeTabletsReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterMoveTabletReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterSetReceiptPolicyReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterFailOverRegionReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterUnsafeRecoverReply(handler: () => Promise<UnsafeRecoverResponse> | UnsafeRecoverResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "UnsafeRecoverResponse", payload: encodeValue(toUnsafeRecoverResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterClearDegradedReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterSnapshotClusterReply(handler: () => Promise<ClusterSnapshotResponse> | ClusterSnapshotResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterSnapshotResponse", payload: encodeValue(toClusterSnapshotResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterRestoreReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterDirectoryReply(handler: () => Promise<DirectoryResponse> | DirectoryResponse): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "DirectoryResponse", payload: encodeValue(toDirectoryResponseCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export async function encodeTallyOwlClusterAssignProjectReply(handler: () => Promise<ClusterAck> | ClusterAck): Promise<RpcReply> {
+  try {
+    const value = await handler();
+    return { variant: "ClusterAck", payload: encodeValue(toClusterAckCborValue(value)) };
+  } catch (error) {
+    if (error instanceof ServiceErrorTypeRefusal) return { variant: "ServiceError", payload: encodeValue(toServiceErrorTypeCborValue(error.value)) };
+    throw error;
+  }
+}
+
+export function resolveRpcReply(service: string, op: string, variant: string | null | undefined, payload: Uint8Array): Uint8Array {
+  if (service === "TallyOwlReplication" && op === "deliver-consensus") {
+    switch (variant) {
+      case "ConsensusReply": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlReplication" && op === "fetch-snapshot-chunk") {
+    switch (variant) {
+      case "SnapshotChunk": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlReplication" && op === "fetch-segment") {
+    switch (variant) {
+      case "SegmentTransfer": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlReplication" && op === "partial-aggregate") {
+    switch (variant) {
+      case "PartialQueryResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlReplication" && op === "replica-status") {
+    switch (variant) {
+      case "ReplicaStatus": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlReplication" && op === "report-health") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlReplication" && op === "list-segments") {
+    switch (variant) {
+      case "SegmentList": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "describe-topology") {
+    switch (variant) {
+      case "TopologyResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "route") {
+    switch (variant) {
+      case "RouteResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "bootstrap-group") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "add-replica") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "remove-replica") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "split-tablet") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "merge-tablets") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "move-tablet") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "set-receipt-policy") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "fail-over-region") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "unsafe-recover") {
+    switch (variant) {
+      case "UnsafeRecoverResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "clear-degraded") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "snapshot-cluster") {
+    switch (variant) {
+      case "ClusterSnapshotResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "restore") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "directory") {
+    switch (variant) {
+      case "DirectoryResponse": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  if (service === "TallyOwlCluster" && op === "assign-project") {
+    switch (variant) {
+      case "ClusterAck": return payload;
+      case "ServiceError": { const tree = decode(payload); throw new ServiceErrorTypeRefusal(fromServiceErrorTypeCborValue(tree)); }
+      default: throw new Error(`invalid RPC reply variant ${variant}`);
+    }
+  }
+  return payload;
+}

@@ -186,7 +186,8 @@ impl Installation {
                 encode_create_role_token_request(&CreateRoleTokenRequest {
                     label: "kubernetes collectors".into(),
                     policy,
-                }),
+                })
+                .unwrap(),
             )
             .expect("the call reaches the head");
         assert_ne!(
@@ -231,6 +232,7 @@ fn enroll_request(token: &str, request_der: Vec<u8>, role: NodeRole) -> Vec<u8> 
             policy_generation: None,
         }),
     })
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +290,8 @@ fn a_node_enrolls_with_a_token_and_keeps_its_own_private_key() {
             encode_list_request(&ListRequest {
                 cursor: None,
                 limit: None,
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the head");
     let tokens = decode_role_token_list(&listed.payload).expect("a list comes back");
@@ -456,7 +459,8 @@ fn revoking_a_token_stops_new_enrollment_and_leaves_the_enrolled_node_alone() {
             encode_revoke_role_token_request(&RevokeRoleTokenRequest {
                 token_id: token_id.clone(),
                 cascade: None,
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the head");
 
@@ -484,7 +488,8 @@ fn revoking_a_token_stops_new_enrollment_and_leaves_the_enrolled_node_alone() {
             encode_list_request(&ListRequest {
                 cursor: None,
                 limit: None,
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the head");
     let nodes = decode_node_list(&listed.payload).expect("a list");
@@ -596,7 +601,7 @@ fn a_node_id_alone_renews_nothing() {
         .call(
             CONTROL,
             "renew-node-certificate",
-            encode_renew_node_certificate_request(&renewal_of(&enrolled.node_id)),
+            encode_renew_node_certificate_request(&renewal_of(&enrolled.node_id)).unwrap(),
         )
         .expect("the call reaches the head");
     assert_eq!(
@@ -726,7 +731,8 @@ fn revoking_a_token_id_that_does_not_exist_says_so() {
             encode_revoke_role_token_request(&RevokeRoleTokenRequest {
                 token_id: "0123456789abcdef".into(),
                 cascade: None,
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the head");
     assert_eq!(response.variant.as_deref(), Some(SERVICE_ERROR_VARIANT));
@@ -751,7 +757,8 @@ fn a_renewal_for_a_node_that_never_enrolled_is_refused() {
             encode_renew_node_certificate_request(&RenewNodeCertificateRequest {
                 node_id: "node-invented".into(),
                 certificate_request: request_der,
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the head");
     assert_eq!(response.variant.as_deref(), Some(SERVICE_ERROR_VARIANT));
@@ -785,7 +792,8 @@ fn managing_role_tokens_needs_an_owner_and_enrolling_does_not() {
                     enrollments_each_hour: None,
                     audit_labels: None,
                 },
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the head");
     assert_eq!(refused.variant.as_deref(), Some(SERVICE_ERROR_VARIANT));
@@ -797,7 +805,8 @@ fn managing_role_tokens_needs_an_owner_and_enrolling_does_not() {
             encode_list_request(&ListRequest {
                 cursor: None,
                 limit: None,
-            }),
+            })
+            .unwrap(),
         )
         .expect("the call reaches the head");
     assert_eq!(listed.variant.as_deref(), Some(SERVICE_ERROR_VARIANT));
@@ -1015,6 +1024,7 @@ fn one_event(project: [u8; 16]) -> Vec<u8> {
         attempt: None,
         protocol_version: None,
     })
+    .unwrap()
 }
 
 fn committed(client: &Client, payload: Vec<u8>) -> Result<(), String> {
@@ -1045,7 +1055,7 @@ fn a_node_renews_over_mutual_tls_and_another_node_cannot_renew_it() {
         .call(
             CONTROL,
             "renew-node-certificate",
-            encode_renew_node_certificate_request(&renewal_of(&node.response.node_id)),
+            encode_renew_node_certificate_request(&renewal_of(&node.response.node_id)).unwrap(),
         )
         .expect("the call reaches the head");
     assert_eq!(
@@ -1059,7 +1069,7 @@ fn a_node_renews_over_mutual_tls_and_another_node_cannot_renew_it() {
         .call(
             CONTROL,
             "renew-node-certificate",
-            encode_renew_node_certificate_request(&renewal_of(&node.response.node_id)),
+            encode_renew_node_certificate_request(&renewal_of(&node.response.node_id)).unwrap(),
         )
         .expect("the call reaches the head");
     assert_ne!(

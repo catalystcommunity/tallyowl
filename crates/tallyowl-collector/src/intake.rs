@@ -246,7 +246,9 @@ impl Intake {
         // Hard limits first. A batch over the seal cannot be split here, because
         // the driver owns batching and only the driver can preserve event IDs
         // across a rebatch. See DELIVERY.md section 2.
-        let encoded_size = tallyowl_collector_api::codec::encode_batch(&batch).len() as i64;
+        let encoded_size = tallyowl_collector_api::codec::encode_batch(&batch)
+            .map_err(|e| TallyOwlError::unencodable("The batch", e))?
+            .len() as i64;
         if encoded_size > self.limits.max_batch_bytes {
             self.metrics.increment(
                 "tallyowl_batches_refused_total",
@@ -379,7 +381,7 @@ impl Intake {
         // Corndogs does not hold. See DELIVERY.md section 4 and `task`.
         let queued_at = now_ms();
         let payload =
-            crate::task::encode(&crate::task::seal(&batch, &tenancy.source_id, queued_at));
+            crate::task::encode(&crate::task::seal(&batch, &tenancy.source_id, queued_at)?)?;
         let task_uuid = self
             .queue
             .submit(&self.queue_name, payload, priority_of(&batch))
@@ -429,7 +431,9 @@ impl Intake {
         let Some(point) = item.metric_point.as_ref() else {
             return Ok(());
         };
-        let size = tallyowl_collector_api::codec::encode_telemetry_item(item).len() as u64;
+        let size = tallyowl_collector_api::codec::encode_telemetry_item(item)
+            .map_err(|e| TallyOwlError::unencodable("The item", e))?
+            .len() as u64;
         self.series
             .admit(&tenancy.project_id, point, size, now)
             .inspect_err(|error| {
@@ -480,7 +484,9 @@ impl Intake {
                 "Send fewer properties, or raise the limit for this project.",
             ));
         }
-        let size = tallyowl_collector_api::codec::encode_telemetry_item(item).len() as i64;
+        let size = tallyowl_collector_api::codec::encode_telemetry_item(item)
+            .map_err(|e| TallyOwlError::unencodable("The item", e))?
+            .len() as i64;
         if size > self.limits.max_event_bytes {
             return Err(TallyOwlError::over_limit(
                 "Item",

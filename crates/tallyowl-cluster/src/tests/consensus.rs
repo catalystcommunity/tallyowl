@@ -801,6 +801,10 @@ fn a_committed_write_is_still_there_after_the_whole_group_restarts() {
         registry
             .await_leader(&group, ELECTION_PATIENCE)
             .expect("one voter elects itself");
+        // What is under test is the restart, not the speed of the fsync. On a
+        // busy CI host the default ten seconds was not enough (release run,
+        // 2026-11-25).
+        registry.set_write_timeout(Duration::from_secs(60));
 
         let replicated = ReplicatedStore::new(
             Arc::clone(&registry),
@@ -1317,6 +1321,10 @@ fn a_consensus_log_entry_is_compressed_and_reads_back() {
     node.registry
         .await_leader(&group, ELECTION_PATIENCE)
         .expect("a leader");
+    // What is under test is that the entry reads back, not how fast a large
+    // entry commits. On a busy CI host the default ten seconds was not enough
+    // (release run, 2026-11-25).
+    node.registry.set_write_timeout(Duration::from_secs(60));
 
     let store = ReplicatedStore::new(
         Arc::clone(&node.registry),

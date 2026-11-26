@@ -7278,3 +7278,27 @@ new signature with them is not a trust change. The original creation time is
 lost; the new descriptor runs ten years from the upgrade.
 
 **Cost to change:** cheap.
+
+## L205. Corndogs 0.8.1
+
+**Phase:** after 0.5.0
+**Decision:** on 2026-11-25, the Corndogs client moved from `corndogs/v0.8.0`
+(`f1b6ec6`) to `corndogs/v0.8.1` (`5d2a74f`). The chart image moved to
+`corndogs:0.8.1`, and the Helm chart that `kind-check` and DEPLOYMENT.md use
+moved from 0.6.0 to 0.6.1. Corndogs 0.8.1 is built with csilgen 0.3.3.
+
+- The generated client now calls `Transport::call_reply` and reads the typed
+  `ServiceError` reply arm. A refusal arrives as
+  `ClientError::ApplicationServiceError`, not `ClientError::Service`.
+  `as_refusal` in `tallyowl-queue` gives every refusal the `Service` shape
+  before it is classified. Without it, a refusal with codes 5, 7, or 8 (claim
+  ended) would become an internal error, and a worker would not let the task
+  go to another attempt.
+- `Carrier` passes `call_reply` through. The scripted test transport answers
+  through `call_reply` as a 0.8.1 store does, so the existing claim-ended
+  tests run on the new path.
+- `ClientError::Encode` is a non-retryable internal error. `ClientError::Decode`
+  is an internal error and is not sent again, because the store answered.
+
+**Cost to change:** cheap.
+

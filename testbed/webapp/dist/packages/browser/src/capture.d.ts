@@ -1,7 +1,7 @@
 import type { ConversionPayload, ErrorPayload, EventPayload, PageViewPayload, TelemetryItem } from "./collector-api.ts";
 import { write, type Value } from "./value.ts";
 export declare const SDK_NAME = "tallyowl-browser";
-export declare const SDK_VERSION = "0.4.1";
+export declare const SDK_VERSION = "0.5.0";
 /** Milliseconds since the Unix epoch. Every time TallyOwl stores is this. */
 export declare const nowMs: () => number;
 /**

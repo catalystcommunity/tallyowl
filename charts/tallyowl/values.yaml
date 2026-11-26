@@ -118,7 +118,7 @@ disruption:
 # ---------------------------------------------------------------------------
 # The image tag is the Corndogs build that the TallyOwl queue client is built
 # against. The workspace `Cargo.toml` pins the client at the commit of the
-# release `corndogs/v0.8.0` (`f1b6ec6`), and this is that release's image. This line is the
+# release `corndogs/v0.8.1` (`5d2a74f`), and this is that release's image. This line is the
 # only place the chart names the tag. The queue carries every receipt, so its
 # version must not change because a pod moved to another node. The chart
 # refuses the tag `latest`.
@@ -128,7 +128,7 @@ disruption:
 # a batch durable that a pod restart deletes.
 corndogsDeployment:
   enabled: false
-  image: containers.catalystsquad.com/public/catalystcommunity/corndogs:0.8.0
+  image: containers.catalystsquad.com/public/catalystcommunity/corndogs:0.8.1
   # The pull policy of the Corndogs image. Empty means `image.pullPolicy`, the
   # policy of the TallyOwl image. Set it when the two images come from
   # different places, for example a TallyOwl image built locally with

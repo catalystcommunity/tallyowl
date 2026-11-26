@@ -101,7 +101,7 @@ chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 
 # The Corndogs durable task queue client, generated from the Corndogs CSIL
 # contract in that project. Pinned by revision for the same reason.
-corndogs = { git = "https://github.com/catalystcommunity/corndogs", rev = "f1b6ec6086dd0341c09629791bfaa959397b3f9c", features = ["tls"] }
+corndogs = { git = "https://github.com/catalystcommunity/corndogs", rev = "5d2a74fa00e392a4813efef580779928edb29a1c", features = ["tls"] }
 
 # The storage format. `zstd` and `xxhash-rust` are on the hot path; `blake3`
 # gives a segment its content address, which needs collision resistance and the

@@ -282,6 +282,32 @@ impl corndogs::Transport for Carrier {
     fn call(&self, service: &str, op: &str, req: &[u8]) -> Result<Vec<u8>, ClientError> {
         self.0.call(service, op, req)
     }
+
+    fn call_reply(
+        &self,
+        service: &str,
+        op: &str,
+        req: &[u8],
+    ) -> Result<corndogs::WireReply, ClientError> {
+        self.0.call_reply(service, op, req)
+    }
+}
+
+/// One shape for the store's refusal.
+///
+/// From Corndogs 0.8.1 the generated client reads a typed `ServiceError` reply
+/// arm and gives it as `ApplicationServiceError`. Earlier clients gave the same
+/// refusal as `Service`. The code is the same in both, and the code is what
+/// says whether this worker's claim ended, so every refusal takes one shape
+/// before anything reads it.
+fn as_refusal(error: ClientError) -> ClientError {
+    match error {
+        ClientError::ApplicationServiceError(refusal) => ClientError::Service {
+            code: i64::try_from(refusal.code).unwrap_or(i64::MAX),
+            message: refusal.message,
+        },
+        other => other,
+    }
 }
 
 type Client = CorndogsClient<Carrier>;
@@ -472,7 +498,7 @@ impl CorndogsQueue {
         let outcome = loop {
             sends += 1;
             let outcome = match self.pool.run(|client| Ok(call(client)), |_| false) {
-                Ok(answer) => answer.map_err(Failure::Client),
+                Ok(answer) => answer.map_err(|e| Failure::Client(as_refusal(e))),
                 Err(PoolError::Busy) => Err(Failure::Busy),
                 Err(PoolError::TimedOut) => unreachable!("the closure never fails"),
                 Err(PoolError::Failed(reason)) => Err(Failure::Dial(reason)),
@@ -543,6 +569,16 @@ impl CorndogsQueue {
                 "We could not reach the durable store at {endpoint} to {what}. Every connection to it stayed busy for {} ms.",
                 self.call_timeout.as_millis()
             )),
+            Failure::Client(ClientError::Encode(reason)) => TallyOwlError::internal(format!(
+                "TallyOwl could not encode the request to {what}, so nothing was sent to the durable store at {endpoint}: {reason}. This is a defect in TallyOwl."
+            ))
+            .retryable(false),
+            Failure::Client(ClientError::Decode(reason)) => TallyOwlError::internal(format!(
+                "The durable store at {endpoint} answered the request to {what}, and TallyOwl could not read the answer: {reason}. The Corndogs release and the client that TallyOwl is built with may not match."
+            )),
+            Failure::Client(refusal @ ClientError::ApplicationServiceError(_)) => {
+                self.explain(Failure::Client(as_refusal(refusal)), what)
+            }
         }
     }
 }
@@ -568,6 +604,16 @@ impl Failure {
             Failure::Client(ClientError::Service { .. }) => "refused",
             Failure::Client(ClientError::Transport(reason)) if timed_out(reason) => "timed-out",
             Failure::Client(ClientError::Transport(_)) => "failed",
+            Failure::Client(ClientError::Encode(_)) => "unencodable",
+            Failure::Client(ClientError::Decode(_)) => "unreadable",
+            // `call` gives every refusal the `Service` shape first.
+            Failure::Client(ClientError::ApplicationServiceError(refusal)) => {
+                if claim_ended(i64::try_from(refusal.code).unwrap_or(i64::MAX)) {
+                    "claim-ended"
+                } else {
+                    "refused"
+                }
+            }
         }
     }
 }
@@ -1152,6 +1198,31 @@ mod tests {
             drop(sent);
             (self.answer)(op, seen)
         }
+
+        /// The reply as a Corndogs 0.8.1 store sends it: a refusal is the
+        /// typed `ServiceError` arm with status 0, not a client error.
+        fn call_reply(
+            &self,
+            service: &str,
+            op: &str,
+            req: &[u8],
+        ) -> Result<corndogs::WireReply, ClientError> {
+            match self.call(service, op, req) {
+                Ok(payload) => Ok(corndogs::WireReply {
+                    variant: Some(format!("{op}Response")),
+                    payload,
+                }),
+                Err(ClientError::Service { code, message }) => Ok(corndogs::WireReply {
+                    variant: Some("ServiceError".into()),
+                    payload: corndogs::encode_service_error(&corndogs::ServiceError {
+                        code: code as u64,
+                        message,
+                    })
+                    .unwrap(),
+                }),
+                Err(other) => Err(other),
+            }
+        }
     }
 
     fn server_info(features: &[&str], retention_seconds: i64) -> Vec<u8> {
@@ -1162,6 +1233,7 @@ mod tests {
             task_guard_policy: "required".into(),
             receipt_retention_seconds: retention_seconds,
         })
+        .unwrap()
     }
 
     fn task(uuid: &str) -> corndogs::GuardedTask {
@@ -1195,6 +1267,7 @@ mod tests {
             replayed: false,
             task: Some(task(uuid)),
         })
+        .unwrap()
     }
 
     const LOST: &str = "corndogs: outcome uncertain: connection reset by peer";
@@ -1336,6 +1409,29 @@ mod tests {
         let request = corndogs::decode_complete_guarded_task_request(&sends[0]).unwrap();
         assert_eq!(request.expected_revision, 2);
         assert_eq!(request.expected_state.as_deref(), Some(STATE_SENDING));
+    }
+
+    #[test]
+    fn an_answer_that_does_not_decode_is_not_sent_again() {
+        // The store answered, so the request is not lost. A resend would get
+        // the same answer, which TallyOwl still could not read.
+        let (queue, sent) = scripted(3_600, |_, _| Ok(vec![0xff]));
+        let claimed = ClaimedTask {
+            uuid: "t".into(),
+            payload: Vec::new(),
+            queue: "delivery".into(),
+            current_state: STATE_SENDING.into(),
+            priority: 0,
+            revision: 2,
+        };
+        let failure = queue.unwrap().complete(&claimed).expect_err("unreadable");
+        assert_eq!(failure.code, ErrorCode::Internal);
+        assert!(
+            failure.message.contains("could not read"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(sends_of(&sent, "CompleteGuardedTask").len(), 1);
     }
 
     #[test]

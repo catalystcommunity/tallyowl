@@ -860,7 +860,7 @@ the packaged chart.
 
    ```sh
    helm install corndogs \
-     https://github.com/catalystcommunity/corndogs/releases/download/helm_chart%2Fv0.6.0/corndogs-0.6.0.tgz \
+     https://github.com/catalystcommunity/corndogs/releases/download/helm_chart%2Fv0.6.1/corndogs-0.6.1.tgz \
      --namespace <namespace> \
      --set storage.backend=file --set postgresql.enabled=false \
      --set zalando_postgres.enabled=false \

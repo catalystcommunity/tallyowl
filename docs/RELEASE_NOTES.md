@@ -13,7 +13,7 @@ release job changes that heading to the version and the date of the release
 (`./tools.sh release stamp`). Do not write a version in the heading: the
 release job computes the version from the commits.
 
-## Not released yet
+## 0.5.0 — 2026-11-26
 
 - **Days on the dashboard.** A range picker above the charts selects the days
   that the charts show. With no days selected, the charts show the last 24

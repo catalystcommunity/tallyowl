@@ -385,10 +385,10 @@ PINNED_SHA256: dict[str, str] = {
     "https://dl.k8s.io/release/v1.36.4/bin/linux/arm64/kubectl":
         "0ecf44450ee6063bf19dd166a103ee6df4a9034455c2abce626e6eea657d73fb",
     # The digest GitHub records for the release asset (`gh release view
-    # helm_chart/v0.6.0 --json assets`). The Corndogs release publishes no
+    # helm_chart/v0.6.1 --json assets`). The Corndogs release publishes no
     # checksum file of its own.
-    "https://github.com/catalystcommunity/corndogs/releases/download/helm_chart%2Fv0.6.0/corndogs-0.6.0.tgz":
-        "150d20e0a45c8eed2fa1fd09f340ef3cdf1b6ceb8ab5dca32ff2df4da4fe8ec4",
+    "https://github.com/catalystcommunity/corndogs/releases/download/helm_chart%2Fv0.6.1/corndogs-0.6.1.tgz":
+        "0d76361c653edecd8f1bf87880f2b6619a68d613201128fc7e227b0ab18a6a6e",
     # The csilgen values are the digests GitHub records for each release asset
     # (`gh release view csilgen/v0.3.3 --json assets`). `_download` checks the
     # file against them.

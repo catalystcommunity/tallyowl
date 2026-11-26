@@ -13,6 +13,17 @@ release job changes that heading to the version and the date of the release
 (`./tools.sh release stamp`). Do not write a version in the heading: the
 release job computes the version from the commits.
 
+## Not released yet
+
+- **Corndogs moved from 0.8.0 to 0.8.1** (client `5d2a74f`, image
+  `corndogs:0.8.1`, Helm chart 0.6.1). Corndogs 0.8.1 is built with csilgen
+  0.3.3, which adds the generated input guards. The 0.8.1 client reads a
+  refusal from the store as a typed `ServiceError` reply. TallyOwl gives it
+  the same meaning as before, so a worker whose claim ended still gets
+  "another attempt runs it", and a resend still happens only for a lost
+  reply. A reply that TallyOwl cannot read is reported and not sent again.
+  TallyOwl still needs Corndogs 0.8.0 or later.
+
 ## 0.5.0 — 2026-11-26
 
 - **Days on the dashboard.** A range picker above the charts selects the days

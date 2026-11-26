@@ -60,7 +60,7 @@ EVENTS = 25
 
 #: The Corndogs chart for a shared Corndogs. It is not in a chart registry; its
 #: GitHub release attaches the package, and the digest is pinned in `deps.py`.
-CORNDOGS_CHART_VERSION = "0.6.0"
+CORNDOGS_CHART_VERSION = "0.6.1"
 CORNDOGS_CHART_URL = (
     "https://github.com/catalystcommunity/corndogs/releases/download/"
     f"helm_chart%2Fv{CORNDOGS_CHART_VERSION}/corndogs-{CORNDOGS_CHART_VERSION}.tgz"

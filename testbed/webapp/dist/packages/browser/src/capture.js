@@ -7,7 +7,7 @@
 // as the first arm. See docs/IMPLEMENTATION_LOG.md L017.
 import { property, write } from "./value.js";
 export const SDK_NAME = "tallyowl-browser";
-export const SDK_VERSION = "0.4.1";
+export const SDK_VERSION = "0.5.0";
 /** Milliseconds since the Unix epoch. Every time TallyOwl stores is this. */
 export const nowMs = () => Date.now();
 /**

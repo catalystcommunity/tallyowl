@@ -674,7 +674,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 [[package]]
 name = "corndogs"
 version = "0.0.0"
-source = "git+https://github.com/catalystcommunity/corndogs?rev=f1b6ec6086dd0341c09629791bfaa959397b3f9c#f1b6ec6086dd0341c09629791bfaa959397b3f9c"
+source = "git+https://github.com/catalystcommunity/corndogs?rev=5d2a74fa00e392a4813efef580779928edb29a1c#5d2a74fa00e392a4813efef580779928edb29a1c"
 dependencies = [
  "rustls",
  "rustls-native-certs",

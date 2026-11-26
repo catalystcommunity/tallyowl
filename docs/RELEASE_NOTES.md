@@ -13,7 +13,7 @@ release job changes that heading to the version and the date of the release
 (`./tools.sh release stamp`). Do not write a version in the heading: the
 release job computes the version from the commits.
 
-## Not released yet
+## 0.5.1 — 2026-11-26
 
 - **Corndogs moved from 0.8.0 to 0.8.1** (client `5d2a74f`, image
   `corndogs:0.8.1`, Helm chart 0.6.1). Corndogs 0.8.1 is built with csilgen
